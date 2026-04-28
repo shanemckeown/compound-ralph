@@ -93,25 +93,42 @@ Then health check:
 curl -sf https://aestheti.cc/api/health && echo "Production OK" || echo "Health check failed"
 ```
 
-### 5. Canary watch (LUCY-4oyl)
+### 5. Canary watch (LUCY-4oyl) — MANDATORY synchronous
 
 After traffic has shifted to the new revision, run the autonomous canary
-watcher synchronously. It polls `/api/health` every 30s for 10 min and
+watcher **synchronously**. It polls `/api/health` every 30s for 10 min and
 auto-rolls-back to the previous revision if 3 consecutive checks fail.
 
+**Capture the previous revision name BEFORE submitting the build** (i.e.
+before `gcloud builds submit`), then pass both --current and --previous so
+the rollback target is unambiguous (the rollback target without --previous
+is a heuristic; with --previous it's a fact).
+
 ```bash
+# Before build:
+PREV=$(gcloud run services describe aestheticc-next \
+  --region=europe-west2 --project=aestheticc \
+  --format='value(status.traffic[0].revisionName)')
+
+# After build + traffic shift:
+NEW=$(gcloud run services describe aestheticc-next \
+  --region=europe-west2 --project=aestheticc \
+  --format='value(status.latestReadyRevisionName)')
+
 cd /Users/shane/Documents/GitReBase/AestheticcNext
-./services/canary/canary.sh
+./services/canary/canary.sh --current "$NEW" --previous "$PREV"
 ```
 
 Exit code 0 = clean, retain new revision. Exit 1 = rollback executed
 (report this prominently in your summary). Exit 2 = breach + rollback
 errored (page Shane). Exit 3 = setup error (no rollback was attempted).
 
-If the user asked for a fast deploy and you're confident in the change,
-you may run canary in the background and report the build success
-immediately, but include the canary log path
-(`~/.canary/canary-<UTC-ISO>.log`) so the user can check after.
+**Do NOT** run canary in the background and declare deploy success early.
+The canary watch is the safety gate that defines "deploy success" — until
+it passes, the deploy isn't proven. If the user explicitly asks for a fast
+deploy, push back: the 10 min canary IS the price of safe autonomy. If
+they insist anyway, require explicit `--no-canary` opt-out + record the
+override in your final report.
 
 ### 6. Report Results
 
