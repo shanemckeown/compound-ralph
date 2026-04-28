@@ -1,0 +1,42 @@
+# Sensitive files
+credentials/
+*.key
+*.pem
+secrets.json
+mcp-needs-auth-cache.json
+
+# Session data (private prompts / chat history)
+projects/
+sessions/
+history.jsonl
+shell-snapshots/
+file-history/
+paste-cache/
+plans/
+observer/
+
+# Plugin / runtime cache
+plugins/
+cache/
+backups/
+statsig/
+
+# Cache files
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime logs / tmp
+*.log
+debug/
+bd-reap.stderr
+bd-reap.stdout
+.DS_Store
+
+# Local overrides (machine-specific)
+settings.local.json
+*.bak.*
+
+# Project-specific learnings (keep locally, don't publish)
+*_LEARNINGS.md
+!LEARNINGS.example.md

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plan-Build-QA Codex Verdict",
+  "description": "Schema for Codex adversarial-review output produced during /plan-build-qa Phase 3.",
+  "type": "object",
+  "required": ["verdict", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "NEEDS_CHANGES", "BLOCK"],
+      "description": "PASS = ship. NEEDS_CHANGES = Claude Opus iterates. BLOCK = stop, surface to Shane."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "One-paragraph executive summary of the review."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "file", "issue"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["S1", "S2", "S3"],
+            "description": "S1 = must fix before merge; S2 = should fix soon; S3 = nice-to-have."
+          },
+          "file": {"type": "string"},
+          "line": {"type": "integer", "minimum": 1},
+          "issue": {"type": "string"},
+          "fix": {"type": "string"}
+        }
+      }
+    },
+    "plan_acceptance_criteria_met": {
+      "type": "boolean",
+      "description": "True if every acceptance criterion in PLAN.md is verifiably satisfied by the diff."
+    },
+    "missing_tests": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Test cases the diff should add but didn't."
+    },
+    "tokens_used": {"type": "integer"},
+    "model": {"type": "string"}
+  }
+}

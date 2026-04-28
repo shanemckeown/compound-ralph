@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily morning bead triage at 07:30 UK time
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 Europe/London
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

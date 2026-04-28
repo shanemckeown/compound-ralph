@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# work-bead runner — thin wrapper for hermes-phase0
+# Invoked on-demand: run.sh <BEAD_ID>
+# All judgment lives in SKILL.md — this script only does deterministic orchestration.
+set -euo pipefail
+
+source /home/hermes/hermes/config.env
+
+# Load Anthropic API key from secret file (matches walkabout/ops-tasks pattern)
+export ANTHROPIC_API_KEY="$(cat "$ANTHROPIC_API_KEY_FILE")"
+
+# --- Args ---
+BEAD_ID="${1:?Usage: run.sh <BEAD_ID>}"
+BUDGET="${WORK_BEAD_BUDGET:-2.00}"
+MODEL="${WORK_BEAD_MODEL:-sonnet}"
+
+LOG_DIR="/home/hermes/hermes/logs"
+LOG_FILE="${LOG_DIR}/work-bead-$(date +%Y-%m-%d)-${BEAD_ID}.log"
+
+OBSIDIAN_DIR="/home/hermes/repos/obsidian"
+AESTHETICCNEXT_DIR="/home/hermes/repos/AestheticcNext"
+
+mkdir -p "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "=== work-bead run started $(date -Iseconds) — bead: $BEAD_ID ==="
+
+# --- Determine bead database ---
+if [[ "$BEAD_ID" == LUCY-* ]]; then
+    BEADS_DIR="$OBSIDIAN_DIR/.beads"
+elif [[ "$BEAD_ID" == AestheticcNext-* ]]; then
+    BEADS_DIR="$AESTHETICCNEXT_DIR/.beads"
+else
+    echo "ERROR: Unknown bead prefix: $BEAD_ID (expected LUCY-* or AestheticcNext-*)"
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — ERROR: unknown bead prefix: $BEAD_ID"
+    exit 1
+fi
+export BEADS_DIR
+
+# --- Validate bead exists and has AUTO label ---
+echo "Validating bead $BEAD_ID..."
+BEAD_INFO=$(BEADS_DIR="$BEADS_DIR" bd show "$BEAD_ID" 2>&1) || {
+    echo "ERROR: bead not found: $BEAD_ID"
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — ERROR: bead not found: $BEAD_ID"
+    exit 1
+}
+
+if ! echo "$BEAD_INFO" | grep -qi "LABELS:.*auto"; then
+    echo "ERROR: bead $BEAD_ID is not labelled AUTO. Refusing to work."
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — REFUSED: $BEAD_ID not labelled AUTO."
+    exit 1
+fi
+
+if echo "$BEAD_INFO" | grep -qi "CLOSED"; then
+    echo "Bead $BEAD_ID is already closed. Nothing to do."
+    exit 0
+fi
+
+# --- Pull latest main ---
+echo "Pulling AestheticcNext main..."
+cd "$AESTHETICCNEXT_DIR"
+git checkout main 2>&1 || true
+git pull --ff-only 2>&1 || echo "WARN: pull failed"
+
+# --- Create worktree ---
+BRANCH_NAME="hermes/${BEAD_ID}"
+WORKTREE_DIR="/home/hermes/worktrees/${BEAD_ID}"
+
+echo "Creating worktree at $WORKTREE_DIR (branch: $BRANCH_NAME)..."
+
+# Clean up stale worktree if it exists
+if [[ -d "$WORKTREE_DIR" ]]; then
+    echo "WARN: stale worktree found, removing..."
+    cd "$AESTHETICCNEXT_DIR"
+    git worktree remove --force "$WORKTREE_DIR" 2>&1 || rm -rf "$WORKTREE_DIR"
+fi
+git branch -D "$BRANCH_NAME" 2>/dev/null || true
+
+mkdir -p "$(dirname "$WORKTREE_DIR")"
+cd "$AESTHETICCNEXT_DIR"
+git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" main 2>&1 || {
+    echo "ERROR: worktree creation failed"
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — ERROR: worktree creation failed for $BEAD_ID"
+    exit 1
+}
+
+# Disable bd hooks in the worktree — they auto-export issues.jsonl to CWD
+# (worktree has no .beads/ dir, so jsonl ends up at the repo root in commits).
+# /dev/null contains no executables, so git skips all hooks here.
+cd "$WORKTREE_DIR"
+git config --local core.hooksPath /dev/null
+echo "Disabled bd hooks in worktree (core.hooksPath=/dev/null)"
+
+# --- Install dependencies ---
+echo "Installing npm dependencies in worktree..."
+npm install --ignore-scripts --legacy-peer-deps 2>&1 || {
+    echo "WARN: npm install --ignore-scripts --legacy-peer-deps failed, trying full install..."
+    npm install --legacy-peer-deps 2>&1 || echo "WARN: npm install failed — Claude will see tsc/lint errors"
+}
+
+# Symlink .env.local from main repo if available
+if [[ -f "$AESTHETICCNEXT_DIR/.env.local" ]]; then
+    ln -sf "$AESTHETICCNEXT_DIR/.env.local" "$WORKTREE_DIR/.env.local"
+fi
+
+# --- Mark bead in_progress ---
+echo "Marking bead in_progress..."
+BEADS_DIR="$BEADS_DIR" bd update "$BEAD_ID" --status in_progress 2>&1 || echo "WARN: status update failed"
+
+# --- Build skill prompt with parameters ---
+SKILL_FILE="/home/hermes/hermes/ops-tasks/work-bead.prompt.md"
+if [[ ! -f "$SKILL_FILE" ]]; then
+    echo "ERROR: Skill file not found at $SKILL_FILE"
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — ERROR: skill file missing"
+    exit 1
+fi
+
+# Strip YAML frontmatter — otherwise claude CLI parses leading `---` as a flag
+PROMPT=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2{print}' "$SKILL_FILE")
+
+# Inject parameters into the prompt
+PROMPT="${PROMPT//BEAD_ID_PLACEHOLDER/$BEAD_ID}"
+PROMPT="${PROMPT//BRANCH_NAME_PLACEHOLDER/$BRANCH_NAME}"
+PROMPT="${PROMPT//BEADS_DIR_PLACEHOLDER/$BEADS_DIR}"
+PROMPT=$(printf '%s\n\n## Bead Details\n\n```\n%s\n```' "$PROMPT" "$BEAD_INFO")
+
+# --- Invoke Claude in the worktree ---
+echo "Invoking Claude (model: $MODEL, budget: \$$BUDGET)..."
+cd "$WORKTREE_DIR"
+
+claude -p \
+    --dangerously-skip-permissions \
+    --max-budget-usd "$BUDGET" \
+    --model "$MODEL" \
+    "$PROMPT" \
+    2>&1 || {
+        EXIT_CODE=$?
+        echo "ERROR: Claude invocation failed (exit $EXIT_CODE)"
+        /home/hermes/hermes/bin/post.sh "WORK-BEAD — ERROR: Claude failed for $BEAD_ID (exit $EXIT_CODE). Worktree preserved at $WORKTREE_DIR"
+        exit 1
+    }
+
+# --- Post result to Slack ---
+PR_URL=$(cd "$WORKTREE_DIR" && gh pr list --head "$BRANCH_NAME" --json url --jq '.[0].url' 2>/dev/null || echo "")
+if [[ -n "$PR_URL" ]]; then
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — $BEAD_ID implemented. PR: $PR_URL"
+else
+    /home/hermes/hermes/bin/post.sh "WORK-BEAD — $BEAD_ID — Claude finished but no PR found. Check logs: $LOG_FILE"
+fi
+
+echo "=== work-bead run completed $(date -Iseconds) ==="
