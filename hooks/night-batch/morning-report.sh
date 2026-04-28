@@ -20,6 +20,11 @@ LOG="$ROOT/logs/morning-report.log"
 WORKTREE_BASE="$HOME/.worktrees/AestheticcNext"
 export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/Obsidian/.beads}"
 
+# Shane's Slack user ID for shane-gate v1 DMs (LUCY-c5x6). Hack The Planet
+# workspace, U-prefix from the slack-bot logs (`event.user` field). Public
+# user ID, not a secret — fine to commit.
+SHANE_SLACK_USER_ID="${SHANE_SLACK_USER_ID:-U0AAHJHPYCC}"
+
 mkdir -p "$PROCESSED" "$(dirname "$LOG")"
 ts() { date -u +%FT%TZ; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -147,3 +152,63 @@ done
 
 log "appended report to SHANE_TODO.md and moved $total markers to $PROCESSED/"
 echo "morning-report: $total bead(s) appended to $TODO"
+
+# ────────────────────────────────────────────────────────────────────────
+# shane-gate v1 (LUCY-c5x6) — Slack DM Shane the per-PR summary so he can
+# approve/kick-back from his phone. v1 is text-only with PR links; the
+# button-based "60-second gate" UX needs Slack admin (interactivity enable +
+# Lucy app reinstall) + slack-bot @action handler — filed as v1.5 follow-up.
+# Until v1.5 lands, Shane taps the PR link → uses GitHub mobile to merge.
+# ────────────────────────────────────────────────────────────────────────
+if [[ -n "${SHANE_SLACK_USER_ID:-}" ]] && [[ -f /Users/shane/Documents/GitReBase/claude-code-slack-bot/.env ]]; then
+  # Source the slack-bot's .env (chmod 600 so we trust it) just for the bot token.
+  # We post AS Lucy (the existing slack-bot identity) so the DM lands in the
+  # same thread Shane already uses for back-and-forth.
+  set -a
+  . /Users/shane/Documents/GitReBase/claude-code-slack-bot/.env 2>/dev/null
+  set +a
+
+  if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+    # Build a compact summary of what's in the queue.
+    summary_lines=()
+    if [[ $complete_count -gt 0 ]]; then
+      summary_lines+=("🟢 *${complete_count}* ready to merge")
+    fi
+    if [[ $reviewed_count -gt 0 ]]; then
+      summary_lines+=("🟡 *${reviewed_count}* need review (Gate 3 found BLOCKERs)")
+    fi
+    if [[ $guarded_count -gt 0 ]]; then
+      summary_lines+=("🔴 *${guarded_count}* guard failed")
+    fi
+    summary_text=$(IFS=' · '; echo "${summary_lines[*]}")
+
+    # Per-PR list with title + URL, max 8 to keep DM readable
+    pr_lines=""
+    pr_count=0
+    for f in "${complete_files[@]}" "${reviewed_files[@]}"; do
+      [[ $pr_count -ge 8 ]] && break
+      bead=$(basename "$f" | sed 's/\.[^.]*$//')
+      branch="auto/${bead}"
+      title=$(bead_title "$bead")
+      pr_url=$(gh pr list --head "$branch" --json url --jq '.[0].url' 2>/dev/null)
+      [[ -z "$pr_url" ]] && continue
+      status_emoji="🟢"
+      [[ "$f" == *.reviewed ]] && status_emoji="🟡"
+      pr_lines+="${status_emoji} <${pr_url}|${bead}>: ${title}\\n"
+      pr_count=$((pr_count + 1))
+    done
+
+    if [[ -n "$pr_lines" ]]; then
+      message_text="*Overnight auto-bead queue* — $(date +'%a %d %b %Y %H:%M %Z')\\n\\n${summary_text}\\n\\n${pr_lines}\\nReview: SHANE_TODO.md → tap a link → merge from GitHub mobile."
+
+      # Post DM via chat.postMessage. Channel = Shane's user ID; Slack opens
+      # the IM channel automatically when posting to a user.
+      curl -sS -X POST https://slack.com/api/chat.postMessage \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        -H "Content-Type: application/json; charset=utf-8" \
+        -d "{\"channel\":\"${SHANE_SLACK_USER_ID}\",\"text\":\"${message_text}\",\"unfurl_links\":false}" \
+        > "$ROOT/logs/shane-gate-dm.log" 2>&1
+      log "shane-gate v1: DM'd ${pr_count} PR(s) to ${SHANE_SLACK_USER_ID}"
+    fi
+  fi
+fi
