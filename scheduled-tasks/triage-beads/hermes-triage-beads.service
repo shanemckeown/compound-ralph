@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes triage-beads — morning AUTO/DECISION/CALL classifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/home/hermes
+ExecStart=/home/hermes/hermes/ops-tasks/triage-beads.run.sh
+TimeoutStartSec=300
+Environment=HOME=/home/hermes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
