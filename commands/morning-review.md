@@ -21,7 +21,8 @@ Drive the close-out of last night's night-batch results. Pull what shipped, summ
    - Title via `BEADS_DIR=/Users/shane/Documents/Obsidian/.beads bd show <BEAD_ID>` (need `dangerouslyDisableSandbox: true`)
    - Diff stat: `git -C ~/.worktrees/AestheticcNext/<BEAD_ID> diff --shortstat $(git ... merge-base HEAD main)..HEAD`
    - Commits: `git -C <worktree> log --oneline main..HEAD | head -5`
-   - Blind-claude verdict: read `<worktree>/.compound-review/blind-claude-<BEAD_ID>.txt` — surface SUMMARY + counts; quote BLOCKER lines verbatim if present
+   - **Codex (Gate 3 gating) verdict**: read `<worktree>/.compound-review/codex-<BEAD_ID>.txt` — surface SUMMARY + counts; quote BLOCKER lines verbatim if present
+   - **Blind-claude (parallel A/B) verdict**: read `<worktree>/.compound-review/blind-claude-<BEAD_ID>.txt` — secondary comparison data only, NOT a gate. Show counts inline; only quote BLOCKER lines if Codex disagreed.
    - PR state: `gh pr list --head auto/<BEAD_ID> --json url,state,title,number --jq '.[0]'`
 
 3. **Present rollup.** Single message, scannable:
@@ -30,9 +31,9 @@ Drive the close-out of last night's night-batch results. Pull what shipped, summ
 
    3 ready to merge · 1 needs your call · 1 guard failed
 
-   🟢 LUCY-XXXX: <title> — 4 files, 87 LOC, /review clean, blind-claude clean
-   🟢 LUCY-YYYY: <title> — 1 file, 12 LOC, /review clean, blind-claude 1 NIT
-   🟡 LUCY-ZZZZ: <title> — 6 files, 142 LOC, blind-claude flagged 2 BLOCKERs (null deref, missing await)
+   🟢 LUCY-XXXX: <title> — 4 files, 87 LOC, /review clean, codex clean (blind 0)
+   🟢 LUCY-YYYY: <title> — 1 file, 12 LOC, /review clean, codex clean (blind 1 NIT)
+   🟡 LUCY-ZZZZ: <title> — 6 files, 142 LOC, codex flagged 2 BLOCKERs (null deref, missing await) — blind agreed
    🔴 LUCY-AAAA: <title> — Gate 2 fail: touched lib/stripe/checkout.ts (forbidden)
 
    What's the call? You can say:
@@ -64,7 +65,8 @@ If push fails (network, auth), surface the exact error — don't pretend success
 ### `explore <BEAD>`
 Show in this chat (don't open separate files):
 - Full `git diff main..HEAD` for the bead's worktree (truncate at 200 lines, offer to show more)
-- Full blind-claude review text from `<worktree>/.compound-review/`
+- Full Codex (Gate 3 gating) review text from `<worktree>/.compound-review/codex-<BEAD>.txt`
+- Full blind-claude (parallel A/B) review text from `<worktree>/.compound-review/blind-claude-<BEAD>.txt` — only if Shane wants the comparison; otherwise mention "blind-claude verdict matched / disagreed"
 - Bead description
 - Any per-bead log output from `~/.claude/hooks/night-batch/logs/<BEAD>.log`
 
@@ -93,12 +95,12 @@ Close out — confirm nothing left in state/, summarise what merged/skipped/ling
 ## Tools needed
 
 - Bash (with `dangerouslyDisableSandbox: true` for `bd` calls — beads always needs it per memory)
-- Read (for reviewing diff files, log files, blind-claude review text)
+- Read (for reviewing diff files, log files, Codex + blind-claude review texts)
 - AskUserQuestion: NO — this is conversational, Shane drives directly via chat replies.
 
 ## What NOT to do
 
 - Do NOT auto-merge anything without Shane saying so. Even `.complete` beads (both gates passed) need explicit go-ahead.
-- Do NOT skip /review or /qa concerns silently. If blind-claude flagged BLOCKERs and Shane says "merge anyway," echo the BLOCKERs back and ask "merge despite the BLOCKERs? (yes/no)"
+- Do NOT skip /review or /qa concerns silently. If **Codex** flagged BLOCKERs (Codex is the gating reviewer per LUCY-llp1 closeout 2026-04-28) and Shane says "merge anyway," echo the BLOCKERs back and ask "merge despite the BLOCKERs? (yes/no)" — blind-claude BLOCKERs that Codex did NOT also flag are advisory, not gating, but still mention if they raise something Codex missed.
 - Do NOT auto-deploy after merges. Staging first, prod on explicit second go-ahead.
 - Do NOT delete the worktrees automatically. Shane may want to inspect after merge.
