@@ -49,19 +49,33 @@ runtime_exceeded() {
   [[ $elapsed -ge $MAX_RUNTIME_SECONDS ]]
 }
 
-# Pick eligible beads — must have label auto-eligible AND pass Gate 1 validator.
-# Filter by label (AND-mode), iterate priorities P2→P4 since bd ready takes
-# only one --priority int at a time. Each candidate is run through
-# check-eligibility.sh; failures are logged and skipped.
+# Pick eligible beads — must have label auto-eligible AND pass Gate 1 validator
+# AND not already have a state marker for tonight (any of .running, .complete,
+# .guarded, .reviewed, or archived under processed/<today>/).
+#
+# The dedup against state markers is the fix for the 2026-04-28 backfill loop
+# bug: a Gate 2-failed bead produces a .guarded marker; the prior version of
+# this function only filtered against the bd label, so the same bead was
+# re-dispatched up to 14 times in a row (until MAX_BEADS_PER_NIGHT). Now we
+# filter at selection time.
 pick_eligible() {
   local limit="$1"
   cd "$BEADS_REPO" || return 1
   local validator="$ROOT/check-eligibility.sh"
+  local today_processed="$STATE/processed/$(date +%Y-%m-%d)"
   local picked=0
   for prio in 2 3 4; do
     [[ $picked -ge $limit ]] && break
     while IFS= read -r id; do
       [[ $picked -ge $limit ]] && break
+
+      # Dedup: any marker for $id in this night's state? (active or processed)
+      if compgen -G "$STATE/${id}".* >/dev/null 2>&1 \
+         || compgen -G "$today_processed/${id}".* >/dev/null 2>&1; then
+        log "pick_eligible: $id already has a state marker tonight, skipping"
+        continue
+      fi
+
       if reason=$("$validator" "$id" 2>&1 >/dev/null); then
         echo "$id"
         picked=$((picked+1))
@@ -192,15 +206,13 @@ while ! runtime_exceeded; do
     break
   fi
 
-  # Backfill: while under concurrent cap and under nightly ceiling
+  # Backfill: while under concurrent cap and under nightly ceiling.
+  # pick_eligible() now filters out beads with any state marker for tonight,
+  # so the redundant dedup check that lived here previously (and used `break`
+  # incorrectly, killing the entire backfill on first stale match) is gone.
   while [[ $(active_count) -lt $MAX_CONCURRENT ]] && [[ $dispatched -lt $MAX_BEADS_PER_NIGHT ]]; do
     next=$(pick_eligible 1)
     [[ -z "$next" ]] && { log "backfill: no more eligible beads"; break; }
-    # Skip if already dispatched this night
-    if [[ -f "$STATE/${next}.running" ]] || [[ -f "$STATE/${next}.complete" ]]; then
-      log "backfill: $next already handled this night, skipping"
-      break
-    fi
     if [[ $DRY_RUN -eq 1 ]]; then
       log "DRY: would backfill $next"
     else

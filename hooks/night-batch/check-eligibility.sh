@@ -83,5 +83,39 @@ if [[ ${children_open:-0} -gt 0 ]]; then
   exit 1
 fi
 
+# 8. Reject if the auto/<BEAD> branch already exists and represents work that's
+# either merged or explicitly abandoned. 2026-04-29 fix for the overnight
+# empty-diff loop: a bead labelled auto-eligible whose work is already done
+# or rejected will keep producing Gate 2 fails until it's closed.
+REPO="/Users/shane/Documents/GitReBase/AestheticcNext"
+BRANCH="auto/$BEAD"
+if [[ -d "$REPO/.git" ]]; then
+  ( cd "$REPO" && git fetch origin --quiet 2>/dev/null ) || true
+
+  if cd "$REPO" 2>/dev/null && git ls-remote --heads origin "$BRANCH" 2>/dev/null | grep -q "$BRANCH"; then
+    # (a) all commits already merged → work done.
+    unmerged=$(git rev-list --count "origin/$BRANCH" --not origin/main 2>/dev/null || echo 999)
+    if [[ "${unmerged:-999}" -eq 0 ]]; then
+      echo "FAIL: auto/$BEAD branch's commits are all merged into main — work done, close the bead" >&2
+      exit 1
+    fi
+
+    # (b) PR was closed without merging → work rejected.
+    if command -v gh >/dev/null 2>&1; then
+      pr_info=$(gh pr list --repo shanemckeown/AestheticcNext \
+        --head "$BRANCH" --state all \
+        --json state,mergedAt --jq '.[0] // empty' 2>/dev/null || true)
+      if [[ -n "$pr_info" ]]; then
+        pr_state=$(echo "$pr_info" | grep -oE '"state":"[A-Z]+"' | cut -d'"' -f4)
+        pr_merged=$(echo "$pr_info" | grep -oE '"mergedAt":(null|"[^"]+")' | cut -d: -f2)
+        if [[ "$pr_state" == "CLOSED" && ( -z "$pr_merged" || "$pr_merged" == "null" ) ]]; then
+          echo "FAIL: PR for auto/$BEAD was closed without merging — work rejected, close the bead or refile fresh" >&2
+          exit 1
+        fi
+      fi
+    fi
+  fi
+fi
+
 echo "PASS: $BEAD eligible (type=$type prio=$priority labels=$labels)"
 exit 0
