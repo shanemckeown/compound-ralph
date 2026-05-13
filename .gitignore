@@ -33,6 +33,26 @@ bd-reap.stderr
 bd-reap.stdout
 .DS_Store
 
+# Claude Code runtime state (regenerated every session)
+daemon/
+daemon.lock
+daemon.status.json
+jobs/
+tasks/
+todos/
+telemetry/
+usage-data/
+stats-cache.json
+gh-pr-status-cache.json
+.last-cleanup
+
+# Night-batch runtime state + logs
+hooks/night-batch/state/
+hooks/night-batch/logs/
+
+# Old backups
+gstack-backup-*/
+
 # Local overrides (machine-specific)
 settings.local.json
 *.bak.*
