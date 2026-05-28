@@ -1,15 +1,16 @@
 ---
 name: land-batch
-version: 0.2.1
+version: 0.2.2
 description: |
   Meta-orchestrator for the parallel-worktree mess. Auto-discovers FINISHED
-  worktrees across all roots (Agent View, Conductor, ~/.worktrees) using each
-  worktree's own .claude/land-ready.json marker + live Claude session state,
-  lands the finished set onto a throwaway INTEGRATION BRANCH (never main),
-  green-gates + deploys it ONCE to staging, QAs every feature on that single
-  deploy, auto-fixes p0–p2 via codex until clean, then promotes to prod behind
-  ONE explicit human gate. Use when Shane says "merge, deploy and qa", "batch
-  land", "land the finished worktrees", "reconcile worktrees", or "land-batch".
+  worktrees across all roots (Agent View, Conductor, ~/.worktrees) from live
+  git + Claude session state (effectively_clean + ahead≥1 + non-active session
+  + premise check), lands the finished set onto a throwaway INTEGRATION BRANCH
+  (never main), green-gates + deploys it ONCE to staging, QAs every feature on
+  that single deploy, auto-fixes p0–p2 via codex until clean, then promotes to
+  prod behind ONE explicit human gate (parked until the post-19:30 deploy
+  window). Use when Shane says "merge, deploy and qa", "batch land", "land the
+  finished worktrees", "reconcile worktrees", or "land-batch".
 triggers:
   - merge deploy and qa
   - merge, deploy and qa
@@ -30,6 +31,20 @@ each Agent View / Conductor worktree one at a time. This picks up the whole set
 of *finished* worktrees, reconciles them together on an integration branch,
 deploys **once**, QAs **all of them on that single staging deploy**, fixes what's
 broken, and promotes to prod behind one confirm gate.
+
+**Two phases (timing).** Phase 1 — discover → merge → staging deploy → QA → fix
+— is window-agnostic and runs *anytime* (staging is unrestricted). Phase 2 — the
+single prod promotion (Step 8) — **parks until the post-19:30 BST deploy window**
+when clinics are off the app, and resumes there. A typical run does all of Phase
+1 in the afternoon and the prod gate in the evening.
+
+**What "finished" means.** Finish-detection is *heuristic*, not marker-gated: a
+worktree is finished when its session is non-active + the tree is clean + it is
+ahead≥1 + it passes the premise check (and is not sensitive/conflicting). The
+`.claude/land-ready.json` marker, when present, is an *optional* stronger signal
+and the carrier of the `bead_id` for close-mapping — it is **not** required, and
+its absence never blocks the auto path. (Nothing writes it yet; a producer is an
+optional follow-on.)
 
 > **Spec:** `ENG_REVIEW.md` (locked decisions) wins over `UPGRADE_PLAN.md` where
 > they differ. Read it if anything here is ambiguous.
@@ -55,12 +70,19 @@ broken, and promotes to prod behind one confirm gate.
 5. **Never auto-resolve a merge conflict.** Conflict → skip that branch, report,
    continue. Never touch a conflict in `lib/db/ drizzle/migrations/ lib/stripe/
    lib/auth/ lib/payments/ pages/api/auth|admin|webhooks/ lib/email/templates/`.
+   (`.beads/` is the one exception-that-isn't: it is excluded from the merge via a
+   local `merge=ours` driver in Step 3, so it never *produces* a conflict — its
+   truth lives in Dolt, the JSONL is regenerated churn. Not an auto-resolve; the
+   conflict simply never arises.)
 6. **Sensitive paths are never auto-landed.** Branches touching the paths above
    are held for explicit opt-in, even in auto mode. Also exclude any candidate
    whose merge *depends on* a held sensitive branch.
-7. **Marker is canonical; chat tail only vetoes.** A worktree auto-lands only if
-   it has `.claude/land-ready.json` with `ready:true` (+ clean + ahead≥1). The
-   transcript tail can *veto* (open question / blocker) but never *approve*.
+7. **Heuristic finish-gate; marker is an optional booster, not the gate.** A
+   worktree auto-lands when its session is non-active + tree `effectively_clean` +
+   ahead≥1 + passes the premise check + not sensitive + not conflicting. The
+   `.claude/land-ready.json` marker (if present) raises confidence and supplies
+   the `bead_id` for close-mapping, but its absence never blocks. The transcript
+   tail can *veto* (open question / blocker) but never *approve*.
 8. **Branch hygiene (CLAUDE.md AGENT VIEW rule):** before branching, `git fetch
    origin main`; if origin/main moved, re-run discovery.
 9. **Always verify traffic shift, not just build SUCCESS** (`feedback_verify_cloud_run_traffic`).
@@ -100,17 +122,22 @@ Read `$OUT`. The contract:
   clean, effectively_clean, age_days, conflicts_with_base, conflicting_files,
   touches_sensitive, sensitive_paths, retired, recommendation` **plus the v0.2
   finish fields:** (note: `clean` is raw `git status`; `effectively_clean`
-  ignores junk dirt — build output, lockfiles, beads churn, `lib/manifests/`,
-  `PLAN.md` — and is what the **finish gate uses**, since uncommitted junk
-  doesn't travel when a branch is merged.)
-  - `has_marker` — `.claude/land-ready.json` with `ready:true` present
-  - `land_ready` — the parsed marker object (or null)
+  ignores only genuinely non-travelling churn — build output, lockfiles, `.beads/`
+  churn — and is what the **finish gate uses**. As of v0.2.2 `lib/manifests/` and
+  `PLAN.md` are NO LONGER junk: they can be real uncommitted work, and a worktree
+  with real uncommitted edits must NOT auto-land, since they would not travel in
+  the merge.)
+  - `has_marker` — `.claude/land-ready.json` with `ready:true` present (optional
+    booster; NOT required)
+  - `land_ready` — the parsed marker object (or null); carries `bead_id` + summary
   - `session` — live Claude session joined to this worktree (or null); has
     `active, status, idle_min, sentinel, has_open_loop, last_assistant_tail`
-  - `auto_land` — **the deterministic finish verdict** (bool)
-  - `finish_signal` ∈ `marker | held-sensitive | blocked-session-active |
-    blocked-open-loop | blocked-not-clean-or-no-commits | legacy-low-confidence |
-    no-marker-no-signal | skip-merged | skip-conflict | skip-retired`
+  - `auto_land` — **the deterministic heuristic finish verdict** (bool):
+    `effectively_clean` + ahead≥1 + non-active session + premise-ok +
+    not-sensitive + not-conflicting + not-retired
+  - `finish_signal` ∈ `finished | held-sensitive | blocked-session-active |
+    blocked-open-loop | blocked-not-clean-or-no-commits | skip-merged |
+    skip-conflict | skip-retired`
 - `auto_land_count`, `active_sessions[]`, `sibling_conflicts[]`.
 
 The discovery engine is strictly read-only (`merge-tree` conflict detection, no
@@ -118,26 +145,29 @@ working-tree mutation) — running it just to *see* the queue is a safe dashboar
 
 If discovery errors or returns zero candidates, report and stop.
 
-## Step 2 — Autonomous finish-judgment (NO confirm gate)
+## Step 2 — Finish-judgment + batch selection (autonomous up to staging; ONE prod gate)
 
-> ⚠️ **Reality as of first live run (2026-05-28):** nothing yet writes the
-> `.claude/land-ready.json` marker, so `auto_land` is **always 0** — the
-> autonomous "WILL LAND" path never fires, and the **opt-in surfacing below
-> carries every run.** Treat opt-in as the primary UX until a marker *producer*
-> is built. This is open design decision #1 in `REVIEW_4.7.md` (for the 4.8 pass).
+> **Design (resolved 2026-05-28, 4.8 pass).** Auto-proceed is gated on the
+> **heuristics** — non-active session + `effectively_clean` + ahead≥1 + premise
+> check + not sensitive + not conflicting — **not** on a marker. The old
+> marker-gate made `auto_land` always 0 (nothing writes the marker), so nothing
+> auto-proceeded; basing it on heuristics is what makes the autonomous-up-to-
+> staging path actually fire. The `.claude/land-ready.json` marker is now an
+> optional confidence booster + `bead_id` carrier (Guardrail #7). **`main` never
+> moves here** — only at the Step 8 prod gate, which parks until the evening
+> window. So "autonomous" = autonomous *through staging + QA*; prod is always
+> your one explicit gate.
 
 The finished set = `candidates` where `auto_land == true`. This is deterministic
-(computed in `discover.sh` per the marker gate) — **do not re-litigate it with
-prose.** Render a scannable table for the record, then proceed:
+(computed in `discover.sh` from the heuristic gate) — **do not re-litigate it
+with prose.** Render a scannable table for the record, then proceed:
 
 ```
-WILL LAND (auto_land=true, marker present)
-  ✓ comms-editability        LUCY-…   PR#…   +4/-0   marker ✓   idle 22m
-SURFACED — finished but no marker (legacy, opt-in only this run)
-  ◐ goal/aestheticnext-cjf4p  —       PR#329  +3/-0   result: sentinel, clean   ← opt in?
+WILL LAND (auto_land=true — finished via heuristic gate)
+  ✓ comms-editability        LUCY-…   PR#…   +4/-0   clean   idle 22m   (marker ✓ optional)
 HELD — touches sensitive paths (explicit opt-in required)
   ⚠ fix/glp1-migration-bp6sr  —       —       drizzle/migrations/
-BLOCKED — still active / open loop
+BLOCKED — still active / open loop / dirty
   ⏳ goal/…-x8ftu   session busy        |  ⏳ goal/…-1ms7s  dirty tree
 SKIP — already merged (ahead=0) / conflict / retired
   ✗ <branch> …    (offer bulk prune of the ahead=0 + retired set)
@@ -145,11 +175,12 @@ SIBLING CONFLICTS (can't both land this round)
   ⚡ branch-a ↔ branch-b : app/shared.tsx
 ```
 
-- `auto_land=true` items proceed **without a confirm gate** (Shane's locked
-  decision: fully autonomous finish-judgment).
-- `legacy-low-confidence` and `held-sensitive` items are **not** auto-landed.
-  Surface them; only include on explicit Shane opt-in (use AskUserQuestion *only*
-  for these opt-ins, not for the auto set).
+- `auto_land=true` items proceed **without a per-branch confirm gate** — the
+  heuristic gate is the decision. (Still inside a live session; `main` untouched
+  until Step 8.)
+- `held-sensitive` items are **not** auto-landed. Surface them; include only on
+  explicit Shane opt-in (use AskUserQuestion *only* for these opt-ins, not for
+  the auto set). A missing marker no longer downgrades anything.
 - For sibling-conflict pairs, include at most one (the loser rebases next round).
 - Offer bulk prune of `skip-merged` (ahead=0) + `skip-retired` per
   `feedback_worktree_cleanup` (only reap ahead=0 + clean, `--force`, re-verify
@@ -173,6 +204,13 @@ INT="land-batch/$TS"
 git fetch origin main --quiet
 git branch "$INT" origin/main
 git checkout "$INT"
+
+# decision #5 — never merge .beads/ (pure churn; truth lives in Dolt). A local
+# merge=ours driver means .beads/ conflicts never arise (keeps Guardrail #5
+# absolute — nothing to auto-resolve). .git/info/attributes is local + uncommitted.
+git config merge.ours.driver true
+mkdir -p .git/info
+grep -qxF '.beads/** merge=ours' .git/info/attributes 2>/dev/null || echo '.beads/** merge=ours' >> .git/info/attributes
 
 for BR in $FINISHED_BRANCHES; do
   if ! git merge-tree --write-tree HEAD "$BR" >/dev/null 2>&1; then
@@ -201,7 +239,12 @@ npm run typecheck && npm run lint && npm run test
   green. Surface which feature broke the build; land the green subset, kick the
   red one back to its worktree. Never deploy red.
 
-## Step 5 — ONE staging deploy FROM the integration branch
+## Step 5 — ONE staging deploy FROM the integration branch  ·  *(Phase 1, anytime)*
+
+> **Phase 1 (this step + QA + fix, Steps 5–7) is window-agnostic** — staging is
+> unrestricted, so run it whenever the batch is ready (typically the afternoon).
+> **Phase 2 (the prod gate, Step 8) parks until the post-19:30 BST window.** Do
+> all of Phase 1 now; resume Step 8 in the evening.
 
 `cloudbuild-staging.yaml` builds the **local working tree** it's submitted with
 (trailing `.` = upload context) and tags the image `:staging` — it is **not**
@@ -299,15 +342,18 @@ After QA on the integration branch's staging deploy:
      offer per-feature revert (`git revert -m 1 <merge-sha>` on `$INT`).
 3. p3 cosmetic: documented only, never blocks prod.
 
-## Step 8 — Prod promotion (behind ONE gate)
+## Step 8 — Prod promotion (behind ONE gate)  ·  *(Phase 2, post-19:30 BST)*
 
 Only when staging QA is clean (zero open p0–p2):
 
 1. Print the final report (landed features, fixes applied, staging revision
    serving 100%, integration branch name).
 2. **AskUserQuestion: "Deploy this batch to PROD?"** — the only interactive gate.
-   (Respect deploy windows / `feedback_no_self_deploy_staging` — if outside the
-   window, say so and offer to hold.)
+   **Default to parking until the post-19:30 BST window** (clinics live
+   08:00–19:30; `feedback_no_self_deploy_staging` + CLAUDE.md deploy windows). If
+   it's before 19:30, say so and hold the green integration branch for the
+   evening rather than asking to deploy now (S1 hotfix is the only exception,
+   with explicit Shane confirmation).
 3. On **yes**:
    ```bash
    git checkout main && git merge --ff-only "$INT"   # main moves only now
@@ -362,13 +408,16 @@ End by stating plainly what (if anything) needs Shane next.
 
 ## Notes / limitations
 
-- **Session→worktree join is best-effort.** `/goal` bg jobs run with
-  `cwd=$HOME`, not the worktree, so the cwd join misses them; there's a
-  secondary bead-short-id-in-session-name fallback, but it only fires when the
-  branch name yields a parseable bead id (the lowercase `goal/aestheticnext-*`
-  branches don't). **The real finish guards are the marker + clean-tree +
-  ahead≥1 checks** — the session-active flag is an *additional* veto, not the
-  primary gate. Nothing auto-lands without a marker regardless.
+- **Worktree→branch→bead is the reliable join.** Transcript dirs under
+  `~/.claude/projects/` encode the worktree path (e.g.
+  `-Users-shane--worktrees-AestheticcNext-AestheticcNext-kn5`), and `git -C
+  <worktree> branch --show-current` → branch → `bead_id` (parse fixed in v0.2.2 to
+  handle `goal/(a|A)estheticcnext-<id>`). **The Agent View tab *name* is NOT on
+  disk** (recon 2026-05-28: `~/.claude/sessions/<pid>.json` has no `name` field),
+  so close-mapping keys on `bead_id`, which Agent View shows in the tab
+  name/description. **The finish guards are `effectively_clean` + ahead≥1 +
+  non-active session + premise-check**; the marker, when present, is an additional
+  confidence booster + `bead_id` source, never required.
 - **Tests:** `bin/sessions.py` is covered by `tests/test_sessions.py`. pytest
   isn't on system python; run via the skill-local venv:
   `~/.claude/skills/land-batch/.venv/bin/python -m pytest ~/.claude/skills/land-batch/tests/ -q`.
@@ -376,6 +425,9 @@ End by stating plainly what (if anything) needs Shane next.
   `python3`.
 - Retired/stale patterns live in `~/.claude/skills/land-batch/retired.txt` — add
   branch substrings or bead IDs there to keep dead moonshots out of the batch.
-- The **finish marker** a worktree's own session should drop when done:
-  `.claude/land-ready.json` = `{branch, base_sha, tests_run, known_issues,
-  touched_paths, ready:true}`.
+- The **finish marker** (OPTIONAL — nothing writes it yet; a producer is a
+  follow-on, see the LUCY marker-producer bead) a worktree's own session *may*
+  drop when done: `.claude/land-ready.json` = `{branch, bead_id, summary,
+  base_sha, tests_run, known_issues, touched_paths, ready:true}`. Its jobs:
+  stronger finish-attestation than the heuristics alone, and carrying `bead_id`
+  for clean close-mapping. The skill works fully without it.

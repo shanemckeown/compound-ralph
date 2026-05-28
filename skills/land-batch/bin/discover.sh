@@ -176,7 +176,7 @@ def parse_bead_id(branch, worktree_path):
         if lucy_match:
             return "LUCY-" + lucy_match.group(1)
 
-        aestheticcnext_match = re.search(r"(?<![A-Za-z0-9])AestheticcNext-([a-z0-9]{4,5})\b", source)
+        aestheticcnext_match = re.search(r"(?<![A-Za-z0-9])(?i:aestheticcnext)-([a-z0-9]{4,6})\b", source)
         if aestheticcnext_match:
             return "AestheticcNext-" + aestheticcnext_match.group(1)
 
@@ -214,14 +214,11 @@ def ahead_behind(repo, base_ref, branch_ref):
 
 # Incidental dirt that does NOT travel when a branch is merged (what lands is the
 # committed branch, not the worktree's uncommitted state) and so must not block a
-# landable worktree: build output, lockfile churn, beads log, goal scaffolding,
-# and this repo's generated content manifests.
+# landable worktree: build output, lockfile churn, and beads state churn.
 JUNK_DIRT_RE = re.compile(
     r"(^|/)(node_modules|\.next|dist|build|coverage|\.turbo)(/|$)"
-    r"|(^|/)(issues\.jsonl|export-state\.json|\.DS_Store|bun\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|PLAN\.md)$"
+    r"|(^|/)(issues\.jsonl|export-state\.json|\.DS_Store|bun\.lock|bun\.lockb|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$"
     r"|^\.beads/"
-    r"|^\.plans/"
-    r"|^lib/manifests/"
     r"|(^|/)\.build-[^/]*$"
 )
 
@@ -455,7 +452,7 @@ def read_marker(worktree_path):
 def finish_gate(recommendation, has_marker, session, clean, ahead):
     """Deterministic finish judgment (ENG_REVIEW.md D2).
 
-    Marker is the only thing that grants auto-land; the chat tail can only veto.
+    Marker is optional confidence metadata; heuristic state grants auto-land.
     Returns (auto_land: bool, finish_signal: str).
     """
     if recommendation == "review-sensitive":
@@ -468,13 +465,7 @@ def finish_gate(recommendation, has_marker, session, clean, ahead):
         return False, "blocked-open-loop"
     if not clean or ahead < 1:
         return False, "blocked-not-clean-or-no-commits"
-    if has_marker:
-        return True, "marker"
-    # legacy worktree, no marker: clean + result sentinel = low-confidence, NOT
-    # auto-landed on the first run — surfaced for explicit opt-in instead.
-    if session and session.get("sentinel") == "result":
-        return False, "legacy-low-confidence"
-    return False, "no-marker-no-signal"
+    return True, "finished"
 
 
 def main():
