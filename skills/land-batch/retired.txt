@@ -1,0 +1,5 @@
+# Branch-name patterns or bead IDs that should NEVER be auto-landed.
+# Matched as substrings against branch name and bead id. One per line. # = comment.
+LUCY-REBOOK-001
+LUCY-RECS-001
+feature/LUCY-RECS-001-treatment-recommendations
