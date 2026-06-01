@@ -32,7 +32,7 @@ Call `retrieve_balance` via Stripe MCP for available/pending balance.
 Call `list_disputes` via Stripe MCP — flag any open disputes with deadlines.
 
 ### 5. Sentry Errors
-Call `get_sentry_errors` with hours=24 via aestheticc-ops MCP. Flag new errors, especially in payment/booking/auth flows.
+Call `get_sentry_errors` with hours=24 via aestheticc-ops MCP. Flag new errors, especially in payment/booking/auth flows. Severity follows the Sentry `level` field FIRST, never event count: a `level: warning` or handled client error (`api.client_error.*` / any 4xx) is a correctly-rejected request, not a crash — keep it LOW/MEDIUM even on a critical path, and treat a high count as volume (often bots/retries), not severity. Beware over-grouped issues (one `api.client_error` group can span many endpoints) — don't quote a single sampled endpoint as the whole issue.
 
 ### 6. Email Campaigns
 Call `get_campaign_health` via aestheticc-ops MCP. This returns campaigns, analytics, unread replies, and alerts in one call. Flag any unread replies older than 24h (marked as COLD LEAD in the response).
