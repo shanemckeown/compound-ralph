@@ -14,7 +14,7 @@ if [[ -z "$BEAD" ]]; then
   exit 2
 fi
 
-export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/Obsidian/.beads}"
+export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/GitReBase/AestheticcNext/.beads}"
 
 # Forbidden keywords (case-insensitive). Hits in title OR description fail.
 FORBIDDEN_REGEX='(schema|migration|payment|refund|stripe|auth|RLS|multi-tenant|GDPR|deletion|secret|token|rotate|deploy|cron-changing|webhook|cloudbuild|terraform|infra)'
@@ -43,16 +43,26 @@ if [[ "$status" != "OPEN" ]]; then
   exit 1
 fi
 
-# 2. Has auto-eligible label
-if ! echo ",$labels," | grep -q ",auto-eligible,"; then
-  echo "FAIL: missing auto-eligible label (have: $labels)" >&2
+# 2. Has any auto-* prefixed label (auto, auto-eligible, AUTO, etc).
+# Pre-2026-05-01 this required the literal `auto-eligible` label, which
+# nothing was tagged with. Shane was using `auto` + `scope:s/m/xs` instead;
+# now any `auto*` label counts as the eligibility signal.
+if ! echo ",$labels," | grep -qiE ',auto[a-z0-9-]*,'; then
+  echo "FAIL: missing auto-* label (have: $labels)" >&2
   exit 1
 fi
 
-# 3. Type
+# 3. Type — task/bug/chore always OK; feature OK only when scope:xs or scope:s
+# (scope:m/l features are too big for one auto-bead run; bead the slice instead)
 case "$type" in
   task|bug|chore) ;;
-  *) echo "FAIL: type=$type (must be task/bug/chore)" >&2; exit 1;;
+  feature)
+    if ! echo ",$labels," | grep -qE ',scope:(xs|s),'; then
+      echo "FAIL: type=feature requires scope:xs or scope:s label (have: $labels)" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "FAIL: type=$type (must be task/bug/chore or feature with scope:xs/s)" >&2; exit 1;;
 esac
 
 # 4. Priority

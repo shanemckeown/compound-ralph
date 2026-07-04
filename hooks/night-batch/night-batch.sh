@@ -31,9 +31,17 @@ done
 ROOT="$HOME/.claude/hooks/night-batch"
 LOG="$ROOT/logs/orchestrator.log"
 STATE="$ROOT/state"
+ZERO_STREAK_FILE="$STATE/zero-eligible-streak"
+ZERO_ALERT_FILE="$STATE/zero-eligible-alert"
 DISPATCH="$ROOT/dispatch.sh"
-BEADS_REPO="/Users/shane/Documents/Obsidian"
+# Pivot 2026-05-01: night-batch reads from AestheticcNext, not the vault.
+# Vault beads are mostly Shane-tasks (sales, calls, emails); the codeable
+# backlog (where /do-bead can actually produce a diff) lives in AestheticcNext.
+BEADS_REPO="/Users/shane/Documents/GitReBase/AestheticcNext"
 export BEADS_DIR="${BEADS_DIR:-$BEADS_REPO/.beads}"
+# Bead ID prefix used by every grep/regex against `bd ready` output below.
+# Vault beads were `LUCY-<slug>`; AestheticcNext beads are `AestheticcNext-<slug>`.
+BEAD_PREFIX="AestheticcNext"
 
 mkdir -p "$ROOT/logs" "$STATE"
 ts() { date -u +%FT%TZ; }
@@ -64,9 +72,12 @@ pick_eligible() {
   local validator="$ROOT/check-eligibility.sh"
   local today_processed="$STATE/processed/$(date +%Y-%m-%d)"
   local picked=0
+  local scan_limit=2000
   for prio in 2 3 4; do
     [[ $picked -ge $limit ]] && break
+    local scanned=0
     while IFS= read -r id; do
+      scanned=$((scanned+1))
       [[ $picked -ge $limit ]] && break
 
       # Dedup: any marker for $id in this night's state? (active or processed)
@@ -82,8 +93,18 @@ pick_eligible() {
       else
         log "Gate 1 reject $id: $reason"
       fi
-    done < <(bd ready --priority "$prio" --label auto-eligible --limit "$limit" 2>/dev/null \
-      | grep -oE 'LUCY-[a-z0-9]+')
+    # `bd ready --label-any` silently ignores the filter on some bd versions
+    # (LUCY-2026-05-01 finding) — instead we pull all ready beads at this
+    # priority and let check-eligibility.sh do the auto-* label match
+    # (case-insensitive, matches `auto`, `AUTO`, `auto-eligible`, etc).
+    # Pull a generous slice so we don't miss auto-labelled beads buried
+    # behind unrelated P2/P3 work; validator filters fast (<10ms each).
+    done < <(bd ready --priority "$prio" --limit "$scan_limit" --plain 2>/dev/null \
+      | grep -oE "${BEAD_PREFIX}-[a-z0-9]+")
+    log "pick_eligible: scanned $scanned ready beads at P$prio"
+    if [[ $scanned -eq $scan_limit ]]; then
+      log "WARN: P$prio band hit scan limit ($scanned) — possible truncation, raise limit"
+    fi
   done
 }
 
@@ -140,6 +161,19 @@ reap_completed() {
           if ! mv "$marker" "$STATE/${bead}.complete" 2>/dev/null; then
             log "  $bead: ⚠️  ALERT — mv to .complete failed; marker stuck at .running"
           fi
+          # 🔴 DISABLED 2026-07-04 (LUCY-d5rb review): per-bead staging previews
+          # were killed 2026-05-15 (tagged Cloud Run revisions stay warm/billed
+          # — the ~£400/mo leak; memory feedback_deploy_staging_preview_killed).
+          # This spawn was uncommitted drift that never fired only because the
+          # pipeline was starved of eligible beads. cloudbuild-staging-preview.yaml
+          # is deleted from the repo, and unattended per-bead `gcloud builds
+          # submit` violates the no-autonomous-deploy rule. QA surface = main
+          # staging via /land-batch. Do not re-enable without Shane.
+          # local preview="$ROOT/staging-preview-deploy.sh"
+          # if [[ -x "$preview" ]]; then
+          #   log "  $bead: spawning staging-preview deploy (background)"
+          #   nohup "$preview" "$bead" >>"$ROOT/logs/${bead}.preview.log" 2>&1 &
+          # fi
         else
           log "  $bead: Gate 3 FAIL (codex) — $(grep '^FAIL:' "$gate3_dir/codex.log" | head -1)"
           if ! mv "$marker" "$STATE/${bead}.reviewed" 2>/dev/null; then
@@ -170,13 +204,28 @@ reap_completed() {
 # === Main loop ===
 dispatched=0
 queue=$(pick_eligible "$MAX_BEADS_PER_NIGHT")
-queue_count=$(echo "$queue" | grep -c "^LUCY-" || true)
+queue_count=$(echo "$queue" | grep -c "^${BEAD_PREFIX}-" || true)
 log "found $queue_count eligible beads in initial queue"
 
 if [[ $queue_count -eq 0 ]]; then
+  zero_streak=0
+  if [[ -f "$ZERO_STREAK_FILE" ]]; then
+    zero_streak=$(tr -dc '0-9' < "$ZERO_STREAK_FILE" | head -c 20)
+    zero_streak=${zero_streak:-0}
+  fi
+  zero_streak=$((zero_streak+1))
+  printf '%s\n' "$zero_streak" > "$ZERO_STREAK_FILE"
+  if [[ $zero_streak -ge 2 ]]; then
+    zero_alert="ALERT: $zero_streak consecutive nights with ZERO eligible beads — auto lane is starved; run lane triage (see LUCY-d5rb)"
+    log "$zero_alert"
+    printf '%s\n' "$zero_alert" > "$ZERO_ALERT_FILE"
+  fi
   log "no eligible beads — exiting clean"
   exit 0
 fi
+
+printf '0\n' > "$ZERO_STREAK_FILE"
+rm -f "$ZERO_ALERT_FILE"
 
 # Initial fan-out up to MAX_CONCURRENT
 for bead in $queue; do

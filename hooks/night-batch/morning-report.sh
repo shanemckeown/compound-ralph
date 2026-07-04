@@ -17,8 +17,9 @@ STATE="$ROOT/state"
 PROCESSED="$STATE/processed/$(date +%Y-%m-%d)"
 TODO="/Users/shane/Documents/Obsidian/Aestheticc/Ops/Hermes/SHANE_TODO.md"
 LOG="$ROOT/logs/morning-report.log"
+ZERO_ALERT_FILE="$STATE/zero-eligible-alert"
 WORKTREE_BASE="$HOME/.worktrees/AestheticcNext"
-export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/Obsidian/.beads}"
+export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/GitReBase/AestheticcNext/.beads}"
 
 # Shane's Slack user ID for shane-gate v1 DMs (LUCY-c5x6). Hack The Planet
 # workspace, U-prefix from the slack-bot logs (`event.user` field). Public
@@ -39,9 +40,31 @@ complete_count=${#complete_files[@]}
 guarded_count=${#guarded_files[@]}
 reviewed_count=${#reviewed_files[@]}
 total=$((complete_count + guarded_count + reviewed_count))
+zero_alert=""
+if [[ -f "$ZERO_ALERT_FILE" ]]; then
+  zero_alert=$(head -1 "$ZERO_ALERT_FILE" 2>/dev/null || true)
+fi
+
+if [[ $total -eq 0 && -z "$zero_alert" ]]; then
+  log "no markers to report — exiting"
+  exit 0
+fi
 
 if [[ $total -eq 0 ]]; then
-  log "no markers to report — exiting"
+  {
+    echo ""
+    echo "---"
+    echo ""
+    echo "## Overnight runs — $(date +"%Y-%m-%d %H:%M %Z")"
+    echo ""
+    echo "$zero_alert"
+    echo ""
+    echo "_Report log: \`~/.claude/hooks/night-batch/logs/morning-report.log\`_"
+    echo ""
+  } >> "$TODO"
+  rm -f "$ZERO_ALERT_FILE"
+  log "appended zero-eligible alert to SHANE_TODO.md"
+  echo "morning-report: zero-eligible alert appended to $TODO"
   exit 0
 fi
 
@@ -70,7 +93,7 @@ render_bead() {
   esac
 
   echo ""
-  echo "### $emoji LUCY-${bead#LUCY-} — $title"
+  echo "### $emoji $bead — $title"
   echo "**Status:** \`.$status\`"
 
   if [[ -d "$worktree" ]]; then
@@ -111,6 +134,19 @@ render_bead() {
     echo "**PR:** _(not pushed yet — sandbox or push failure; commits are local on \`$branch\`)_"
   fi
 
+  # Staging preview URL — set by staging-preview-deploy.sh, may be ready/pending/failed
+  local preview_marker="$STATE/${bead}.preview-url"
+  if [[ -f "$preview_marker" ]]; then
+    local p_status=$(grep '^status=' "$preview_marker" | head -1 | cut -d= -f2)
+    local p_url=$(grep '^url=' "$preview_marker" | head -1 | cut -d= -f2)
+    case "$p_status" in
+      ready)   echo "**Preview:** $p_url ✅";;
+      pending) echo "**Preview:** $p_url _(build in progress)_";;
+      failed)  echo "**Preview:** _(deploy failed — see \`logs/${bead}.preview.log\`)_";;
+      *)       echo "**Preview:** _(unknown state: $p_status)_";;
+    esac
+  fi
+
   echo "**Action:** $action"
   echo ""
 }
@@ -145,9 +181,14 @@ EOF
   echo ""
 } >> "$TODO"
 
-# Archive processed markers
+# Archive processed markers (state markers + preview-url markers)
 for f in "${complete_files[@]}" "${reviewed_files[@]}" "${guarded_files[@]}"; do
   mv "$f" "$PROCESSED/" 2>/dev/null
+  # Also archive the matching .preview-url marker if any (so the next night's
+  # run starts clean even if Shane never opened /morning-review)
+  bead=$(basename "$f" | sed -E 's/\.(complete|guarded|reviewed)$//')
+  preview_marker="$STATE/${bead}.preview-url"
+  [[ -f "$preview_marker" ]] && mv "$preview_marker" "$PROCESSED/" 2>/dev/null
 done
 
 log "appended report to SHANE_TODO.md and moved $total markers to $PROCESSED/"
@@ -197,12 +238,41 @@ if [[ -n "${SHANE_SLACK_USER_ID:-}" ]] && [[ -f /Users/shane/Documents/GitReBase
       [[ -z "$pr_url" ]] && continue
       status_emoji="🟢"
       [[ "$f" == *.reviewed ]] && status_emoji="🟡"
-      pr_lines+="${status_emoji} <${pr_url}|${bead}>: ${title}"$'\n'
+      # Preview URL: ready/pending/failed/none
+      preview_link=""
+      preview_marker="$STATE/${bead}.preview-url"
+      if [[ -f "$preview_marker" ]]; then
+        p_status=$(grep '^status=' "$preview_marker" | head -1 | cut -d= -f2)
+        p_url=$(grep '^url=' "$preview_marker" | head -1 | cut -d= -f2)
+        case "$p_status" in
+          ready)   preview_link=" · <${p_url}|preview>";;
+          pending) preview_link=" · _preview building_";;
+          failed)  preview_link=" · _preview failed_";;
+        esac
+      fi
+      pr_lines+="${status_emoji} <${pr_url}|${bead}>: ${title}${preview_link}"$'\n'
       pr_count=$((pr_count + 1))
     done
 
-    if [[ -n "$pr_lines" ]]; then
-      message_text="*Overnight auto-bead queue* — $(date +'%a %d %b %Y %H:%M %Z')"$'\n\n'"${summary_text}"$'\n\n'"${pr_lines}"$'\n'"Review: SHANE_TODO.md → tap a link → merge from GitHub mobile."
+    # 🌙 Dreams: list overnight dream-digest files (Brain/Dreams) from the last
+    # ~26h as plain paths, so Shane can open + triage them into /ceo-respond.
+    dream_lines=""
+    DREAM_ROOT="/Users/shane/Documents/Obsidian/Aestheticc/Brain/Dreams"
+    if [[ -d "$DREAM_ROOT" ]]; then
+      while IFS= read -r df; do
+        [[ -z "$df" ]] && continue
+        dream_lines+="🌙 Aestheticc/Brain/Dreams/${df#"$DREAM_ROOT"/}"$'\n'
+      done < <(find "$DREAM_ROOT" -name '*.md' -type f -mtime -1 2>/dev/null | sort)
+    fi
+    dream_section=""
+    [[ -n "$dream_lines" ]] && dream_section=$'\n\n'"🌙 *New dream pages* — read + triage into /ceo-respond:"$'\n'"${dream_lines}"
+
+    # Send the DM if there are PRs OR new dreams (so dreams arrive daily even on
+    # nights with no auto-bead PRs).
+    if [[ -n "$pr_lines" || -n "$dream_lines" ]]; then
+      pr_section=""
+      [[ -n "$pr_lines" ]] && pr_section=$'\n\n'"${summary_text}"$'\n\n'"${pr_lines}"$'\n'"Review: SHANE_TODO.md → tap a link → merge from GitHub mobile."
+      message_text="*Overnight* — $(date +'%a %d %b %Y %H:%M %Z')${pr_section}${dream_section}"
 
       # Construct JSON via python json.dumps so any quotes/backslashes/
       # control chars in titles get escaped correctly. Reading args from

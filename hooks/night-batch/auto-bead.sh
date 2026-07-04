@@ -23,7 +23,7 @@ REPO="${PROJECT_PATH:-/Users/shane/Documents/GitReBase/AestheticcNext}"
 WORKTREE_BASE="${WORKTREE_BASE:-$HOME/.worktrees/AestheticcNext}"
 WORKTREE="$WORKTREE_BASE/$BEAD"
 BRANCH="auto/$BEAD"
-export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/Obsidian/.beads}"
+export BEADS_DIR="${BEADS_DIR:-/Users/shane/Documents/GitReBase/AestheticcNext/.beads}"
 
 ts() { date -u +%FT%TZ; }
 log() { echo "[$(ts)] auto-bead: $*"; }
@@ -123,6 +123,50 @@ claude --dangerously-skip-permissions --add-dir "$WORKTREE" -p "$(cat "$PROMPT_F
 exit_code=$?
 
 log "claude -p exited with code=$exit_code"
+
+# Bd-state cleanup (LUCY-2026-05-02 finding): /ship's `git add -A` captures
+# `.beads/issues.jsonl` and `/issues.jsonl` mutations from any `bd update`
+# calls inside claude's session. This bloats the diff by 1500+ lines AND
+# guarantees a merge conflict against main if main's bd activity has moved
+# the canonical issues.jsonl since branch-create. Both files are autogen
+# state, not part of the bead's substantive work — drop them.
+#
+# Approach: soft-reset to base, restore bd state from main, recommit as a
+# single clean commit. Force-push (with lease) updates the PR if /ship
+# already opened one. PR title stays intact (set at PR-create time, not
+# tied to commit subject).
+cd "$WORKTREE"
+BASE=$(git merge-base HEAD main 2>/dev/null || echo "")
+HAS_BD_CHURN=0
+if [[ -n "$BASE" ]] && git diff --name-only "$BASE"..HEAD 2>/dev/null \
+    | grep -qE '^(\.beads/issues\.jsonl|issues\.jsonl)$'; then
+  HAS_BD_CHURN=1
+fi
+
+if [[ $HAS_BD_CHURN -eq 1 ]]; then
+  COMMIT_COUNT=$(git rev-list --count "$BASE"..HEAD 2>/dev/null || echo 0)
+  log "bd-cleanup: collapsing $COMMIT_COUNT commit(s) to drop bd state churn"
+  # Soft reset preserves working tree changes
+  git reset --soft "$BASE" 2>&1 | sed 's/^/  /'
+  # Restore bd state files to match main (no diff against main on those paths)
+  git checkout main -- .beads/issues.jsonl issues.jsonl 2>/dev/null || true
+  git restore --staged .beads/issues.jsonl issues.jsonl 2>/dev/null || true
+  # Re-commit. Skip hooks — they already ran for the original commits.
+  if git commit --no-verify -m "$BEAD: $TITLE" 2>&1 | sed 's/^/  /'; then
+    log "bd-cleanup: clean commit created"
+    # Force-push only if remote branch already exists (i.e., /ship pushed)
+    if git ls-remote --heads origin "$BRANCH" 2>/dev/null | grep -q "$BRANCH"; then
+      if git push --force-with-lease origin "$BRANCH" 2>&1 | sed 's/^/  /'; then
+        log "bd-cleanup: force-pushed cleaned branch"
+      else
+        log "bd-cleanup: WARN force-push failed; PR may still show churn"
+      fi
+    fi
+  else
+    log "bd-cleanup: WARN nothing to commit after cleanup (substantive change may be empty)"
+  fi
+fi
+
 log "diff stat:"
 git -C "$WORKTREE" diff --stat main..HEAD 2>&1 | tail -5 | sed 's/^/  /'
 log "commits:"
