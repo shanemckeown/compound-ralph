@@ -117,9 +117,14 @@ log "prompt written to $PROMPT_FILE"
 
 # 5. Invoke claude -p. Cwd to the worktree so claude's tool calls
 # (Bash, Edit, etc) operate on the right repo by default.
-log "invoking claude -p (synchronous)"
+# --model pinned explicitly (2026-07-05, after a 15-concurrent-session night
+# silently inherited Fable-tier via Shane's interactive /model default and
+# burned ~50% of the usage allowance in one run). Auto-eligible beads are
+# small/bounded (<=200 LOC) — sonnet is the right tier regardless of what
+# Shane has set for foreground work. Never remove this flag.
+log "invoking claude -p (synchronous, model=sonnet)"
 cd "$WORKTREE"
-claude --dangerously-skip-permissions --add-dir "$WORKTREE" -p "$(cat "$PROMPT_FILE")"
+claude --model sonnet --dangerously-skip-permissions --add-dir "$WORKTREE" -p "$(cat "$PROMPT_FILE")"
 exit_code=$?
 
 log "claude -p exited with code=$exit_code"

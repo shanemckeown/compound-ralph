@@ -103,8 +103,11 @@ EOF
 
 # Run blind claude. Critically: do NOT pass --add-dir or any context flags.
 # The whole point is that this claude has zero project knowledge.
+# --model pinned (2026-07-05) — same unpinned-default bug already fixed once
+# in gbrain-ingest/worker.sh (2026-05-15, was silently riding Opus). Never
+# let this inherit whatever Shane's interactive /model default happens to be.
 RESPONSE_FILE=$(mktemp -t blind-claude-resp-XXXXXX.txt)
-claude --dangerously-skip-permissions -p "$(cat "$PROMPT_FILE")" > "$RESPONSE_FILE" 2>&1
+claude --model sonnet --dangerously-skip-permissions -p "$(cat "$PROMPT_FILE")" > "$RESPONSE_FILE" 2>&1
 claude_exit=$?
 
 # Parse the response
