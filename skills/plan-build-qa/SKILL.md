@@ -12,6 +12,8 @@ status: VALIDATED 2026-04-27 — first real fix loop on PR #291 (LUCY-whcq), 4 r
 
 # Plan-Build-QA Skill
 
+Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
+
 > **Why this exists.** The default Claude Code workflow is Plan → Build → Shane-reviews-everything. That doesn't scale past one human. This skill replaces the human-review step with a model-independent QA pass (Codex 5.5), so Shane only sees diffs that already passed adversarial review by a different model family.
 >
 > **Source thinking:** YC AI-native playbook (software factories) + Vtrivedy10's "traces + evals are the lifeblood" + the bookmark cluster on agent harnesses (rohit4verse, gregpr07).
@@ -60,6 +62,31 @@ Outputs:
 
 Invoked via `codex` CLI v0.125.0+ (`codex --version` to confirm).
 
+**Fail-closed evidence protocol.** At the start of each QA run, create
+`~/.claude/evidence/plan-build-qa/<run-id>/`. Before asking Codex for a verdict,
+run the concrete test/QA command(s) derived from PLAN.md and the project context;
+capture the exact command text, combined output, and exit code as separate files.
+If no runnable validation command exists, or any artifact is missing/empty, QA
+cannot PASS. "Suite did not run" is a failure, never a pass.
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+EVIDENCE_DIR="$HOME/.claude/evidence/plan-build-qa/$RUN_ID"
+mkdir -p "$EVIDENCE_DIR"
+
+# Replace this with the project/PLAN.md validation commands for this run.
+QA_COMMAND='npm run typecheck && npm run lint && npm run test'
+printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command.txt"
+set +e
+{
+  printf '$ %s\n\n' "$QA_COMMAND"
+  bash -o pipefail -c "$QA_COMMAND"
+} > "$EVIDENCE_DIR/qa-output.log" 2>&1
+QA_EXIT=$?
+set -e
+printf '%s\n' "$QA_EXIT" > "$EVIDENCE_DIR/qa-exit-code.txt"
+```
+
 **Two viable patterns** depending on output need:
 
 #### Pattern A — `codex review` (markdown output, simpler)
@@ -88,6 +115,7 @@ There is **no `--prompt-file`** and **no `--output-schema`** on `review`. For st
 Best when downstream automation parses the verdict.
 
 ```bash
+set +e
 codex exec \
   --cd "$(pwd)" \
   --ephemeral \
@@ -100,8 +128,17 @@ PLAN.md:
 $(cat PLAN.md)
 ---
 DIFF:
-$(git diff main...HEAD)" \
-  > .qa/codex-verdict.json
+$(git diff main...HEAD)
+---
+EVIDENCE ARTIFACTS TO CITE:
+$EVIDENCE_DIR/qa-command.txt
+$EVIDENCE_DIR/qa-output.log
+$EVIDENCE_DIR/qa-exit-code.txt" \
+  > "$EVIDENCE_DIR/codex-verdict.json" \
+  2> "$EVIDENCE_DIR/codex-stderr.log"
+CODEX_EXIT=$?
+set -e
+printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code.txt"
 ```
 
 Real flags (from `codex exec --help`):
@@ -119,7 +156,7 @@ Real flags (from `codex exec --help`):
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["verdict", "findings"],
+  "required": ["verdict", "findings", "evidence_artifacts"],
   "properties": {
     "verdict": {"type": "string", "enum": ["PASS", "NEEDS_CHANGES", "BLOCK"]},
     "summary": {"type": "string", "maxLength": 1000},
@@ -138,7 +175,12 @@ Real flags (from `codex exec --help`):
       }
     },
     "plan_acceptance_criteria_met": {"type": "boolean"},
-    "missing_tests": {"type": "array", "items": {"type": "string"}}
+    "missing_tests": {"type": "array", "items": {"type": "string"}},
+    "evidence_artifacts": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"type": "string"}
+    }
   }
 }
 ```
@@ -152,6 +194,7 @@ You will receive:
 1. PLAN.md — the spec the implementer was given
 2. A git diff implementing the spec
 3. Project context (CLAUDE.md if present in cwd)
+4. Test/QA evidence artifact paths from this run
 
 Your job:
 - Identify what breaks. Race conditions, missing null checks, SQL injection,
@@ -159,6 +202,9 @@ Your job:
   code paths, security gaps, accessibility regressions, mobile-vs-web drift.
 - Verify each acceptance criterion in PLAN.md is actually met by the diff.
 - Output a verdict per the JSON schema: PASS, NEEDS_CHANGES, or BLOCK.
+- Cite the command, captured output, and exit-code artifact paths in
+  `evidence_artifacts`. Missing or non-zero test evidence requires NEEDS_CHANGES
+  or BLOCK; it can never produce PASS.
 - For findings: severity S1 (must fix before merge) / S2 (should fix soon) / S3 (nice-to-have).
 
 Bias toward finding problems. The implementer is Claude Opus 4.7 — plausible
@@ -175,7 +221,7 @@ Output ONLY the JSON object matching the schema. No prose around it.
 
 After Phase 3:
 
-- **PASS + no S1/S2 findings:** auto-proceed to `/ship` (still runs lint + test + tsc; commit + push)
+- **PASS + no S1/S2 findings + valid evidence:** auto-proceed to `/ship` (still runs lint + test + tsc; commit + push). Valid evidence means the verdict cites the command, captured output, and exit-code files under this run's evidence directory; all exist, are non-empty, and both recorded exit codes are `0`.
 - **PASS with S2 findings:** show findings to Shane; he chooses fix-now / log-as-followup-bead / accept-risk
 - **NEEDS_CHANGES:** Claude Opus reads findings, applies fixes, GOTO Phase 3 (max 3 iterations)
 - **BLOCK:** stop. Surface in Slack DM. Shane manually inspects.
@@ -183,6 +229,9 @@ After Phase 3:
 Hard rules:
 
 - Never auto-merge if Codex returns BLOCK
+- A PASS without the required captured evidence artifacts is a FAIL. Treat a
+  missing artifact, uncited artifact, empty output, malformed exit code, or
+  non-zero exit code as NEEDS_CHANGES and do not proceed.
 - Never override S1 findings without explicit Shane confirmation
 - After 3 QA iterations without PASS, escalate to Shane
 

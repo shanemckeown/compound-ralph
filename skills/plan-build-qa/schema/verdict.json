@@ -3,7 +3,7 @@
   "title": "Plan-Build-QA Codex Verdict",
   "description": "Schema for Codex adversarial-review output produced during /plan-build-qa Phase 3.",
   "type": "object",
-  "required": ["verdict", "findings"],
+  "required": ["verdict", "findings", "evidence_artifacts"],
   "additionalProperties": false,
   "properties": {
     "verdict": {
@@ -43,6 +43,12 @@
       "type": "array",
       "items": {"type": "string"},
       "description": "Test cases the diff should add but didn't."
+    },
+    "evidence_artifacts": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"type": "string"},
+      "description": "Absolute paths to this run's test/QA command, captured output, and exit-code artifacts."
     },
     "tokens_used": {"type": "integer"},
     "model": {"type": "string"}

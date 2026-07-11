@@ -26,6 +26,8 @@ allowed-tools:
 
 # /land-batch — Batch-land finished worktrees, one deploy, one QA, gated prod
 
+Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
+
 **What it replaces:** the cumbersome loop of rebasing/merging/deploying/QA-ing
 each Agent View / Conductor worktree one at a time. This picks up the whole set
 of *finished* worktrees, reconciles them together on an integration branch,
@@ -95,18 +97,23 @@ optional follow-on.)
 ```bash
 REPO=/Users/shane/Documents/GitReBase/AestheticcNext
 [ -n "$SPAWNED_SESSION$OPENCLAW_SESSION" ] && { echo "REFUSE: land-batch is interactive-only."; exit 0; }
-cd "$REPO"
-git branch --show-current        # expect: main
-git fetch origin main --quiet
-git log --oneline origin/main..HEAD | head   # local ahead of origin?
-git log --oneline HEAD..origin/main | head   # origin ahead of local?
-git status --porcelain | head                # main worktree must be clean
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+EVIDENCE_DIR="$HOME/.claude/evidence/land-batch/$RUN_ID"
+mkdir -p "$EVIDENCE_DIR"
+git -C "$REPO" fetch origin main --quiet
+git -C "$REPO" rev-parse --short origin/main   # the base everything lands on
 ```
 
-- If main is **not** clean or **not** on `main`, STOP and surface — do not
-  stash/discard. Sibling sessions may have left state.
-- If origin/main is ahead, `git pull --ff-only` first (or surface if it won't
-  fast-forward).
+- **We never operate in the trunk's working tree.** It sits on whatever branch
+  the last sibling session left it on, with untracked scripts + `.beads/` churn —
+  requiring it to be "clean on main" just blocks every run (and trying to
+  `git checkout` in it aborts on dirty `.beads`, which silently merged onto the
+  wrong branch in a manual run 2026-06-02). So Step 0 does **not** read the
+  trunk's branch or status. The landing happens in a **dedicated scratch
+  worktree** (Step 3) cut fresh from `origin/main`; the trunk's checkout state is
+  irrelevant and never touched.
+- The only precondition is a fetchable `origin/main`. Everything lands on top of
+  that exact SHA.
 
 ## Step 1 — Discover candidates (read-only, safe)
 
@@ -132,6 +139,14 @@ Read `$OUT`. The contract:
   - `land_ready` — the parsed marker object (or null); carries `bead_id` + summary
   - `session` — live Claude session joined to this worktree (or null); has
     `active, status, idle_min, sentinel, has_open_loop, last_assistant_tail`
+  - `live_session` (v0.3) — **true if a live `claude` process is cwd'd inside
+    this worktree**, detected by scanning processes directly (ps + lsof), NOT by
+    the `~/.claude/sessions/*.json` cwd-join that `session` uses. This is the fix
+    for the **Agent View blind spot**: harness-isolated Agent View sessions don't
+    register a worktree cwd in the session files, so the old join always returned
+    `session=null` and every worktree looked finished. When `live_session` is
+    true the candidate is forced `session.active=true` → `blocked-session-active`.
+    Strictly additive: it can only BLOCK a worktree, never approve one.
   - `auto_land` — **the deterministic heuristic finish verdict** (bool):
     `effectively_clean` + ahead≥1 + non-active session + premise-ok +
     not-sensitive + not-conflicting + not-retired
@@ -157,6 +172,13 @@ If discovery errors or returns zero candidates, report and stop.
 > moves here** — only at the Step 8 prod gate, which parks until the evening
 > window. So "autonomous" = autonomous *through staging + QA*; prod is always
 > your one explicit gate.
+>
+> **Amended 2026-06-02:** there is now also a *selection* gate before landing —
+> the eligible set is shown as an AskUserQuestion multiSelect so Shane curates
+> which finished Claudes ship (he may know a clean-looking tab isn't ready). So
+> the flow is: deterministic eligibility → **Shane multi-selects** → land subset
+> → staging → QA → ONE prod gate. Two human touchpoints (select, prod-yes),
+> everything between them automatic.
 
 The finished set = `candidates` where `auto_land == true`. This is deterministic
 (computed in `discover.sh` from the heuristic gate) — **do not re-litigate it
@@ -175,9 +197,29 @@ SIBLING CONFLICTS (can't both land this round)
   ⚡ branch-a ↔ branch-b : app/shared.tsx
 ```
 
-- `auto_land=true` items proceed **without a per-branch confirm gate** — the
-  heuristic gate is the decision. (Still inside a live session; `main` untouched
-  until Step 8.)
+- **Present `auto_land=true` items as a SELECTABLE list — do not auto-proceed.**
+  (Decision 2026-06-02, Shane: he wants to curate which finished Claudes land —
+  he may know a tab like "Connect WisePad 3" isn't actually ready even when its
+  worktree looks clean.) The heuristic gate decides what's *eligible*; Shane
+  decides what *ships* from that eligible set via an **AskUserQuestion
+  `multiSelect: true`**. One option per eligible candidate:
+    - `label`: the shortest recognisable handle — bead_id if present, else the
+      branch's distinctive tail (`helena violet theme`, `comms toggle epny2`).
+    - `description`: a ONE-LINE why-safe, generated from discovery fields:
+      `clean · 0 behind · no live Claude · no sensitive · 2 commits/4 files`.
+      Be honest about caveats in the same line so the choice is informed:
+      `clean but ~240 behind — 3-way safe, green gate catches staleness`, or
+      `mobile-only build fixes — lands to repo but won't reach devices via web`,
+      or `touches lib/auth+stripe — extra review on staging`.
+    Land **only** the selected subset; deselected = "held by Shane", not landed.
+  - **AskUserQuestion caps at 4 options/question, 4 questions/call (16 max).**
+    >4 eligible → chunk across multiple questions in ONE call ("Batch A — land
+    which?", "Batch B — …"). >16 → offer the 16 highest-confidence, `log()` the
+    remainder for a follow-up round. **Never silently drop a candidate.**
+  - Always PRINT the full HELD / BLOCKED / SKIP table beside the selector so
+    Shane can see WHY an expected tab isn't offered (active Claude, sensitive
+    path, conflict, already-merged). The selector lists only eligible items; the
+    table explains every exclusion. (`main` untouched until Step 8.)
 - `held-sensitive` items are **not** auto-landed. Surface them; include only on
   explicit Shane opt-in (use AskUserQuestion *only* for these opt-ins, not for
   the auto set). A missing marker no longer downgrades anything.
@@ -196,30 +238,41 @@ eyeballed and trusted a few times.
 
 ## Step 3 — Create integration branch + merge the finished set
 
-`main` is never touched here. Land everything onto a throwaway branch:
+`main` is never touched here. Land everything in a **dedicated scratch worktree**
+checked out on a throwaway integration branch — the shared trunk is never
+checked out, stashed, or cleaned:
 
 ```bash
 TS=$(date +%Y%m%d-%H%M%S)
 INT="land-batch/$TS"
-git fetch origin main --quiet
-git branch "$INT" origin/main
-git checkout "$INT"
+SCRATCH="${TMPDIR:-/tmp}/land-batch-$TS"            # NOT the trunk working dir
+git -C "$REPO" fetch origin main --quiet
+git -C "$REPO" worktree add -b "$INT" "$SCRATCH" origin/main   # fresh tree @ origin/main
+cd "$SCRATCH"                                       # all merges/build/deploy happen here
 
-# decision #5 — never merge .beads/ (pure churn; truth lives in Dolt). A local
-# merge=ours driver means .beads/ conflicts never arise (keeps Guardrail #5
-# absolute — nothing to auto-resolve). .git/info/attributes is local + uncommitted.
+# decision #5 — never merge .beads/ (pure churn; truth lives in Dolt). merge=ours
+# means .beads/ conflicts never arise (keeps Guardrail #5 absolute). Write the
+# attribute to the COMMON git dir so the linked worktree honours it.
 git config merge.ours.driver true
-mkdir -p .git/info
-grep -qxF '.beads/** merge=ours' .git/info/attributes 2>/dev/null || echo '.beads/** merge=ours' >> .git/info/attributes
+ATTR="$(git rev-parse --git-common-dir)/info/attributes"; mkdir -p "$(dirname "$ATTR")"
+grep -qxF '.beads/** merge=ours' "$ATTR" 2>/dev/null || echo '.beads/** merge=ours' >> "$ATTR"
 
 for BR in $FINISHED_BRANCHES; do
-  if ! git merge-tree --write-tree HEAD "$BR" >/dev/null 2>&1; then
-    echo "SKIP $BR — conflicts with integration branch after prior landings"; SKIPPED+=("$BR"); continue
+  # Merge sequentially onto the EVOLVING integration head (a prior landing may
+  # introduce a conflict). --no-ff = one revertable merge commit per feature.
+  # A 3-way merge preserves main's recent work even for a behind/stale branch;
+  # semantic breakage from staleness is caught by the Step 4 green gate, not here.
+  if ! git merge --no-ff --no-verify "$BR" -m "land: $BR (batch via /land-batch)"; then
+    git merge --abort; echo "SKIP $BR — conflicts with integration head"; SKIPPED+=("$BR"); continue
   fi
-  git merge --no-ff "$BR" -m "land: $BR (batch via /land-batch)" || { git merge --abort; SKIPPED+=("$BR"); continue; }
-  echo "$BR $(git rev-parse HEAD)"   # record merge SHA per feature → per-feature revert later
+  echo "$BR -> $(git rev-parse HEAD)"   # record merge SHA per feature → per-feature revert later
 done
 ```
+
+> **Cleanup contract.** The scratch worktree is removed at the end of the run
+> (pass or fail): `git -C "$REPO" worktree remove "$SCRATCH" --force`. On a
+> reject/abort also drop the branch: `git -C "$REPO" branch -D "$INT"`. `main`
+> never moved, the trunk was never touched.
 
 - `--no-ff` always → each feature = one revertable merge commit.
 - Re-check each branch against the **evolving integration branch** (a prior
@@ -230,10 +283,24 @@ done
 ## Step 4 — Green gate on the integration branch
 
 ```bash
-npm run typecheck && npm run lint && npm run test
+GREEN_COMMAND='npm run typecheck && npm run lint && npm run test'
+GREEN_ATTEMPT="${GREEN_ATTEMPT:-1}"
+printf '%s\n' "$GREEN_COMMAND" > "$EVIDENCE_DIR/green-gate-command-attempt-$GREEN_ATTEMPT.txt"
+set +e
+{
+  printf '$ %s\n\n' "$GREEN_COMMAND"
+  bash -o pipefail -c "$GREEN_COMMAND"
+} > "$EVIDENCE_DIR/green-gate-output-attempt-$GREEN_ATTEMPT.log" 2>&1
+GREEN_EXIT=$?
+set -e
+printf '%s\n' "$GREEN_EXIT" > "$EVIDENCE_DIR/green-gate-exit-code-attempt-$GREEN_ATTEMPT.txt"
+# Increment before a re-run so failed evidence is never overwritten.
+GREEN_ATTEMPT=$((GREEN_ATTEMPT + 1))
 ```
 
-- All three green → proceed. (Warm tsc first if husky cold-cache bites —
+- All three green **and the command/output/exit-code artifacts above exist and
+  are cited** → proceed. A missing artifact or a non-zero/malformed exit code is
+  red, regardless of narrative. (Warm tsc first if husky cold-cache bites —
   `feedback_husky_tsc_cold_cache`.)
 - Red → revert the most-recent merge commit on `$INT`, re-run, repeat until
   green. Surface which feature broke the build; land the green subset, kick the
@@ -248,14 +315,24 @@ npm run typecheck && npm run lint && npm run test
 
 `cloudbuild-staging.yaml` builds the **local working tree** it's submitted with
 (trailing `.` = upload context) and tags the image `:staging` — it is **not**
-pinned to `main`. So deploying the integration branch is just: be checked out on
-`$INT`, then submit. **No yaml change needed.** Run the build directly — do not
-trust a deploy sub-agent (`feedback_never_use_deploy_agents`,
-`feedback_deploy_agents_lie`):
+pinned to `main`. We're already inside `$SCRATCH` (checked out on `$INT` from
+Step 3), so the build context is correct with no checkout needed. **No yaml
+change needed.** Run the build directly — do not trust a deploy sub-agent
+(`feedback_never_use_deploy_agents`, `feedback_deploy_agents_lie`):
 
 ```bash
-git checkout "$INT"   # ensure the integration branch is the build context
-gcloud builds submit --config cloudbuild-staging.yaml --project aestheticc .
+cd "$SCRATCH"   # the scratch worktree IS the integration branch's tree
+DEPLOY_ATTEMPT="${DEPLOY_ATTEMPT:-1}"
+printf '%s\n' 'gcloud builds submit --config cloudbuild-staging.yaml --project aestheticc .' \
+  > "$EVIDENCE_DIR/staging-build-command-attempt-$DEPLOY_ATTEMPT.txt"
+set +e
+gcloud builds submit --config cloudbuild-staging.yaml --project aestheticc . \
+  > "$EVIDENCE_DIR/staging-build-output-attempt-$DEPLOY_ATTEMPT.log" 2>&1
+STAGING_BUILD_EXIT=$?
+set -e
+printf '%s\n' "$STAGING_BUILD_EXIT" > "$EVIDENCE_DIR/staging-build-exit-code-attempt-$DEPLOY_ATTEMPT.txt"
+# Keep DEPLOY_ATTEMPT unchanged through the describe checks; increment only
+# immediately before a later redeploy.
 ```
 
 **Authorization (don't assume you can fire it).** The skill **cannot
@@ -270,14 +347,29 @@ are fine (staging is unrestricted); only prod waits for the deploy window.
 
 Then the **two non-negotiable verifications** (`feedback_verify_cloud_run_traffic`):
 
-1. Build ran: `gcloud builds list --region europe-west1 --limit 3` shows SUCCESS
-   for *this* build. **Builds run in `europe-west1`** (default region = global =
-   empty — always pass `--region europe-west1`). Note the regions differ: builds
-   are `europe-west1`, the Cloud Run *services* are `europe-west2`.
+1. Build ran: `gcloud builds describe <id> --project aestheticc --format='value(status)'`
+   shows SUCCESS for *this* build. **Builds run in `global`, NOT a regional
+   location** (verified 2026-07-11 via the build resource's own `name` field:
+   `projects/.../locations/global/builds/...`). Passing `--region europe-west1`
+   to `gcloud builds list`/`describe` silently returns empty/NOT_FOUND — no
+   error, so a region-filtered monitoring loop will poll forever without ever
+   seeing the real terminal status. Query with **no `--region` flag** (or
+   `--region global` if a region flag is required). Note the Cloud Run
+   *services* ARE regional — `europe-west2` — so verification #2 below still
+   needs `--region europe-west2`.
 2. **Traffic shifted:** `gcloud run services describe aestheticc-next-staging
    --region europe-west2 --format='value(status.traffic)'` (or the structured
    form) → `traffic[0].revisionName == latestCreatedRevisionName`. SUCCESS ≠
    live; Cloud Run silently rolls back failed-startup containers.
+
+Capture both verification commands, their raw output, and their exit codes under
+`$EVIDENCE_DIR` using the same attempt number (for example
+`build-describe-attempt-N.json`, `build-describe-exit-code-attempt-N.txt`,
+`staging-service-describe-attempt-N.json`, and
+`staging-service-describe-exit-code-attempt-N.txt`). Do not proceed to QA unless the build
+submit, build describe, and service describe exit codes are all `0` and the raw
+describe artifacts prove SUCCESS plus the traffic shift. A claimed deploy with
+no cited describe artifacts is not deployed.
 
 Record the staging revision serving 100% as **last-known-good** before QA.
 
@@ -307,10 +399,27 @@ The payoff: QA every landed feature on the single staging deploy.
    business with `qa-impersonate` (`feedback_qa_clinic_multi_business_getuserbusinessid`
    — parallel sessions stomp the shared impersonation column; re-check
    `session.businessId` before asserting, cache-bust availability).
-2. Per landed feature, pull acceptance criteria: `bd show <bead_id>` (or derive a
-   smoke check from `git show --stat <merge-sha>` when there's no bead).
+2. Per landed feature, build its check from THREE sources, best-first:
+   - **The session's own conversation (input only, never evidence)** — `candidate.session.last_assistant_tail`
+     (the finishing Claude's last words: what it built + any "known issue" it
+     flagged) and `candidate.land_ready.known_issues` if a marker exists. This is
+     the "QA info from the convo" — the session that did the work tells you what
+     to verify and what it already knows is shaky.
+   - **The bead** — `bd show <bead_id>` for acceptance criteria.
+   - **The diff** — `git show --stat <merge-sha>` to derive a smoke check when
+     there's neither a transcript hint nor a bead.
 3. Assemble ONE checklist, run each feature's checks via `/browse` against
-   staging. Capture evidence (screenshot / state assertion) per feature.
+   staging. Every checklist row must record the exact URL exercised, expected
+   result, observed result, and one or more concrete artifact paths under
+   `$EVIDENCE_DIR` (captured response/text output, screenshot, console output, or
+   command output plus exit code). Store the checklist itself at
+   `$EVIDENCE_DIR/qa-checklist.md`.
+
+**Fail-closed checklist gate:** a finishing-session transcript or narrative may
+suggest what to test, but it cannot satisfy a checklist item. An item without a
+cited, readable evidence artifact is FAILED. Staging QA is clean only when every
+landed feature has exercised evidence and zero open p0-p2 findings; otherwise do
+not enter the production gate.
 
 ### Severity rubric (NOT everything is p3)
 
@@ -326,8 +435,9 @@ The payoff: QA every landed feature on the single staging deploy.
 
 After QA on the integration branch's staging deploy:
 
-1. Classify every finding p0–p3; document with evidence, keyed to the feature's
-   merge SHA (so any feature stays individually revertable).
+1. Classify every finding p0–p3; document with cited `$EVIDENCE_DIR` artifacts,
+   keyed to the feature's merge SHA (so any feature stays individually
+   revertable). Transcript claims do not count as evidence.
 2. If any **p0–p2** remain:
    - Dispatch the **codex** skill to fix them **on the integration branch**
      (`$INT`), scoped to the offending feature's files. Commit each fix
@@ -347,27 +457,34 @@ After QA on the integration branch's staging deploy:
 Only when staging QA is clean (zero open p0–p2):
 
 1. Print the final report (landed features, fixes applied, staging revision
-   serving 100%, integration branch name).
+   serving 100%, integration branch name) and cite the green-gate command/output/
+   exit-code files, deploy describe artifacts, and every feature's QA artifacts.
+   If any required path is absent, do not render the production approval gate.
 2. **AskUserQuestion: "Deploy this batch to PROD?"** — the only interactive gate.
    **Default to parking until the post-19:30 BST window** (clinics live
    08:00–19:30; `feedback_no_self_deploy_staging` + CLAUDE.md deploy windows). If
    it's before 19:30, say so and hold the green integration branch for the
    evening rather than asking to deploy now (S1 hotfix is the only exception,
    with explicit Shane confirmation).
-3. On **yes**:
+3. On **yes** — move `main` by fast-forward **push from the scratch worktree**,
+   never by checking out `main` in the dirty trunk:
    ```bash
-   git checkout main && git merge --ff-only "$INT"   # main moves only now
-   git push origin main
-   gcloud builds submit --config cloudbuild.yaml --project aestheticc .   # prod config
+   cd "$SCRATCH"                                 # on $INT = origin/main + the landed merges
+   git fetch origin main --quiet
+   git push origin "HEAD:main"                   # ff-push the integration head to main
+   #  ^ rejected if origin/main moved under us → re-fetch, `git rebase origin/main`,
+   #    re-green-gate, retry. NEVER force-push.
+   gcloud builds submit --config cloudbuild.yaml --project aestheticc .   # prod, context = $SCRATCH
    ```
-   then the **same two verifications** — build SUCCESS in **`europe-west1`**, and
-   traffic shifted on the **prod service `aestheticc-next` in `europe-west2`**
+   then the **same two verifications** — build SUCCESS in **`global`** (no
+   `--region` flag; see Step 5), and traffic shifted on the **prod service
+   `aestheticc-next` in `europe-west2`**
    (`traffic[0].revisionName == latestCreatedRevisionName`). SUCCESS ≠ live. Prod
    traffic was `latestRevision: true` (not pinned) as of 2026-05-28, so it
    auto-shifts — but if it ever doesn't, apply the same pin-diagnosis as Step 5.
-   `gcloud builds submit --config cloudbuild.yaml .` uploads the working tree, so
-   be on `main` (post-ff) when you submit. Prod cold path: `aestheti.cc/api/health`,
-   `/auth/login` → 200, `/dashboard` → 307 (auth redirect).
+   The build context is `$SCRATCH` (the just-pushed integration tree). Prod cold
+   path: `aestheti.cc/api/health`, `/auth/login` → 200, `/dashboard` → 307 (auth
+   redirect). After verifying, run the Step-3 cleanup contract (remove `$SCRATCH`).
 4. On **no / no-response**: stop at staging. **`main` untouched.** Either keep
    `$INT` for later (`git checkout main`) or `git branch -D "$INT"` to discard.
    Report what's parked.

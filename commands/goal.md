@@ -1,6 +1,10 @@
 # /goal — Autonomous Bead Execution via Plan-Build-QA Partnership
 
-Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push to a feature branch, open a staging preview, close the bead(s).
+Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
+
+Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER Shane merges the branch and fires `@deploy-staging`. Production deploys require Shane's explicit sayso in a foreground chat.
+
+🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached by Shane merging to main → `@deploy-staging`. /goal stops at "branch pushed + bead closed."
 
 ## 🔴 HARD RULE: No `result:` until every in-scope bead is verified CLOSED
 
@@ -16,7 +20,6 @@ Observed 2026-05-13 on `AestheticcNext-sdait` — fix shipped via Plan-Build-QA 
 /goal LUCY-1234                     # single bead
 /goal AestheticcNext-az50           # single bead in code repo
 /goal AestheticcNext-kh9cy          # epic — fans out across all open children, one branch
-/goal LUCY-1234 --no-deploy         # build + QA but stop before staging-preview
 /goal LUCY-1234 --strict            # reserved for future strict-mode (not yet implemented)
 ```
 
@@ -148,9 +151,32 @@ If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first (per `feedb
 
 **One QA pass against the combined diff at the end**, not one per child. Saves Codex quota and lets the reviewer see cross-child interactions.
 
+Create one evidence directory for the /goal run. In every QA round, run the
+project's real test/QA gate first and capture its exact command, combined output,
+and exit code. For AestheticcNext the default is shown below; for another repo,
+derive runnable validation commands from its project instructions and PLAN.md.
+If there is no runnable command, the round cannot PASS.
+
+```bash
+: "${RUN_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+EVIDENCE_DIR="$HOME/.claude/evidence/goal/$RUN_ID"
+mkdir -p "$EVIDENCE_DIR"
+QA_COMMAND='npm run typecheck && npm run lint && npm run test'
+printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command-round-N.txt"
+set +e
+{
+  printf '$ %s\n\n' "$QA_COMMAND"
+  bash -o pipefail -c "$QA_COMMAND"
+} > "$EVIDENCE_DIR/qa-output-round-N.log" 2>&1
+QA_EXIT=$?
+set -e
+printf '%s\n' "$QA_EXIT" > "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
+```
+
 Follow `~/.claude/skills/plan-build-qa/SKILL.md` Pattern B (structured JSON). Pipe the prompt via stdin (never `$TMPDIR` in nested subshell, per `feedback_codex_exec_prompt_passing.md`):
 
 ```bash
+set +e
 {
   cat ~/.claude/skills/plan-build-qa/prompts/qa.md
   echo "---"
@@ -160,7 +186,8 @@ Follow `~/.claude/skills/plan-build-qa/SKILL.md` Pattern B (structured JSON). Pi
   done
   echo "---"
   echo "DIFF (committed):"
-  git diff main...HEAD
+  git fetch origin main --quiet
+  git diff origin/main...HEAD   # NOT local main — stale local main sweeps in already-merged PRs (feedback_goal_qa_diff_base_stale_main)
   echo "---"
   echo "DIFF (uncommitted, staged + unstaged):"
   git diff --cached
@@ -168,37 +195,59 @@ Follow `~/.claude/skills/plan-build-qa/SKILL.md` Pattern B (structured JSON). Pi
   echo "---"
   echo "Untracked:"
   git ls-files --others --exclude-standard
+  echo "---"
+  echo "EVIDENCE ARTIFACTS (the verdict must cite all three):"
+  echo "$EVIDENCE_DIR/qa-command-round-N.txt"
+  echo "$EVIDENCE_DIR/qa-output-round-N.log"
+  echo "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
 } | codex exec \
   --cd "$(pwd)" \
   --ephemeral \
-  --output-schema ~/.claude/skills/plan-build-qa/schema/verdict.json \
   --sandbox read-only \
-  -c model="gpt-5-codex" \
-  - > .qa/codex-verdict-round-N.json
+  - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
+  2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
+CODEX_EXIT=$?
+set -e
+printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
+# NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
+# (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
+# (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt; parse it from
+# the output between the `^codex$` and `^tokens used$` markers.
 ```
 
 Parse the verdict:
-- **PASS + zero S1/S2:** go to Phase 5.
-- **PASS + only S3:** log S3s as follow-up beads, go to Phase 5.
+- **PASS + zero S1/S2 + valid evidence:** go to Phase 5.
+- **PASS + only S3 + valid evidence:** log S3s as follow-up beads, go to Phase 5.
 - **NEEDS_CHANGES or BLOCK:** ingest findings, fix S1/S2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
 - **After 3 rounds still not clean:** file each remaining finding as a follow-up bead with `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes, and STOP. This is `failed:` not `result:`.
 
-### Phase 5 — Ship to branch (NOT main)
+**Valid evidence is mandatory:** the verdict must cite the round's command,
+captured output, and exit-code artifacts under `$EVIDENCE_DIR`; those files must
+exist, the output must record the command that actually ran, and both the QA and
+Codex exit-code files must contain `0`. A model-returned PASS without those
+artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
 
-Per `feedback_no_self_deploy_staging.md`, agents never merge to main and never self-deploy main-staging. Push the feature branch only.
+### Phase 5 — Ship to branch (NO deploy)
 
-1. `/ship` to push the feature branch (runs tsc + lint + tests).
-2. If code repo: spawn `@deploy-staging-preview` agent for a tagged preview URL on this branch alone. Wait for the URL.
-3. If vault: skip preview.
+🔴 **/goal NEVER deploys anywhere.** Not production, not staging, not a worktree revision. No `gcloud builds submit`. No `gcloud run deploy`. No `--tag`. No `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on Cloud Run revisions — the cost leak that nearly ended the runway (`feedback_cloud_run_warm_instance_cost_model.md`). If the bead body contains "deploy to prod" / "production deploy", refuse with `failed:` — mis-scoped for /goal.
+
+🔴 **NO MERGE TO MAIN.** Agents never merge to main and never fire `@deploy-staging` themselves. /goal's job ends at a pushed, QA-clean feature branch.
+
+Steps:
+
+1. `/ship` to push the feature branch (runs tsc + lint + tests). Do NOT pass any flag that would merge to main.
+2. That's it. **No deploy step.** The branch is now ready for Shane to merge → `@deploy-staging` → QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
+
+If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `needs input:` not `result:` in Phase 7 — the bead stays open.
 
 ### Phase 6 — Close beads (HARD GATE — see top-of-skill rule)
 
-**Single bead:** `bd close <ID>` with summary + preview URL.
+**Single bead:** `bd close <ID>` with summary + branch name.
 
-**Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + preview URL + list of closed children.
+**Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + branch name + list of closed children.
 
 ```bash
-bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id>. Preview: <URL or N/A vault>. QA rounds: <N>."
+bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Ready for Shane to merge → @deploy-staging for staging QA. No autonomous deploy."
 ```
 
 **Then verify every close stuck.** Per-bead:
@@ -210,15 +259,37 @@ bd show "$ID" 2>&1 | grep -qiE "^Status:.*closed|\[CLOSED\]|· CLOSED" \
 
 If even one verification fails, do NOT proceed to Phase 7's `result:` line. Write `needs input:` instead, listing the bead IDs that wouldn't close and the `bd close` stderr. Common failure: `bd` couldn't find the bead because `BEADS_DIR` drifted between phases (re-check Phase 0a routing).
 
-If `--no-deploy` was passed or QA failed at the 3-round cap: leave beads open with notes documenting state, don't close, and write `needs input:` not `result:`.
+If QA failed at the 3-round cap: leave beads open with notes documenting state, don't close, and write `needs input:` not `result:`.
+
+### Phase 6.5 — Reclaim the worktree (disk hygiene)
+
+The branch is pushed (Phase 5) and every bead is verified CLOSED (Phase 6), so all work is captured on the remote branch + branch ref. The worktree itself (a full checkout, often 100MB–2GB with node_modules) is now dead weight — remove it so /goal runs don't accumulate disk. **Removing a worktree does NOT delete the branch ref or the pushed remote branch**, so Shane can still merge.
+
+Preconditions (ALL must hold — else SKIP and note why in the report):
+- Branch was pushed to origin in Phase 5.
+- `git -C <worktree> status --porcelain --untracked-files=no` is empty (no uncommitted tracked changes — never discard unsynced work).
+
+Steps:
+1. `cd` to the trunk first — you cannot remove the worktree you are standing in:
+   `cd /Users/shane/Documents/GitReBase/AestheticcNext`
+2. Remove it:
+   - Worktree created via the **EnterWorktree** tool → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
+   - Worktree created manually (`git worktree add`) → `git worktree remove --force <worktree-path> && git worktree prune`.
+3. This is the LAST mutating step — only the Phase 7 report follows (run it from the trunk).
+
+If a precondition fails, leave the worktree in place and say so in the report.
+
+**Backlog backstop:** stale worktrees from older runs accumulate (they're what fill the disk — branch refs are 41 bytes, worktrees are GBs). Periodically run `scripts/cleanup-merged-worktrees.sh` from the trunk (dry-run, then `--apply`). It reclaims only worktrees whose work already landed on main, preserves branch refs, never touches DIRTY (uncommitted) worktrees, and flags STALE ones for manual review.
 
 ### Phase 7 — Report
 
 Final line:
 
 ```
-result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, preview <URL>, <N> QA rounds clean. Warnings: <list or none>.
+result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Ready for Shane to merge → @deploy-staging for staging QA. Warnings: <list or none>.
 ```
+
+QA happens after Shane merges the branch to main and fires `@deploy-staging` (the main staging service is the only QA surface). /goal does not deploy.
 
 For partial/failed runs:
 
@@ -254,7 +325,9 @@ Full `lib/stripe/` rewrite alone: **refused**. Sensitive-path budget blown.
 ## What this does NOT do
 
 - Does not merge to main. Ever.
-- Does not deploy main-staging or production. Ever.
+- **Does not deploy anywhere.** No production, no staging, no worktree revision. No `gcloud builds submit`, no `gcloud run deploy`, no `--tag`, no `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on revisions (`feedback_cloud_run_warm_instance_cost_model.md`) — banned.
+- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER Shane merges the branch and fires `@deploy-staging` himself.
+- Does not refuse-vs-allow on staging deploys — it simply never deploys. (Still refuses with `failed:` if the bead body says "deploy to prod"/"production deploy" — mis-scoped.)
 - Does not bypass `/review` or `/ship` gates. They run inside Phase 5.
 - Does not pick its own bead. Shane (or a future supervisor cron) chooses what to fire on.
 - Does not re-estimate effort. Trusts the bead's stated size.
