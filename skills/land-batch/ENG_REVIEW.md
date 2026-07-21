@@ -1,4 +1,4 @@
-# /land-batch v0.2 — Locked Build Spec (eng-reviewed: Claude + Codex, 2026-05-28)
+# /land-batch v0.3 — Locked Build Spec (eng-reviewed: Claude + Codex, revised 2026-07-21)
 
 This supersedes the open questions in `UPGRADE_PLAN.md`. Where the two disagree, **this file wins.**
 
@@ -6,25 +6,32 @@ This supersedes the open questions in `UPGRADE_PLAN.md`. Where the two disagree,
 
 ## Locked decisions
 
-### D1 — Integration branch (NOT merge-to-main during the loop)
+### D1 — LAND/SHIP split (reversal of the 2026-05-28 integration-only decision)
 
-The loop never touches `main`. All landing, gating, deploy, QA, and codex-fix happen on a
-throwaway integration branch:
+**Dated reversal, 2026-07-21:** the former D1 said `main` never moved until
+staging QA passed. That was correct for a one-run merge → staging → QA → prod
+workflow, but it caused concurrent runs to overwrite each other's staging QA.
+It is deliberately superseded by a two-mode design:
 
-- Branch `land-batch/<ts>` off `origin/main` (ts = `date +%Y%m%d-%H%M%S`).
-- Merge the finished set into it `--no-ff` (each feature = one revertable merge commit).
-- Green-gate (typecheck + lint + test), staging deploy, consolidated QA, and the codex-fix
-  loop **all run on `land-batch/<ts>`** — never on `main`.
-- `main` is touched **only at the human gate**:
-  - approve → `git checkout main && git merge --ff-only land-batch/<ts>` → deploy prod
-  - reject → `git branch -D land-batch/<ts>` (main never moved, nothing to revert)
+- **LAND (default)** serialises candidates through a durable lock/FIFO queue,
+  preserves the multiSelect curation gate, merges each selected feature with
+  `--no-ff`, runs typecheck + lint + Jest scoped to its changed files, and
+  fast-forward-pushes that green merge directly to `main`. Each message is
+  `land: <branch> (batch <run-id> via /land-batch)`, retaining per-feature
+  reversion. LAND never deploys staging or production.
+- **SHIP (`--ship`)** takes the same queue ticket, starts fresh from current
+  `origin/main`, runs the full Jest suite once in a detached subprocess, deploys
+  staging once, and QAs the entire pending cross-run ledger. It then uses the
+  existing bounded Codex-fix/revert loop and one attended production gate.
 
-This replaces UPGRADE_PLAN building-block #3's "codex fixes on main" — codex fixes land on
-the integration branch, so a rejected batch leaves `main` pristine with no revert needed.
+The new non-negotiable invariant is **prod never serves an unshipped SHA**,
+enforced by SHIP's full gate, evidenced staging QA, explicit human approval, and
+verified production traffic—not “main never moves before QA.” Do not silently
+restore the prior integration-branch-only architecture.
 
-### D2 — Marker file is canonical; chat tail is veto-only
+### D2 — Heuristic finish gate; marker and chat tail are veto-only metadata
 
-Canonical finish signal is a marker the worktree's own session drops when it's done:
+Optional marker format a worktree session may drop when it is done:
 
 `.claude/land-ready.json` in the worktree:
 ```json
@@ -32,18 +39,18 @@ Canonical finish signal is a marker the worktree's own session drops when it's d
   "known_issues": [], "touched_paths": ["..."], "ready": true }
 ```
 
-A candidate is **auto-landable** only when ALL of:
-- `.claude/land-ready.json` exists with `ready: true`
-- git-clean (`status --porcelain` empty)
-- `ahead >= 1`
+A candidate is **auto-landable** only when all of:
+- its tree is `effectively_clean` (real uncommitted source edits still block),
+- `ahead >= 1`, its Claude session is non-active, and the premise check passes,
+- it is not sensitive, conflicting, retired, or dependent on held sensitive work.
 
-The **chat tail can only veto, never solely approve.** If the tail contains a blocker
+The marker is an optional confidence booster and `bead_id` carrier; nothing
+currently writes it, so it is not the finish gate.
+
+The **chat tail can only veto, never solely approve.** If it contains a blocker
 phrase (open question / `needs input:` / `failed:` / "shall I" / "which would you" /
-unanswered AskUserQuestion), exclude the candidate even if the marker says ready.
-
-**Legacy worktrees without a marker:** fall back to git-clean + `result:` sentinel in the
-tail, flagged **low-confidence**, and **not auto-landed on the first run** — surfaced for
-explicit opt-in instead.
+unanswered AskUserQuestion), exclude the candidate even if all Git state looks
+finished.
 
 ---
 
@@ -81,13 +88,27 @@ feature that needs the sensitive one to make sense).
 
 Cap **3 iterations**. **Stop immediately on any p0.** If the cap is exceeded with p0–p2
 still open, **redeploy the last-known-good revision** and surface the residual list +
-per-feature revert offer. Never promote to prod with open p0–p2.
+per-feature revert offer. Never promote to prod with open p0–p2. Fixes start in a
+fresh scratch from current `origin/main`, commit atomically, and fast-forward-push
+with LAND's fetch → rebase → re-gate → retry mechanics. A QA-failed feature is
+reverted from main with `git revert -m 1 <merge_sha>` only after confirming it is
+the recorded `--no-ff` merge; remove it from the pending ledger.
 
 ## Prod gate
 
-Single `AskUserQuestion` after staging QA is clean. On yes: ff `main` → prod cloudbuild →
-**both** verifications (build SUCCESS in correct region; `traffic[0].revisionName ==
-latestCreatedRevisionName`). On no: stop at staging, `main` untouched.
+Single attended `AskUserQuestion` after clean staging QA and in the post-19:30
+window. On yes: prod Cloud Build → verify new revision is Ready → explicitly
+pin traffic with:
+
+```bash
+gcloud run services update-traffic aestheticc-next --region europe-west2 \
+  --to-revisions aestheticc-next-<NEW>=100
+```
+
+Then prove `status.traffic[0].revisionName == aestheticc-next-<NEW>`. Production
+has been pinned since 2026-06-15: **never use `--to-latest` in this skill.** On
+success, archive `pending-qa.md` and `ledger.json` in evidence, reset pending
+ledger state, and record `prod_sha`.
 
 ## --dry-run (build-order #6)
 
@@ -96,8 +117,8 @@ Add a `--dry-run` flag. **Default the first runs to dry-run** — print the full
 
 ## Verify-before-building (must confirm, do not assume)
 
-1. `cloudbuild-staging.yaml` can deploy an **arbitrary branch SHA** (the integration
-   branch), not only `main`. If it hard-codes `main`, the deploy step needs adjustment.
+1. `cloudbuild-staging.yaml` submits the SHIP scratch's local tree at current
+   `origin/main`, rather than silently checking out another ref.
 2. What an **interactive (non-bg) Agent View session record** looks like in
    `~/.claude/sessions/*.json` (the rename-to-Close-N + ACTIVE logic depend on the real
    field shape, not the bg-job shape).
@@ -114,16 +135,15 @@ gate."
 
 ## Build order
 
-1. `bin/sessions.py` + pytest (session join, sessionId-glob transcript, 64KB tail, ACTIVE
-   truth table).
-2. Merge session data into `discover.sh` contract; fix `/tmp` clobber →
-   `${CLAUDE_JOB_DIR:-$(mktemp -d)}/discover.json`.
-3. SKILL.md rewrite: marker-gated auto finish-judgment → integration branch → green-gate →
-   staging-from-branch-SHA + traffic verify → consolidated QA → codex-fix loop → prod gate
-   → Close-N rename (cosmetic; report mapping is the source of truth).
-4. Severity rubric.
-5. Sensitive-path exclusion (incl. dependency-on-held-branch).
-6. `--dry-run`, default-on for first runs.
-7. Memory reconciliation.
+1. Preserve `bin/sessions.py` and its pytest contract (session join,
+   sessionId-glob transcript, 64KB tail, ACTIVE truth table).
+2. Use `bin/land-state.py` as the shared mkdir mutex, FIFO queue, stale-run
+   recovery, ledger, and status implementation; cover it with pytest.
+3. Extend `discover.sh` with state visibility and land-batch branch exclusion;
+   preserve its read-only discovery behavior.
+4. LAND: multiSelect → per-feature --no-ff merge → scoped gate → safe ff-push
+   → harvest QA plan into ledger. SHIP: detached full Jest → one staging deploy
+   → full ledger QA → bounded fixes/reverts → pinned attended prod promotion.
+5. Preserve severity, sensitive-path, dry-run, and evidence guardrails.
 
 Verify items (#1, #2 above) happen before the steps that depend on them.

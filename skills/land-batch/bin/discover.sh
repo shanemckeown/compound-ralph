@@ -14,6 +14,7 @@ fi
 export TARGET_REPO
 export RETIRED_FILE="$RETIRED_FILE_PATH"
 export SESSIONS_SCRIPT="$SCRIPT_DIR/sessions.py"
+export LAND_STATE_SCRIPT="$SCRIPT_DIR/land-state.py"
 export GIT_OPTIONAL_LOCKS=0
 
 python3 <<'PY'
@@ -27,6 +28,7 @@ from pathlib import Path
 
 REPO = os.environ.get("TARGET_REPO") or "/Users/shane/Documents/GitReBase/AestheticcNext"
 RETIRED_FILE = os.environ.get("RETIRED_FILE")
+LAND_STATE_SCRIPT = os.environ.get("LAND_STATE_SCRIPT")
 SENSITIVE_PREFIXES = (
     "lib/db/",
     "drizzle/migrations/",
@@ -88,6 +90,7 @@ def empty_report(repo_field=None, base_ref=None, base_sha=None):
         "candidate_count": 0,
         "candidates": [],
         "sibling_conflicts": [],
+        "lock_queue": load_lock_queue_state(),
     }
 
 
@@ -436,6 +439,95 @@ def load_sessions_map():
         return {}
 
 
+def load_lock_queue_state():
+    """Expose admission state to every discovery consumer without mutating it."""
+    if not LAND_STATE_SCRIPT or not os.path.exists(LAND_STATE_SCRIPT):
+        return {"available": False, "error": "land-state.py not found"}
+    try:
+        proc = subprocess.run(
+            [sys.executable, LAND_STATE_SCRIPT, "status"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "error": str(exc)}
+    if proc.returncode != 0:
+        return {"available": False, "error": proc.stderr.strip() or f"land-state.py exited {proc.returncode}"}
+    try:
+        state = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return {"available": False, "error": f"invalid lock state JSON: {exc}"}
+    return {"available": True, **state}
+
+
+def live_session_worktrees(worktree_paths):
+    """Worktrees that currently host a LIVE ``claude`` process, keyed by cwd.
+
+    The sessions.py join only sees ``~/.claude/sessions/*.json``, which Agent
+    View's harness-isolated sessions do NOT register with a worktree cwd — so it
+    goes blind to a Claude actively working inside a worktree and every candidate
+    looks session-less (the autonomy bug). This scans live processes directly:
+    any ``claude`` pid whose cwd is at/under a worktree path marks that worktree
+    active. Strictly additive — it can only BLOCK a worktree from auto-landing,
+    never approve one. Best-effort: if ps/lsof are unavailable it returns empty
+    (degrades to today's behaviour, never worse)."""
+    real_to_path = {}
+    for path in worktree_paths:
+        try:
+            real_to_path[os.path.realpath(path)] = path
+        except OSError:
+            real_to_path[path] = path
+    active = set()
+    if not real_to_path:
+        return active
+    try:
+        ps = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        diag(f"warning: ps scan for live sessions failed: {exc}")
+        return active
+    self_pid = str(os.getpid())
+    pids = []
+    for line in ps.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid, _, cmd = line.partition(" ")
+        if not pid.isdigit() or pid == self_pid:
+            continue
+        low = cmd.lower()
+        # the Claude CLI process; skip our own tooling so we don't self-flag
+        if "claude" in low and "discover.sh" not in low and "sessions.py" not in low and "land-batch" not in low:
+            pids.append(pid)
+    for pid in pids:
+        try:
+            lsof = subprocess.run(
+                ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for line in lsof.stdout.splitlines():
+            if not line.startswith("n"):
+                continue
+            cwd = line[1:].strip()
+            try:
+                cwd_real = os.path.realpath(cwd)
+            except OSError:
+                cwd_real = cwd
+            for wt_real in real_to_path:
+                if cwd_real == wt_real or cwd_real.startswith(wt_real + os.sep):
+                    active.add(wt_real)
+    return active
+
+
 def read_marker(worktree_path):
     """Read the worktree's .claude/land-ready.json finish marker (D2)."""
     marker_path = os.path.join(worktree_path, ".claude", "land-ready.json")
@@ -496,13 +588,23 @@ def main():
     except OSError:
         main_repo_real = REPO
 
+    worktree_records = parse_worktrees(wt_proc.stdout)
+    live_worktrees = live_session_worktrees(
+        [rec.get("worktree") for rec in worktree_records if rec.get("worktree")]
+    )
+
     candidates = []
-    for record in parse_worktrees(wt_proc.stdout):
+    for record in worktree_records:
         worktree_path = record.get("worktree")
         branch = branch_from_record(record)
         if not worktree_path or not branch:
             continue
         if "/.git/beads-worktrees/" in worktree_path:
+            continue
+        # A prior /land-batch scratch is never a candidate for another run.
+        # Without this exclusion, parallel discovery can recurse into an active
+        # integration branch and try to land a run's own in-progress work.
+        if branch.startswith("land-batch/"):
             continue
         if os.path.realpath(worktree_path) == main_repo_real:
             continue
@@ -552,6 +654,14 @@ def main():
                     if short in (rec.get("name") or "").lower():
                         session = dict(rec, joined_by="bead-name")
                         break
+        live_session = worktree_real in live_worktrees
+        if live_session:
+            # A live `claude` process is cwd'd inside this worktree. Force active
+            # even if sessions.py's cwd-join missed it (the Agent View blind spot).
+            if session is None:
+                session = {"active": True, "status": "live-process", "joined_by": "live-process"}
+            else:
+                session = dict(session, active=True, joined_by=session.get("joined_by") or "live-process")
         marker = read_marker(worktree_path)
         has_marker = bool(marker and not marker.get("_invalid") and marker.get("ready") is True)
         auto_land, finish_signal = finish_gate(recommendation, has_marker, session, effectively_clean, ahead)
@@ -580,6 +690,7 @@ def main():
                 "has_marker": has_marker,
                 "land_ready": marker,
                 "session": session,
+                "live_session": live_session,
                 "auto_land": auto_land,
                 "finish_signal": finish_signal,
                 "_branch_ref": branch_ref,
@@ -635,6 +746,7 @@ def main():
         "candidates": candidates,
         "sibling_conflicts": sibling_conflicts,
         "active_sessions": active_sessions,
+        "lock_queue": load_lock_queue_state(),
     }
     print(json.dumps(report, separators=(",", ":")))
 

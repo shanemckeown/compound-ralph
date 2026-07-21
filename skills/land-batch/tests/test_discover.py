@@ -168,3 +168,15 @@ def test_auto_land_blocked_by_base_conflict(tmp_path):
     assert candidate["conflicts_with_base"] is True
     assert candidate["auto_land"] is False
     assert candidate["finish_signal"] == "skip-conflict"
+
+
+def test_land_batch_integration_branch_is_never_a_discovery_candidate(tmp_path):
+    repo = _init_repo(tmp_path)
+    wt = _add_worktree(repo, tmp_path, "land-batch/20260721-123456")
+    _write(wt / "feature.txt", "in-progress integration work\n")
+    _commit_all(wt, "integration merge")
+
+    report = _discover(repo, tmp_path / "home")
+
+    assert all(candidate["branch"] != "land-batch/20260721-123456" for candidate in report["candidates"])
+    assert report["lock_queue"]["available"] is True
