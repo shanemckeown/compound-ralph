@@ -1,13 +1,18 @@
 """Pytest coverage for /land-batch's cross-session admission state."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 
 
+LAND_STATE_PATH = Path(__file__).resolve().parent.parent / "bin" / "land-state.py"
 SPEC = importlib.util.spec_from_file_location(
     "land_batch_state",
-    Path(__file__).resolve().parent.parent / "bin" / "land-state.py",
+    LAND_STATE_PATH,
 )
 land_state = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(land_state)
@@ -26,6 +31,45 @@ def _identity(run_id, mode="land"):
         "scratch_path": None,
         "evidence_dir": None,
     }
+
+
+def _wait_process(state_dir, identity):
+    """Run the CLI wait command with a short poll interval for subprocess tests."""
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(LAND_STATE_PATH),
+            "--state-dir",
+            str(state_dir),
+            "wait",
+            "--run-id",
+            identity["run_id"],
+            "--mode",
+            identity["mode"],
+            "--claude-pid",
+            str(identity["claude_pid"]),
+            "--pid-start-time",
+            identity["pid_start_time"] or "",
+            "--stage",
+            identity["stage"],
+            "--poll-min",
+            "0.01",
+            "--poll-max",
+            "0.01",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wait_until(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 def test_lock_acquire_heartbeat_and_release(tmp_path):
@@ -82,6 +126,63 @@ def test_queue_tickets_are_fifo_across_simulated_sessions(tmp_path):
     assert land_state.try_acquire_lock(state_dir, first)["acquired"] is True
     assert land_state.release_lock(state_dir, "first-run") is True
     assert land_state.try_acquire_lock(state_dir, second)["acquired"] is True
+
+
+def test_killed_wait_cli_resumes_same_ticket_and_fifo_position(tmp_path):
+    state_dir = tmp_path / "state"
+    holder = _identity("current-holder")
+    earlier = _identity("earlier-ticket")
+    resumed = _identity("resumed-run")
+    first_wait = None
+    resumed_wait = None
+
+    try:
+        assert land_state.try_acquire_lock(state_dir, holder)["acquired"] is True
+        earlier_ticket = land_state.register_ticket(state_dir, earlier)
+
+        first_wait = _wait_process(state_dir, resumed)
+        assert _wait_until(
+            lambda: any(entry.get("run_id") == resumed["run_id"] for entry in land_state.queue_entries(state_dir))
+        )
+        initial_tickets = [
+            entry for entry in land_state.queue_entries(state_dir) if entry.get("run_id") == resumed["run_id"]
+        ]
+        assert len(initial_tickets) == 1
+        initial_order = initial_tickets[0]["order"]
+        assert initial_order > earlier_ticket["order"]
+
+        first_wait.kill()
+        first_wait.communicate(timeout=2)
+
+        # The caller's Claude PID is still alive, so the ticket survives the
+        # killed tool subprocess and a new wait worker must reuse it.
+        resumed_wait = _wait_process(state_dir, resumed)
+        assert _wait_until(
+            lambda: len(
+                [entry for entry in land_state.queue_entries(state_dir) if entry.get("run_id") == resumed["run_id"]]
+            ) == 1
+        )
+        restarted_ticket = next(
+            entry for entry in land_state.queue_entries(state_dir) if entry.get("run_id") == resumed["run_id"]
+        )
+        assert restarted_ticket["order"] == initial_order
+
+        # Let the earlier queued run take its turn, then the restarted wait
+        # process must acquire the lock and print the admission JSON.
+        assert land_state.release_lock(state_dir, holder["run_id"]) is True
+        assert land_state.try_acquire_lock(state_dir, earlier)["acquired"] is True
+        assert land_state.release_lock(state_dir, earlier["run_id"]) is True
+        stdout, stderr = resumed_wait.communicate(timeout=2)
+        assert resumed_wait.returncode == 0, stderr
+        assert json.loads(stdout)["acquired"] is True
+        assert land_state.holder_record(state_dir)["run_id"] == resumed["run_id"]
+        assert not any(entry.get("run_id") == resumed["run_id"] for entry in land_state.queue_entries(state_dir))
+        assert land_state.release_lock(state_dir, resumed["run_id"]) is True
+    finally:
+        for process in (first_wait, resumed_wait):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
 
 
 def test_ledger_read_write_round_trip(tmp_path):

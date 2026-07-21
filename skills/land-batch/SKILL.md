@@ -95,16 +95,58 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-<current-claude-pid>"
 EVIDENCE_DIR="$HOME/.claude/evidence/land-batch/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
 git -C "$REPO" fetch origin main --quiet
-python3 ~/.claude/skills/land-batch/bin/land-state.py wait \
-  --run-id "$RUN_ID" --mode "$MODE" --claude-pid "$CLAUDE_PID" \
-  --pid-start-time "$CLAUDE_PID_START" --session-id "$SESSION_ID" \
-  --agent-view-name "$AGENT_VIEW_NAME" --stage preflight \
-  --evidence-dir "$EVIDENCE_DIR" --repo "$REPO" > "$EVIDENCE_DIR/admission.json"
+ADMISSION_RESULT="$EVIDENCE_DIR/admission.json"
+ADMISSION_EXIT="$EVIDENCE_DIR/admission.exit"
+ADMISSION_LOG="$EVIDENCE_DIR/admission.log"
+ADMISSION_PID="$EVIDENCE_DIR/admission.pid"
+nohup bash -o pipefail -c '
+  python3 ~/.claude/skills/land-batch/bin/land-state.py wait \
+    --run-id "$1" --mode "$2" --claude-pid "$3" \
+    --pid-start-time "$4" --session-id "$5" \
+    --agent-view-name "$6" --stage preflight \
+    --evidence-dir "$7" --repo "$8" > "$9"
+  code=$?
+  printf "%s\n" "$code" > "${10}"
+  exit "$code"
+' bash "$RUN_ID" "$MODE" "$CLAUDE_PID" "$CLAUDE_PID_START" "$SESSION_ID" \
+  "$AGENT_VIEW_NAME" "$EVIDENCE_DIR" "$REPO" "$ADMISSION_RESULT" \
+  "$ADMISSION_EXIT" > "$ADMISSION_LOG" 2>&1 </dev/null &
+printf '%s\n' "$!" > "$ADMISSION_PID"
 ~~~
 
 When locked, wait registers one ticket then polls forever with a randomized
 120–180-second delay. It may acquire only when the lock is free and its ticket
-is oldest surviving; a mkdir race re-enters the loop. There is no timeout.
+is oldest surviving; a mkdir race re-enters the loop. There is no timeout. The
+wait must run detached: a foreground Claude Code Bash tool call has its own
+short execution timeout and will kill it before its next poll.
+
+Poll the result, exit, and PID files with short, bounded tool calls; do not
+foreground-wait. For example, each separate future turn/wakeup may run:
+
+~~~bash
+if test -s "$ADMISSION_RESULT"; then
+  cat "$ADMISSION_RESULT"
+elif test -s "$ADMISSION_PID" \
+  && kill -0 "$(cat "$ADMISSION_PID")" 2>/dev/null; then
+  printf 'still queued, waiting\n'
+elif test -s "$ADMISSION_EXIT"; then
+  printf 'admission exited %s\n' "$(cat "$ADMISSION_EXIT")"
+else
+  printf 'admission worker exited without a result; restart it with the same RUN_ID\n'
+fi
+~~~
+
+If the PID is alive and there is no result, report **“still queued, waiting”**
+and check again on a future turn/wakeup. Claude Code sessions are turn-based,
+not one indefinitely blocking process. Do not launch a second worker while that
+PID is alive. If the worker exited without a successful result, re-run the
+detached block with the **same `RUN_ID`**: `register_ticket()` is idempotent for
+a live run ID, so this resumes its original FIFO ticket without a duplicate or
+queue-position change. A nonempty `admission.json` is the successful
+`wait_for_turn()` JSON return: the run now holds the lock and may proceed with
+the normal, fast one-shot heartbeat and release calls below using that same
+`RUN_ID`.
+
 Update heartbeat at every step boundary:
 
 ~~~bash
