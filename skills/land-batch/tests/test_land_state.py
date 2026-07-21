@@ -238,3 +238,115 @@ def test_prod_archive_preserves_pending_evidence_then_resets_ledger(tmp_path):
     assert "Pending archive check" in (evidence_dir / "pending-qa.md").read_text(encoding="utf-8")
     assert reset["prod_sha"] == "prod-123"
     assert land_state.read_ledger(state_dir)["pending"] == []
+
+
+def test_kickback_record_round_trip_increments_attempt_and_keeps_evidence_history(tmp_path):
+    state_dir = tmp_path / "state"
+    first = land_state.record_kickback(
+        state_dir,
+        "fix/original",
+        {
+            "bead_id": "AestheticcNext-kb01",
+            "session_name": "kickback-AestheticcNext-kb01",
+            "failure_summary": "src/form.tsx",
+            "signature": "files=src/form.tsx;tests=-",
+            "evidence_path": "/evidence/first/scoped-gate.log",
+        },
+    )
+    second = land_state.record_kickback(
+        state_dir,
+        "fix/original",
+        {
+            "bead_id": "AestheticcNext-kb02",
+            "session_name": "kickback-AestheticcNext-kb02",
+            "failure_summary": "tests/form.test.ts",
+            "signature": "files=tests/form.test.ts;tests=submit saves",
+            "evidence_path": "/evidence/second/scoped-gate.log",
+        },
+    )
+
+    stored = land_state.read_kickbacks(state_dir)["lineages"]["fix/original"]
+    assert first["attempt"] == 1
+    assert second["attempt"] == 2
+    assert stored["bead_id"] == "AestheticcNext-kb02"
+    assert stored["evidence_path"] == "/evidence/second/scoped-gate.log"
+    assert stored["history"][0]["evidence_path"] == "/evidence/first/scoped-gate.log"
+
+
+def test_kickback_attempt_cap_and_signature_backstop():
+    first = land_state.kickback_attempt_decision(None, "files=a.ts;tests=-")
+    same = land_state.kickback_attempt_decision(
+        {"attempt": 1, "signature": "files=a.ts;tests=-", "history": []},
+        "files=a.ts;tests=-",
+    )
+    changed = land_state.kickback_attempt_decision(
+        {"attempt": 1, "signature": "files=a.ts;tests=-", "history": []},
+        "files=b.ts;tests=-",
+    )
+    cap = land_state.kickback_attempt_decision(
+        {"attempt": 3, "signature": "files=c.ts;tests=-", "history": []},
+        "files=d.ts;tests=-",
+    )
+
+    assert first == {"dispatch": True, "reason": "first-attempt", "attempt": 1}
+    assert same["dispatch"] is False
+    assert same["reason"] == "signature-unchanged"
+    assert changed == {"dispatch": True, "reason": "signature-changed", "attempt": 2}
+    assert cap["dispatch"] is False
+    assert cap["reason"] == "attempt-cap-exceeded"
+
+
+def test_kickback_classification_holds_baseline_red_and_accepts_branch_introduced_tsc_error():
+    baseline_red = land_state.classify_kickback(
+        baseline_exit_code=1,
+        baseline_artifacts_valid=True,
+        gate_exit_code=1,
+        gate_artifacts_valid=True,
+        gate_output="src/widget.ts(8,4): error TS2322: Type 'string' is not assignable",
+        feature_changed_files=["src/widget.ts"],
+    )
+    baseline_green = land_state.classify_kickback(
+        baseline_exit_code=0,
+        baseline_artifacts_valid=True,
+        gate_exit_code=1,
+        gate_artifacts_valid=True,
+        gate_output="src/widget.ts(8,4): error TS2322: Type 'string' is not assignable",
+        feature_changed_files=["src/widget.ts"],
+    )
+
+    assert baseline_red == {"dispatch": False, "reason": "baseline-red"}
+    assert baseline_green["dispatch"] is True
+    assert baseline_green["reason"] == "branch-introduced-deterministic-code-failure"
+    assert baseline_green["signature"] == "files=src/widget.ts;tests=-"
+
+
+def test_kickback_status_marks_in_flight_ready_and_stalled_without_retrying(tmp_path):
+    state_dir = tmp_path / "state"
+    land_state.record_kickback(
+        state_dir,
+        "fix/stalled",
+        {
+            "bead_id": "AestheticcNext-stall",
+            "session_name": "kickback-stall",
+            "failure_summary": "src/a.ts",
+            "signature": "files=src/a.ts;tests=-",
+        },
+    )
+    land_state.record_kickback(
+        state_dir,
+        "fix/ready",
+        {
+            "bead_id": "AestheticcNext-ready",
+            "session_name": "kickback-ready",
+            "fix_branch": "goal/aestheticcnext-ready",
+            "failure_summary": "src/b.ts",
+            "signature": "files=src/b.ts;tests=-",
+        },
+    )
+
+    stalled = land_state.kickback_status(state_dir, active_session_names=set())
+    statuses = land_state.kickback_status(state_dir, active_session_names={"kickback-stall"})
+
+    assert stalled["lineages"]["fix/stalled"]["state"] == "stalled"
+    assert statuses["lineages"]["fix/stalled"]["state"] == "in-flight"
+    assert statuses["lineages"]["fix/ready"]["state"] == "ready"

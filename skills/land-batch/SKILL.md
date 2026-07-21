@@ -80,7 +80,13 @@ LOCK.d. holder.json contains run_id, mode, claude_pid, pid_start_time,
 session_id, agent_view_name, started_at, stage, heartbeat_at,
 integration_branch, scratch_path, and evidence_dir. QUEUE.d contains sortable
 counter-prefixed ticket JSON. ledger.json is canonical pending QA; pending-qa.md
-is its human-readable projection.
+is its human-readable projection. kickbacks.json is the branch-lineage record
+for autonomous red-gate fixes. Its lineages map is keyed by original branch;
+each current entry has bead_id, session_name, fix_branch, attempt,
+dispatched_at, failure_summary, and signature. It also retains prior attempt
+evidence in history so a repeated signature can be surfaced with both evidence
+sets. Read/write it only through land-state.py, whose atomic write matches
+ledger.json.
 
 ### Step 0 — Admission
 
@@ -179,12 +185,35 @@ bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" > "$EVIDENCE_DIR/discov
 Discovery is read-only and preserves its current candidate contract and complete
 WILL LAND / HELD / BLOCKED / SKIP / SIBLING CONFLICTS rendering. It now excludes
 all land-batch/* branches, preventing in-progress scratch branches from becoming
-candidates, and emits top-level lock_queue state for dashboards.
+candidates, and emits top-level lock_queue state for dashboards. It reads
+kickbacks.json through that state and adds only a presentation label:
+
+- an original branch with a lineage is "KICKED BACK — fix in flight (bead <id>,
+  session <name>)";
+- a candidate whose marker's bead_id (or recorded fix_branch) matches a
+  lineage is "KICKBACK FIX — <original branch> (bead <id>)".
+
+That is presentation, not a rewrite of candidate facts. Do not offer a
+presentation.role == kicked-back-original candidate in multiSelect even if its
+Git facts would otherwise make it auto-landable. A KICKBACK FIX remains a
+normal candidate once it independently satisfies the usual gate.
+
+After admission, and only outside dry-run, update a discovered fix branch while
+keeping discover.sh read-only:
+
+~~~bash
+python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-fix-branch \
+  --original-branch "<presentation.original_branch>" \
+  --fix-branch "<candidate.branch>"
+~~~
 
 Keep the multiSelect curation gate exactly:
 
 - Offer auto_land=true candidates only, with recognisable labels and honest
   one-line safety/caveat descriptions.
+- Render the kickback presentation labels above before normal candidate labels;
+  KICKED BACK originals are surfaced, never selected. KICKBACK FIX candidates
+  identify their original branch but otherwise follow normal curation.
 - At most four options/question and four questions/call. Chunk >4; above 16,
   offer the highest-confidence 16 and visibly log every remainder.
 - Print HELD/BLOCKED/SKIP beside the selector. Deselection is held by Shane.
@@ -214,10 +243,51 @@ exit-code artifacts under scoped-gate-<branch>-*.
 Any red/missing/malformed artifact means:
 
 ~~~bash
-git revert -m 1 "$MERGE_SHA" --no-edit
+git reset --hard "$MERGE_SHA^"
 ~~~
 
-Kick that feature back and continue. For a green feature:
+This reset is LAND-only. At this moment the scratch's bad merge has not been
+pushed, so resetting to its first parent removes the merge completely from the
+eventual main history. Do not replace SHIP Step 6's pushed-main revert with a
+reset: SHIP still uses `git revert -m 1 "$MERGE_SHA" --no-edit`.
+
+Keep every original scoped-gate-<branch>-command/raw-output/exit-code artifact
+exactly as captured; those artifacts remain the failure record. Immediately
+after the reset, collect a kickback decision while the precise pre-merge
+baseline is available:
+
+1. Re-run the exact failed scoped command(s), unchanged, at the scratch's
+   current HEAD. That is origin/main plus only earlier green merges already
+   pushed in this batch. Write separate
+   scoped-baseline-<branch>-command/raw-output/exit-code artifacts. A red or
+   malformed baseline is held as **baseline-red** (or malformed evidence): it
+   is not safe to blame or dispatch against this branch.
+2. Use the exact sensitive-path list in Hard guardrail 5 against both the
+   feature's changed files and files named by the gate failure. A candidate
+   selected through explicit sensitive-path opt-in is categorically ineligible
+   for autonomous dispatch, even if the apparent failure is elsewhere.
+3. A normal TypeScript/lint diagnostic or Jest assertion is eligible only after
+   a green baseline. Exit 134/137, heap-out-of-memory text, SIGABRT-style
+   crashes, or missing/malformed gate evidence are not code failures. For an
+   infra-shaped failure, re-run the identical failed command once and preserve
+   its separate retry artifacts. If it is still infra-shaped, hold it as
+   **infra-after-retry**; never create a code-fix bead for it.
+4. Build a stable signature from the failing files/tests and consult
+   kickbacks.json. Attempt 1 may dispatch. At attempts 2 and 3, dispatch only
+   if the signature differs from the previous attempt; unchanged signatures
+   are held with both current and prior evidence paths. Once three attempts
+   have been dispatched, hold every later failure as **attempt-cap-exceeded**.
+   Use land-state.py's `classify_kickback()` and
+   `kickback_attempt_decision()` helpers rather than improvising the
+   classification/cap logic.
+
+Collect qualifying candidates in the in-memory KICKBACKS list; do not create a
+bead or launch Claude yet. For every non-qualifying result (baseline-red,
+sensitive, conflict, malformed evidence, infra-after-retry, same signature,
+cap, or a live fix session), preserve the evidence and put it in the final
+HELD/BLOCKED report for Shane's judgment.
+
+For a green feature:
 
 ~~~bash
 git push origin HEAD:main
@@ -226,6 +296,109 @@ git push origin HEAD:main
 If push is rejected because main moved, fetch, rebase --rebase-merges origin/main,
 re-gate, retry. Abort/hold rebase conflicts. Never force-push. The no-ff merge
 message ties every land to RUN_ID.
+
+### Step 2.5 — Dispatch qualifying kickback fixes after the final LAND push
+
+Run this only after the Step 2 loop's final push to main, while LAND still holds
+LOCK.d. It is intentionally a short, non-blocking operation. A fix session
+never acquires LAND's lock, edits QUEUE.d, or touches ledger.json: it is an
+ordinary /goal session that stops at a green, pushed feature branch.
+
+For each member of KICKBACKS, first call:
+
+~~~bash
+python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-status
+~~~
+
+It uses sessions.py's existing kill-0 plus PID-identity liveness contract and
+matches the recorded session_name. If the lineage is in-flight, skip it and
+report **fix already in flight**, rather than creating a duplicate bead/session.
+Also re-check `claude agents --json` by session name immediately before launch;
+it is a read-only background-session listing, not a Claude work invocation.
+
+Before Beads creation, capture that final live-agent check as evidence.
+EXISTING_SESSION is the prior lineage's session_name, if there is one; an entry
+in the active array is a live session and must be held as **fix already in
+flight**. Do not create a bead or dispatch this lineage in that case:
+
+~~~bash
+claude agents --json > "$EVIDENCE_DIR/kickback-agents-$BR.json"
+if test -n "${EXISTING_SESSION:-}" \
+  && jq -e --arg name "$EXISTING_SESSION" \
+    '.[] | select(.name == $name)' "$EVIDENCE_DIR/kickback-agents-$BR.json" > /dev/null; then
+  printf 'fix already in flight: %s\n' "$EXISTING_SESSION" \
+    > "$EVIDENCE_DIR/kickback-$BR-held.txt"
+  continue  # Skip this KICKBACKS entry.
+fi
+~~~
+
+Create a new P1 Beads issue from the target repository, never from the vault:
+
+~~~bash
+cd /Users/shane/Documents/GitReBase/AestheticcNext
+# ORIGINAL_LABELS is the comma-separated labels from bd show --json when the
+# original bead is known; otherwise it is empty.
+# Use type=task only when the original work was a task-like operational item;
+# normal gate regressions are type=bug.
+KICKBACK_DEP_ARGS=()
+if test -n "$ORIGINAL_BEAD"; then
+  KICKBACK_DEP_ARGS=(--deps "discovered-from:$ORIGINAL_BEAD")
+fi
+KICKBACK_BEAD="$(bd create --silent \
+  --title "LAND kickback: <original-branch> (<original-bead-or-no-bead>)" \
+  --type "<bug-or-task>" --priority P1 \
+  --labels "land-batch-kickback${ORIGINAL_LABELS:+,$ORIGINAL_LABELS}" \
+  "${KICKBACK_DEP_ARGS[@]}" \
+  --description "<description below>" \
+  --acceptance "<acceptance below>")"
+~~~
+
+The description and acceptance criteria must match normal /goal bead tone:
+self-contained, concrete, and ending at a pushed branch. They must include the
+original branch name; its pre-reset tip SHA; RUN_ID; absolute paths for each
+scoped-gate-<branch>-command/raw-output/exit-code artifact; the failure
+summary; and the exact failed typecheck/lint/Jest command(s). The acceptance
+text must include this exact recipe (with placeholders expanded):
+
+> Start from current origin/main in your own worktree. `git merge
+> <original-branch-tip-SHA>` (merge, NOT cherry-pick — this matters for how the
+> original worktree/branch gets cleaned up later, do not deviate). Make these
+> exact scoped gate commands green: <the exact typecheck/lint/jest commands
+> that failed>. Push your branch. Write .claude/land-ready.json with bead_id set
+> to this kickback bead's id. Do NOT merge to main. Do NOT deploy anything. Stop
+> once your branch is pushed and green.
+
+After the live-session check passes, record the bead and planned Agent View
+session name atomically before launch:
+
+~~~bash
+KICKBACK_SESSION="kickback-$KICKBACK_BEAD"
+KICKBACK_RECORD_JSON="$EVIDENCE_DIR/kickback-$BR-record.json"
+jq -n \
+  --arg bead_id "$KICKBACK_BEAD" \
+  --arg session_name "$KICKBACK_SESSION" \
+  --arg failure_summary "$FAILURE_SUMMARY" \
+  --arg signature "$FAILURE_SIGNATURE" \
+  --arg evidence_path "$PRIMARY_FAILURE_EVIDENCE" \
+  --arg dispatched_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{bead_id:$bead_id,session_name:$session_name,fix_branch:null,
+    failure_summary:$failure_summary,signature:$signature,
+    evidence_path:$evidence_path,dispatched_at:$dispatched_at}' \
+  > "$KICKBACK_RECORD_JSON"
+python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-record \
+  --original-branch "$BR" --record "$KICKBACK_RECORD_JSON"
+cd /Users/shane/Documents/GitReBase/AestheticcNext
+claude --bg --name "$KICKBACK_SESSION" "/goal $KICKBACK_BEAD"
+~~~
+
+KICKBACK_RECORD_JSON contains bead_id, session_name, null fix_branch,
+failure_summary, signature, dispatched_at, and the primary failure evidence
+path. The command intentionally runs from the target repository; never launch
+it from a vault-rooted cwd. If Beads creation or Claude launch fails, preserve
+the error as evidence and surface it; do not list it under AUTO-DISPATCHED
+FIXES. A pre-launch state record is then visibly **stalled**, rather than being
+silently retried. After the last candidate, heartbeat, then proceed to
+Step 3/cleanup/release normally.
 
 ### Step 3 — Harvest QA at land time
 
@@ -378,12 +551,23 @@ bash ~/.claude/skills/land-batch/bin/lock-status.sh
 ~~~
 
 It never locks. It shows holder liveness/run/mode/stage/heartbeat age, complete
-FIFO queue and liveness, plus every pending feature since prod_sha. Discovery's
-top-level lock_queue exposes the same state.
+FIFO queue and liveness, plus every pending feature since prod_sha. It also
+shows every kickback lineage as **in-flight** (recorded session live), **ready**
+(fix branch discovered/pushed and eligible to re-enter normal discovery), or
+**stalled** (session dead with no discovered fix branch). Stalled is explicit:
+never silently retry a dead session. Discovery's top-level lock_queue exposes
+the same state.
 
 Never rename, close, or kill Agent View tabs. Report existing tab names mapped to
 branch/bead, landed/held/conflict/reverted items, scratch cleanup, ledger count,
 staging/prod revision or NOT touched, cited evidence paths, and exact next action.
+For LAND, add a separate **AUTO-DISPATCHED FIXES** section listing original
+branch, kickback bead ID, Agent View session name, one-line failure summary,
+attempt number, and primary evidence path. Keep it strictly separate from the
+HELD/BLOCKED/SKIP judgment section, which contains baseline-red, sensitive,
+conflict, malformed, infra-after-retry, same-signature, cap-exceeded, stalled,
+and launch-failure cases. Do not send Slack/Hermes or other proactive notices;
+the report, discovery label, and --status are the brief.
 
 Run tests with:
 ~/.claude/skills/land-batch/.venv/bin/python -m pytest ~/.claude/skills/land-batch/tests/ -q

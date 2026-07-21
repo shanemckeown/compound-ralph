@@ -180,3 +180,57 @@ def test_land_batch_integration_branch_is_never_a_discovery_candidate(tmp_path):
 
     assert all(candidate["branch"] != "land-batch/20260721-123456" for candidate in report["candidates"])
     assert report["lock_queue"]["available"] is True
+
+
+def test_kickback_lineage_labels_original_and_marker_identified_fix_branch(tmp_path):
+    repo = _init_repo(tmp_path)
+    original = _add_worktree(repo, tmp_path, "fix/AestheticcNext-orig1")
+    _write(original / "feature.txt", "original feature\n")
+    _commit_all(original, "original feature")
+
+    fix = _add_worktree(repo, tmp_path, "goal/aestheticcnext-kb01")
+    _write(fix / "fix.txt", "fix branch\n")
+    _write(
+        fix / ".claude" / "land-ready.json",
+        json.dumps({"ready": True, "bead_id": "AestheticcNext-kb01"}),
+    )
+    _commit_all(fix, "kickback fix")
+
+    home = tmp_path / "home"
+    state_dir = home / ".claude" / "state" / "land-batch"
+    state_dir.mkdir(parents=True)
+    (state_dir / "kickbacks.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "lineages": {
+                    "fix/AestheticcNext-orig1": {
+                        "bead_id": "AestheticcNext-kb01",
+                        "session_name": "kickback-AestheticcNext-kb01",
+                        "fix_branch": None,
+                        "attempt": 1,
+                        "dispatched_at": "2026-07-21T12:00:00Z",
+                        "failure_summary": "src/form.tsx",
+                        "signature": "files=src/form.tsx;tests=-",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _discover(repo, home)
+    original_candidate = _candidate(report, "fix/AestheticcNext-orig1")
+    fix_candidate = _candidate(report, "goal/aestheticcnext-kb01")
+
+    assert original_candidate["presentation"]["role"] == "kicked-back-original"
+    assert original_candidate["presentation"]["label"] == (
+        "KICKED BACK — fix in flight (bead AestheticcNext-kb01, "
+        "session kickback-AestheticcNext-kb01)"
+    )
+    assert fix_candidate["presentation"] == {
+        "role": "kickback-fix",
+        "label": "KICKBACK FIX — fix/AestheticcNext-orig1 (bead AestheticcNext-kb01)",
+        "original_branch": "fix/AestheticcNext-orig1",
+        "state": "stalled",
+    }

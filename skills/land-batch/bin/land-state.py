@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,7 @@ def paths(state_dir: Path | None = None) -> dict[str, Path]:
         "counter": root / "queue-counter",
         "counter_lock": root / "COUNTER-LOCK.d",
         "ledger": root / "ledger.json",
+        "kickbacks": root / "kickbacks.json",
         "pending_qa": root / "pending-qa.md",
         "takeovers": root / "takeovers.jsonl",
         "recovery_lock": root / "RECOVERY-LOCK.d",
@@ -350,6 +352,312 @@ def read_ledger(state_dir: Path | None = None) -> dict[str, Any]:
     }
 
 
+# Keep this list in lockstep with SKILL.md's sensitive-path guardrail. It is
+# intentionally prefix based so changed paths and failing-gate paths receive
+# the same conservative treatment.
+SENSITIVE_PREFIXES = (
+    "lib/db/",
+    "drizzle/migrations/",
+    "lib/stripe/",
+    "lib/auth/",
+    "lib/payments/",
+    "pages/api/auth/",
+    "pages/api/admin/",
+    "pages/api/webhooks/",
+    "lib/email/templates/",
+)
+
+
+def sensitive_paths(paths_to_check: list[str] | tuple[str, ...] | None) -> list[str]:
+    return sorted(
+        {
+            path
+            for path in (paths_to_check or [])
+            if isinstance(path, str) and path.startswith(SENSITIVE_PREFIXES)
+        }
+    )
+
+
+def read_kickbacks_from_value(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalise the branch-keyed kickback store without trusting its input."""
+    raw = raw if isinstance(raw, dict) else {}
+    lineages = raw.get("lineages")
+    if not isinstance(lineages, dict):
+        lineages = {}
+    normalised: dict[str, dict[str, Any]] = {}
+    for branch, value in lineages.items():
+        if not isinstance(branch, str) or not isinstance(value, dict):
+            continue
+        history = value.get("history") if isinstance(value.get("history"), list) else []
+        try:
+            attempt = max(0, int(value.get("attempt", 0)))
+        except (TypeError, ValueError):
+            attempt = 0
+        normalised[branch] = {
+            "bead_id": value.get("bead_id"),
+            "session_name": value.get("session_name"),
+            "fix_branch": value.get("fix_branch"),
+            "attempt": attempt,
+            "dispatched_at": value.get("dispatched_at"),
+            "failure_summary": value.get("failure_summary"),
+            "signature": value.get("signature"),
+            "evidence_path": value.get("evidence_path"),
+            # Retaining prior evidence is needed when a same-signature retry is
+            # surfaced instead of dispatched. The required top-level fields
+            # remain the canonical current attempt.
+            "history": [entry for entry in history if isinstance(entry, dict)],
+        }
+    return {"version": 1, "lineages": normalised}
+
+
+def read_kickbacks(state_dir: Path | None = None) -> dict[str, Any]:
+    return read_kickbacks_from_value(read_json(paths(state_dir)["kickbacks"], default={}))
+
+
+def write_kickbacks(state_dir: Path | None, kickbacks: dict[str, Any]) -> None:
+    p = ensure_state_dir(state_dir)
+    atomic_write_json(p["kickbacks"], read_kickbacks_from_value(kickbacks))
+
+
+def kickback_attempt_decision(previous: dict[str, Any] | None, signature: str) -> dict[str, Any]:
+    """Apply the lineage cap before a new fix bead/session is created.
+
+    Attempts one through three may be dispatched. Once three sessions have
+    been recorded, every later failure is held regardless of signature.
+    """
+    previous = previous if isinstance(previous, dict) else None
+    if previous is None:
+        return {"dispatch": True, "reason": "first-attempt", "attempt": 1}
+    try:
+        prior_attempt = int(previous.get("attempt", 0))
+    except (TypeError, ValueError):
+        prior_attempt = 0
+    if prior_attempt >= 3:
+        return {"dispatch": False, "reason": "attempt-cap-exceeded", "attempt": prior_attempt}
+    if previous.get("signature") == signature:
+        return {
+            "dispatch": False,
+            "reason": "signature-unchanged",
+            "attempt": prior_attempt,
+            "previous_evidence": [
+                item.get("evidence_path")
+                for item in previous.get("history", [])
+                if isinstance(item, dict) and item.get("evidence_path")
+            ],
+        }
+    return {"dispatch": True, "reason": "signature-changed", "attempt": prior_attempt + 1}
+
+
+def normalise_failure_signature(
+    failed_files: list[str] | tuple[str, ...] | None,
+    failed_tests: list[str] | tuple[str, ...] | None,
+) -> str:
+    """Stable, human-readable signature for the retry backstop."""
+    files = sorted({path.strip() for path in (failed_files or []) if isinstance(path, str) and path.strip()})
+    tests = sorted({test.strip() for test in (failed_tests or []) if isinstance(test, str) and test.strip()})
+    return f"files={','.join(files) or '-'};tests={','.join(tests) or '-'}"
+
+
+def extract_failure_targets(output: str) -> tuple[list[str], list[str]]:
+    """Pull only stable file/test identifiers out of normal tsc/lint/Jest text."""
+    files: set[str] = set()
+    tests: set[str] = set()
+    for raw_line in (output or "").splitlines():
+        line = raw_line.strip()
+        # tsc: src/a.ts(4,2): error TS2322 ...; Jest: FAIL tests/a.test.ts
+        ts_match = re.match(r"(.+?\.(?:[cm]?[jt]sx?|json))\(\d+,\d+\):\s+error\s+TS\d+", line)
+        jest_file = re.match(r"FAIL\s+(.+?\.(?:[cm]?[jt]sx?))\b", line)
+        lint_file = re.match(r"(.+?\.(?:[cm]?[jt]sx?))\s*$", line)
+        if ts_match:
+            files.add(ts_match.group(1).strip())
+        elif jest_file:
+            files.add(jest_file.group(1).strip())
+        elif lint_file and "/" in lint_file.group(1):
+            files.add(lint_file.group(1).strip())
+        jest_test = re.match(r"(?:●|\u25cf)\s+(.+)$", line)
+        if jest_test:
+            tests.add(jest_test.group(1).strip())
+    return sorted(files), sorted(tests)
+
+
+def is_infra_failure(exit_code: int | None, output: str) -> bool:
+    low = (output or "").lower()
+    return exit_code in (134, 137) or any(
+        marker in low
+        for marker in (
+            "heap out of memory",
+            "javascript heap out of memory",
+            "sigabrt",
+            "fatal process out of memory",
+        )
+    )
+
+
+def is_deterministic_code_failure(exit_code: int | None, output: str) -> bool:
+    if exit_code is None or exit_code == 0 or is_infra_failure(exit_code, output):
+        return False
+    text = output or ""
+    return bool(
+        re.search(
+            r"error\s+TS\d+|\b(?:eslint|lint)\b.*\berror\b|\b\d+\s+errors?\b|"
+            r"^FAIL\s+|^\s*(?:●|\u25cf)\s+|\bAssertionError\b|\bExpected:",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    )
+
+
+def classify_kickback(
+    *,
+    baseline_exit_code: int | None,
+    baseline_artifacts_valid: bool,
+    gate_exit_code: int | None,
+    gate_artifacts_valid: bool,
+    gate_output: str,
+    feature_changed_files: list[str] | None = None,
+    failed_files: list[str] | None = None,
+    failed_tests: list[str] | None = None,
+    sensitive_opt_in: bool = False,
+    infra_retry_performed: bool = False,
+) -> dict[str, Any]:
+    """Classify a reset LAND gate without performing git or dispatch I/O."""
+    if not baseline_artifacts_valid or baseline_exit_code is None:
+        return {"dispatch": False, "reason": "baseline-evidence-malformed"}
+    if baseline_exit_code != 0:
+        return {"dispatch": False, "reason": "baseline-red"}
+    if not gate_artifacts_valid or gate_exit_code is None:
+        return {"dispatch": False, "reason": "gate-evidence-malformed"}
+    if gate_exit_code == 0:
+        return {"dispatch": False, "reason": "gate-not-red"}
+    if sensitive_opt_in or sensitive_paths((feature_changed_files or []) + (failed_files or [])):
+        return {"dispatch": False, "reason": "sensitive-path"}
+    if is_infra_failure(gate_exit_code, gate_output):
+        return {
+            "dispatch": False,
+            "reason": "infra-after-retry" if infra_retry_performed else "infra-retry-required",
+            "retry_gate": not infra_retry_performed,
+        }
+    if not is_deterministic_code_failure(gate_exit_code, gate_output):
+        return {"dispatch": False, "reason": "non-deterministic-gate-failure"}
+    extracted_files, extracted_tests = extract_failure_targets(gate_output)
+    files = sorted(set((failed_files or []) + extracted_files))
+    tests = sorted(set((failed_tests or []) + extracted_tests))
+    signature = normalise_failure_signature(files, tests)
+    summary_targets = ", ".join(tests or files) or "deterministic scoped gate error"
+    return {
+        "dispatch": True,
+        "reason": "branch-introduced-deterministic-code-failure",
+        "signature": signature,
+        "failed_files": files,
+        "failed_tests": tests,
+        "failure_summary": summary_targets,
+    }
+
+
+def record_kickback(state_dir: Path | None, original_branch: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Atomically append a dispatched attempt for one original-branch lineage."""
+    if not original_branch:
+        raise ValueError("original branch is required")
+    p = ensure_state_dir(state_dir)
+    kickbacks = read_kickbacks(p["root"])
+    previous = kickbacks["lineages"].get(original_branch)
+    try:
+        prior_attempt = int(previous.get("attempt", 0)) if previous else 0
+    except (TypeError, ValueError):
+        prior_attempt = 0
+    history = list(previous.get("history", [])) if previous else []
+    if previous:
+        history.append(
+            {
+                "attempt": prior_attempt,
+                "bead_id": previous.get("bead_id"),
+                "session_name": previous.get("session_name"),
+                "signature": previous.get("signature"),
+                "failure_summary": previous.get("failure_summary"),
+                "evidence_path": previous.get("evidence_path"),
+                "dispatched_at": previous.get("dispatched_at"),
+            }
+        )
+    entry = {
+        "bead_id": record.get("bead_id"),
+        "session_name": record.get("session_name"),
+        "fix_branch": record.get("fix_branch") or (previous or {}).get("fix_branch"),
+        "attempt": prior_attempt + 1,
+        "dispatched_at": record.get("dispatched_at") or utc_now(),
+        "failure_summary": record.get("failure_summary"),
+        "signature": record.get("signature"),
+        "history": history,
+    }
+    # The current evidence path is deliberately retained as an extra field: it
+    # is required to show both evidence sets when a same-signature retry stops.
+    if record.get("evidence_path"):
+        entry["evidence_path"] = record["evidence_path"]
+    kickbacks["lineages"][original_branch] = entry
+    write_kickbacks(p["root"], kickbacks)
+    return entry
+
+
+def update_kickback_fix_branch(state_dir: Path | None, original_branch: str, fix_branch: str) -> dict[str, Any] | None:
+    """Record a discovered, pushed fix branch without creating another attempt."""
+    p = ensure_state_dir(state_dir)
+    kickbacks = read_kickbacks(p["root"])
+    entry = kickbacks["lineages"].get(original_branch)
+    if not entry:
+        return None
+    entry["fix_branch"] = fix_branch
+    write_kickbacks(p["root"], kickbacks)
+    return entry
+
+
+def _active_session_names() -> set[str]:
+    """Use sessions.py's kill-0/liveness contract, never a loose process grep."""
+    script = Path(__file__).with_name("sessions.py")
+    if not script.exists():
+        return set()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if proc.returncode != 0:
+        return set()
+    try:
+        sessions = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(sessions, dict):
+        return set()
+    return {
+        record.get("name")
+        for record in sessions.values()
+        if isinstance(record, dict) and record.get("active") and isinstance(record.get("name"), str)
+    }
+
+
+def kickback_status(state_dir: Path | None = None, active_session_names: set[str] | None = None) -> dict[str, Any]:
+    """Describe a lineage as in-flight, ready, or explicitly stalled."""
+    active_names = _active_session_names() if active_session_names is None else active_session_names
+    lineages = read_kickbacks(state_dir)["lineages"]
+    statuses: dict[str, dict[str, Any]] = {}
+    for original_branch, entry in lineages.items():
+        view = dict(entry)
+        if entry.get("session_name") in active_names:
+            state = "in-flight"
+        elif entry.get("fix_branch"):
+            state = "ready"
+        else:
+            state = "stalled"
+        view["state"] = state
+        statuses[original_branch] = view
+    return {"lineage_count": len(statuses), "lineages": statuses}
+
+
 def write_ledger(state_dir: Path | None, ledger: dict[str, Any]) -> None:
     p = ensure_state_dir(state_dir)
     normalised = read_ledger_from_value(ledger)
@@ -598,6 +906,7 @@ def status_payload(state_dir: Path | None = None) -> dict[str, Any]:
         holder_view["liveness"] = holder_status
         holder_view["heartbeat_age_seconds"] = heartbeat_age_seconds(holder.get("heartbeat_at"))
     ledger = read_ledger(p["root"])
+    kickbacks = kickback_status(p["root"])
     return {
         "state_dir": str(p["root"]),
         "lock": holder_view,
@@ -609,6 +918,7 @@ def status_payload(state_dir: Path | None = None) -> dict[str, Any]:
             "pending": ledger.get("pending", []),
             "takeover_count": len(ledger.get("takeovers", [])),
         },
+        "kickbacks": kickbacks,
     }
 
 
@@ -644,6 +954,19 @@ def human_status(state_dir: Path | None = None) -> str:
     )
     for feature in ledger["pending"]:
         lines.append(f"  - {feature.get('branch', 'unknown')} @ {feature.get('merge_sha', 'unknown')}")
+    kickbacks = status["kickbacks"]
+    lines.append(f"KICKBACKS: {kickbacks['lineage_count']} lineage(s)")
+    for original_branch, entry in kickbacks["lineages"].items():
+        lines.append(
+            "  - {branch}: {state} bead={bead} session={session} attempt={attempt} fix_branch={fix_branch}".format(
+                branch=original_branch,
+                state=entry.get("state"),
+                bead=entry.get("bead_id") or "unknown",
+                session=entry.get("session_name") or "unknown",
+                attempt=entry.get("attempt", 0),
+                fix_branch=entry.get("fix_branch") or "not-yet-discovered",
+            )
+        )
     return "\n".join(lines)
 
 
@@ -705,6 +1028,14 @@ def build_parser() -> argparse.ArgumentParser:
     archive = sub.add_parser("archive-ledger")
     archive.add_argument("--evidence-dir", type=Path, required=True)
     archive.add_argument("--prod-sha", required=True)
+    kickback_record = sub.add_parser("kickback-record")
+    kickback_record.add_argument("--original-branch", required=True)
+    kickback_record.add_argument("--record", type=Path, required=True)
+    kickback_status_parser = sub.add_parser("kickback-status")
+    kickback_status_parser.add_argument("--human", action="store_true")
+    kickback_fix_branch = sub.add_parser("kickback-fix-branch")
+    kickback_fix_branch.add_argument("--original-branch", required=True)
+    kickback_fix_branch.add_argument("--fix-branch", required=True)
     return parser
 
 
@@ -764,6 +1095,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "archive-ledger":
         print(json.dumps(archive_ledger_after_prod(state_dir, args.evidence_dir, args.prod_sha), separators=(",", ":")))
+        return 0
+    if args.command == "kickback-record":
+        record = read_json(args.record, default=None)
+        if not isinstance(record, dict):
+            print(f"invalid kickback record: {args.record}", file=sys.stderr)
+            return 1
+        print(json.dumps(record_kickback(state_dir, args.original_branch, record), separators=(",", ":")))
+        return 0
+    if args.command == "kickback-status":
+        result = kickback_status(state_dir)
+        if args.human:
+            for original_branch, entry in result["lineages"].items():
+                print(
+                    f"{original_branch}: {entry['state']} bead={entry.get('bead_id') or 'unknown'} "
+                    f"session={entry.get('session_name') or 'unknown'} attempt={entry.get('attempt', 0)} "
+                    f"fix_branch={entry.get('fix_branch') or 'not-yet-discovered'}"
+                )
+        else:
+            print(json.dumps(result, separators=(",", ":")))
+        return 0
+    if args.command == "kickback-fix-branch":
+        result = update_kickback_fix_branch(state_dir, args.original_branch, args.fix_branch)
+        if result is None:
+            print(f"unknown kickback lineage: {args.original_branch}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, separators=(",", ":")))
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
 

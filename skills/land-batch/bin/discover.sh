@@ -463,6 +463,32 @@ def load_lock_queue_state():
     return {"available": True, **state}
 
 
+def kickback_presentation(branch, marker, lineages):
+    """Presentation only: preserve candidate facts while making kickbacks clear."""
+    entry = lineages.get(branch)
+    if isinstance(entry, dict):
+        bead_id = entry.get("bead_id") or "unknown"
+        session_name = entry.get("session_name") or "unknown"
+        return {
+            "role": "kicked-back-original",
+            "label": f"KICKED BACK — fix in flight (bead {bead_id}, session {session_name})",
+            "state": entry.get("state"),
+        }
+
+    marker_bead = marker.get("bead_id") if isinstance(marker, dict) else None
+    for original_branch, candidate in lineages.items():
+        if not isinstance(candidate, dict):
+            continue
+        if branch == candidate.get("fix_branch") or (marker_bead and marker_bead == candidate.get("bead_id")):
+            return {
+                "role": "kickback-fix",
+                "label": f"KICKBACK FIX — {original_branch} (bead {candidate.get('bead_id') or 'unknown'})",
+                "original_branch": original_branch,
+                "state": candidate.get("state"),
+            }
+    return None
+
+
 def live_session_worktrees(worktree_paths):
     """Worktrees that currently host a LIVE ``claude`` process, keyed by cwd.
 
@@ -576,6 +602,12 @@ def main():
 
     pr_by_branch = get_prs(REPO)
     sessions_map = load_sessions_map()
+    lock_queue = load_lock_queue_state()
+    kickback_lineages = (
+        lock_queue.get("kickbacks", {}).get("lineages", {})
+        if isinstance(lock_queue.get("kickbacks"), dict)
+        else {}
+    )
     retired_patterns = load_retired_patterns(RETIRED_FILE)
     wt_proc = run_git(["-C", REPO, "worktree", "list", "--porcelain"], timeout=30)
     if wt_proc.returncode != 0:
@@ -665,6 +697,7 @@ def main():
         marker = read_marker(worktree_path)
         has_marker = bool(marker and not marker.get("_invalid") and marker.get("ready") is True)
         auto_land, finish_signal = finish_gate(recommendation, has_marker, session, effectively_clean, ahead)
+        presentation = kickback_presentation(branch, marker, kickback_lineages)
 
         pr = pr_by_branch.get(branch, {})
         candidates.append(
@@ -693,6 +726,7 @@ def main():
                 "live_session": live_session,
                 "auto_land": auto_land,
                 "finish_signal": finish_signal,
+                "presentation": presentation,
                 "_branch_ref": branch_ref,
             }
         )
@@ -746,7 +780,7 @@ def main():
         "candidates": candidates,
         "sibling_conflicts": sibling_conflicts,
         "active_sessions": active_sessions,
-        "lock_queue": load_lock_queue_state(),
+        "lock_queue": lock_queue,
     }
     print(json.dumps(report, separators=(",", ":")))
 
