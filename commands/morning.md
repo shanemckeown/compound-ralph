@@ -143,6 +143,19 @@ Output the briefing directly to the conversation (DO NOT write to a file unless 
 - **Named actions due today:** [anyone specifically named for today — day-5 bumps, a go-live date, a partnership-slot contact, a milestone from §5]
 - [If the plan window hasn't started or has ended, or a scoreboard threshold (§6/§7) was due and never evaluated: say so directly]
 
+### Capture Check — 🔴 MANDATORY, NEVER OMIT
+Pull any new client-call transcripts, then say what landed. **If it fails, print literally `ZOOM FETCH FAILED: <reason>`** — never omit the line.
+
+```bash
+node ~/.config/aestheticc/capture-watcher/zoom-fetch-transcripts.mjs --days 7
+```
+
+- **Zoom:** N of M instances had a transcript, K newly downloaded [name the participants — the topic is always the useless "Personal Meeting Room", so read the `<v Name>` speaker tags to say *who*]
+- **Unprocessed in `~/Downloads`:** count of `*.vtt` / `*transcript*.txt` / `WhatsApp Chat*.zip` not yet run through `/capture-call` — **these carry unextracted client promises**
+- **capture-watcher:** last run time. 🔴 **If over 24h, say so loudly** — it was dead 30 hours with an empty error log and five client captures piling up (`LUCY-fdf18`).
+
+> Zoom fetching lives here rather than on a timer for the same reason as the Fleet Check below: a timer joins the population of unwatched timers. This runs on a path Shane opens for his own reasons. The script keeps its own watermark (`~/.config/aestheticc/zoom-fetch-state.json`), so re-running is free and never re-downloads.
+
 ### Fleet Check — 🔴 MANDATORY, NEVER OMIT
 Run `python3 ~/.claude/scripts/fleet-supervisor.py` and report it here. **If it fails, cannot run, or you skip it, print literally `FLEET CHECK DID NOT RUN: <reason>`.** An absent section is not permitted — the whole point is that its absence is visible.
 
