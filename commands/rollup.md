@@ -37,9 +37,34 @@ merges. That's the entire reason there are two skills. Don't try to merge them.
 
 Skip if `--local`.
 
+### 0a. Close out YOURSELF first
+
+**`ListAgents` never returns the calling session.** The orchestrator's own chat — the one holding
+the reasoning behind the whole batch — is structurally invisible to its own fan-out. So write your
+own fragment *before* messaging anyone. Your session id is the directory name in your scratchpad
+path; confirm it against `claude agents --json` if you need the name.
+
+### 0b. Enumerate from BOTH sources — `ListAgents` alone under-reports
+
+🔴 **`ListAgents` omits live sessions.** Verified 2026-08-11: `aestheticc-8f` had been up 11.1
+hours, was actively in use, and never appeared in the peer list. A fan-out driven by `ListAgents`
+alone silently misses real chats and then reports full coverage.
+
 ```
-ListAgents
+ListAgents                                        # gives names + [ref] + idle/busy state
+claude agents --json                              # gives the true session inventory
 ```
+
+Take `kind == "interactive"` from the CLI as the **denominator**. Anything in the CLI but not in
+`ListAgents` is **uncovered** — you cannot message it (you have no `[ref]`), so **name it in the
+final report as uncovered.** Never let a missing session read as a closed-out one.
+
+🔴 **Names are not unique.** The same run showed `aestheticc-92` as `e4e1a0` in `ListAgents` and
+`e2ed1f64` in the CLI — stale duplicate registrations under one name. **The name is the address,
+so a send can land in the wrong session.** Where the two sources disagree on a name, say so in the
+report rather than assuming the message arrived where you meant.
+
+### 0c. Fan out
 
 Message **every `idle` interactive peer** with `/closeout`.
 
@@ -157,11 +182,17 @@ The live file must be shorter than it was. The *total* must not be.
 
 ```
 Rolled up N sessions · state 392KB → 48KB
-Closed out: 5 idle · Skipped: 2 busy (AestheticcNext-541gn mid-/goal) · No fragment: 0
+Coverage: 7 interactive sessions exist (claude agents --json)
+  closed out 5 · self 1 · skipped 1 busy (AestheticcNext-541gn mid-/goal)
+  🔴 UNCOVERED 1: aestheticc-8f — live 11.1h, absent from ListAgents, could not be messaged
+  ⚠️ name collision: aestheticc-92 resolves to two ids (e4e1a0 / e2ed1f64)
 Recovered: 2 commits with no closeout [recovered]
 Threads: +2 new, 3 resolved · Questions: 1 answered, 2 new
 Initiatives: LUCY-r2zp ×4, LUCY-osi9 ×2, none ×1
 ```
+
+🔴 **State the coverage denominator, always.** "Closed out 5" without "of how many" is the failure
+mode — it reads as complete when it isn't. Report uncovered sessions by name.
 
 Flag every `initiative: none` — unfocused work is worth Shane seeing. Flag contradicting decisions.
 
