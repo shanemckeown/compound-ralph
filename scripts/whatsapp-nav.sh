@@ -91,21 +91,27 @@ case "${1:-}" in
     echo "sheet open" ;;
 
   shot)
+    # 🔴 `screencapture -R` captures a screen REGION, not a window. If anything is stacked
+    # over WhatsApp you silently get THAT app's content instead. Discovered 2026-08-11 when a
+    # "WhatsApp window" capture returned Shane's terminal, full of unrelated output.
+    # `-l<CGWindowID>` would be correct but AXWindowNumber does not exist (-1728), so there is
+    # no window id available here.
+    # Therefore: bring WhatsApp to the front, VERIFY it is frontmost, and REFUSE otherwise.
+    # Never fall back to capturing the whole screen — Shane's display routinely has client
+    # records, and a silent wider capture is worse than no capture.
     running || die "not running"
     dest="${2:?usage: whatsapp-nav.sh shot <path.png>}"
-    # -l<windowid> captures just WhatsApp, so the screenshot carries no other app's content
-    # (Shane's screen routinely has client records on it — do not capture the whole desktop).
-    wid=$(osascript -e 'tell application "System Events" to tell process "WhatsApp" to get value of attribute "AXWindowNumber" of window 1' 2>/dev/null)
-    if [ -n "$wid" ] && [ "$wid" != "missing value" ]; then
-      screencapture -x -o -l"$wid" "$dest" 2>/dev/null || screencapture -x -o "$dest"
-    else
-      osascript -e 'tell application "WhatsApp" to activate' >/dev/null 2>&1
-      screencapture -x -o -R"$(osascript -e 'tell application "System Events" to tell process "WhatsApp" to tell window 1
-        set p to position
-        set s to size
-        return (item 1 of p as string) & "," & (item 2 of p as string) & "," & (item 1 of s as string) & "," & (item 2 of s as string)
-      end tell' 2>/dev/null)" "$dest" 2>/dev/null || screencapture -x -o "$dest"
-    fi
+    osascript -e 'tell application "WhatsApp" to activate' >/dev/null 2>&1
+    sleep 0.8
+    front=$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null)
+    [ "$front" = "WhatsApp" ] || die "WhatsApp is not frontmost (it is '$front'). REFUSING to capture — a region grab here would photograph whatever is on top of it."
+    bounds=$(osascript -e 'tell application "System Events" to tell process "WhatsApp" to tell window 1
+      set p to position
+      set s to size
+      return (item 1 of p as string) & "," & (item 2 of p as string) & "," & (item 1 of s as string) & "," & (item 2 of s as string)
+    end tell' 2>/dev/null)
+    [ -n "$bounds" ] || die "could not read window bounds"
+    screencapture -x -o -R"$bounds" "$dest" 2>/dev/null
     [ -s "$dest" ] || die "screenshot produced no file — check Screen Recording permission"
     echo "$dest" ;;
 
