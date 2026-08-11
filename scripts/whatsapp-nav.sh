@@ -34,10 +34,21 @@ die() { echo "whatsapp-nav: $*" >&2; exit 1; }
 
 running() { pgrep -x WhatsApp >/dev/null; }
 
+# 🔴 WhatsApp must be FRONTMOST or menu clicks silently do nothing — osascript still
+# returns the menu-item reference, so it reads as success. Measured 2026-08-11: clicking
+# Contact Info while WhatsApp was backgrounded produced no sheet and no error. That is
+# this codebase's signature failure mode (a success signal that is a proxy, not the thing),
+# so activate first and verify the effect, never the call.
 click_menu() {  # click_menu <menu-bar-item> <item-name>
+  osascript -e 'tell application "WhatsApp" to activate' >/dev/null 2>&1
+  sleep 0.4
   osascript -e "tell application \"System Events\" to tell process \"WhatsApp\"
     click menu item \"$2\" of menu 1 of menu bar item \"$1\" of menu bar 1
   end tell" >/dev/null 2>&1
+}
+
+sheet_count() {
+  osascript -e 'tell application "System Events" to tell process "WhatsApp" to return count of sheets of window 1' 2>/dev/null | tr -d '[:space:]'
 }
 
 case "${1:-}" in
@@ -55,8 +66,29 @@ case "${1:-}" in
   chats) running || die "not running"; click_menu View "${LTR}Chats" || die "View > Chats failed" ;;
   next)  running || die "not running"; click_menu View "${LTR}Next Chat" || die "View > Next Chat failed" ;;
   prev)  running || die "not running"; click_menu View "${LTR}Previous Chat" || die "View > Previous Chat failed" ;;
-  back)  running || die "not running"; click_menu View "${LTR}Back" || die "View > Back failed" ;;
-  info)  running || die "not running"; click_menu "$CHAT_MENU" "${LTR}Contact Info" || die "Chat > Contact Info failed" ;;
+  back)
+    # 🔴 View > Back does NOT dismiss the Contact Info sheet (verified 2026-08-11 — the sheet
+    # survived it). A sheet is dismissed with Escape. Kept as a separate verified step because
+    # leaving a sheet open silently changes what a subsequent click lands on, and the
+    # neighbours of Export Chat are Clear Chat / Delete Chat / Block.
+    running || die "not running"
+    osascript -e 'tell application "WhatsApp" to activate' >/dev/null 2>&1; sleep 0.3
+    osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1   # Escape
+    sleep 1
+    n=$(sheet_count)
+    if [ "$n" != "0" ]; then
+      click_menu View "${LTR}Back"; sleep 1; n=$(sheet_count)
+    fi
+    [ "$n" = "0" ] || die "sheet still open (sheets=$n) — do NOT proceed to click blind"
+    echo "closed" ;;
+
+  info)
+    # Verify the EFFECT (a sheet exists), never the call. The click returns success either way.
+    running || die "not running"
+    click_menu "$CHAT_MENU" "${LTR}Contact Info"; sleep 1.5
+    n=$(sheet_count)
+    [ "$n" = "1" ] || die "Contact Info did not open a sheet (sheets=$n). Is a chat actually selected? Refusing to continue — a blind click here can hit Clear Chat, Delete Chat or Block."
+    echo "sheet open" ;;
 
   shot)
     running || die "not running"
