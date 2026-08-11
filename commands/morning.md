@@ -143,8 +143,20 @@ Output the briefing directly to the conversation (DO NOT write to a file unless 
 - **Named actions due today:** [anyone specifically named for today — day-5 bumps, a go-live date, a partnership-slot contact, a milestone from §5]
 - [If the plan window hasn't started or has ended, or a scoreboard threshold (§6/§7) was due and never evaluated: say so directly]
 
+### Fleet Check — 🔴 MANDATORY, NEVER OMIT
+Run `python3 ~/.claude/scripts/fleet-supervisor.py` and report it here. **If it fails, cannot run, or you skip it, print literally `FLEET CHECK DID NOT RUN: <reason>`.** An absent section is not permitted — the whole point is that its absence is visible.
+
+- **Coverage:** N sessions (from `claude agents --json`), M blocked and triaged
+- 🔴 **Finished but NOT landed:** [bead + branch + commits, or "none"]
+- 🔴 **Awaiting Shane:** [sessions genuinely stopped on a decision, with how long]
+- **Interrupted:** [sessions cut off mid-response — untrustworthy until re-verified]
+- **Watchers alive?** capture-watcher last run, bd-reap, night-batch — say when each last fired, and **say so loudly if any has not run in over 24h**
+
+> **Why this lives here and not in a timer** (decided 2026-08-11, after Codex and Fable split on it): a launchd job would join `bd-reap`, `capture-watcher` and `ops-daemon` — all of which run unwatched, and not one has ever reported itself down. `capture-watcher` was dead for 30 hours with an empty error log and five unprocessed client captures piling up, and nothing said a word. `/morning` is the one recurring trigger attached to something Shane wants **for himself**, so it will not quietly stop being run the way bedtime did. The who-watches-the-watcher regress terminates at a human's own recurring want — that is the only place it can terminate. Blocked work rots over days, so there is no latency argument for a timer.
+
 ### Last Session
-[1-2 sentences from LUCY_SESSION_STATE.md — what was done, what was queued]
+[1-2 sentences from `LUCY_SESSION_STATE.md` — what was done, what was queued]
+- **Un-rolled closeouts:** N fragments in `Sessions/closeouts/`, oldest X days, state file Y KB — from `ls` and `stat`, no rollup logic. **If N > 10 or the state file is over 60 KB, say "run `/rollup`".** `/rollup` fires on Shane's memory, which is the same trigger class that killed `/night`; this line is what makes forgetting it visible.
 
 ### Outreach (lead during a sales/outreach sprint — skip if phase isn't outreach)
 - **Replies waiting:** X unread in Instantly [flag any positive/booking replies by name]
