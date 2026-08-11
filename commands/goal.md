@@ -2,9 +2,9 @@
 
 Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
 
-Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER Shane merges the branch and fires `@deploy-staging`. Production deploys require Shane's explicit sayso in a foreground chat.
+Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
 
-🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached by Shane merging to main → `@deploy-staging`. /goal stops at "branch pushed + bead closed."
+🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached by Shane merging to main, then the normal staging deploy. /goal stops at "branch pushed + bead closed."
 
 ## 🔴 HARD RULE: No `result:` until every in-scope bead is verified CLOSED
 
@@ -131,7 +131,110 @@ Each PLAN contains:
 
 For bundles, execution order should batch tightly-coupled children together but otherwise run smallest-first to surface failures early.
 
-If any single PLAN is architecturally significant (>3 files, touches lib/, touches API surface), run `/plan-eng-review` against it first.
+### Phase 2b — Plan review gate (MANDATORY, runs before Build)
+
+CLAUDE.md declares the plan-review pipeline mandatory. This phase is what makes that
+true — before 2026-07-25 the gate existed only as prose and was silently skipped on
+every `/goal` dispatch. Do not proceed to Phase 3 without running this.
+
+**1. Classify the change.** From PLAN.md's *Affected files* plus the bead labels, derive:
+
+| Signal | How to read it |
+|---|---|
+| `touchesCore` | `lib/`, or any API surface |
+| `touchesSensitive` | auth, multi-tenancy, payments/Stripe, migrations, consent/PII, GDPR deletion |
+| `userSurfaceNew` | a net-new page, flow, or feature entry point |
+| `userSurfaceOverhaul` | restructures surface users already have: step or page count changes, navigation/IA changes, large layout shift, or replaces a page they already use |
+| `userSurfaceMinor` | everything else user-visible — copy, one control, styling, a fix inside an existing flow |
+| `scopeDivergence` | the plan is materially bigger or more heavy-handed than the bead asked for |
+| `isHotfix` | bead is S1/S2 |
+| `isDocsOnly` | only `.md` / non-executing assets |
+
+> `fileCount` was deliberately removed as a routing signal on 2026-07-25. It was the old
+> `>3 files` heuristic and it does no useful work: a programmatic change across 100 files
+> can be safer than a 3-file change to payments. Risk lives in *what* is touched, not how
+> much. File count still belongs in the Phase 4b note as context (a large mechanical change
+> should say so and name the pattern), just not as a gate.
+
+**2. Route to reviews.** Keep this gate light on purpose — see the note below.
+
+```
+touchesSensitive       -> /plan-eng-review      # exemption-list domains; over-caution is
+                                               # correct and cheap here
+scopeDivergence        -> /plan-ceo-review      # the taste call worth interrupting for:
+                                               # AI ballooning work for no reason
+userSurfaceNew         -> /plan-design-review   # the plan DOES contain the IA and flow
+userSurfaceOverhaul    -> /plan-design-review   # decisions here — review them while they
+                                               # are still cheap to change
+userSurfaceMinor       -> none                  # Phase 4b catches this class
+isDocsOnly             -> none
+isHotfix (S1/S2)       -> none                  # /review and /ship still run. Never skipped.
+everything else        -> none. Go straight to Build.
+                          The gate that matters for this class is Phase 4b.
+```
+
+🔴 **For `userSurfaceOverhaul`, the design review must answer one question explicitly:
+where does every capability that exists today land in the new structure?** Require a
+literal old → new mapping, one row per existing capability, with "removed" as a permitted
+answer only if it is stated deliberately rather than by omission.
+
+This is the plan-time twin of the Phase 4b reachability diff. 4b asks *where did everything
+actually land* once the code exists; this asks *where is everything supposed to land* while
+it is still cheap to move. The Marketing-Studio regression is precisely the class that
+escapes when only one of the two runs — it was an overhaul, the destinations were never
+mapped, and capabilities fell through into a legacy escape hatch.
+
+> 🔴 **Why this gate is deliberately light (2026-07-25, Shane).** Shane has built Aestheticc
+> with AI since Claude 3 and has pushed through *almost every* pre-build decision as a yes.
+> A gate whose output is "a question before we build" mostly manufactures friction and
+> collects a rubber stamp — and a gate that produces friction without value is a gate that
+> gets skipped, which is how the last one got orphaned. The decisions genuinely worth
+> stopping him for are narrow: heavy-handed scope ballooning, the sensitive domains, and
+> new-or-overhauled user surface. Everything else is caught better *after* the work exists,
+> by **Phase 4b**, where there is real evidence to look at instead of a prediction.
+>
+> **The user-surface split is load-bearing (Shane's refinement, same day).** The first draft
+> of this gate excluded design review entirely, on the reasoning that front-end failures
+> emerge during Build and a plan can't predict a control being demoted to a text link. That
+> is true for *minor* changes and wrong for the other two: when the surface is **new** or
+> being **overhauled**, the plan genuinely does carry the information architecture, the flow,
+> the step and page counts. Those are exactly the decisions that are cheap to change on paper
+> and expensive to change afterwards. Review them there; leave everything else to 4b.
+
+**3. Run them.** If more than one review fires, invoke `/autoplan` — it reads the CEO,
+design, eng and DX review skills from disk and runs them with auto-decisions, which is
+one call instead of N. If exactly one fires, invoke that skill directly.
+
+`/autoplan` is session-aware (it detects `SESSION_KIND` spawned/headless/interactive).
+In a spawned `/goal` it must not block on `AskUserQuestion` — apply the **Shane Decision
+Frame** from CLAUDE.md (most robust long-term choice; don't overscope for imaginary
+scenarios; overscope only when easy AND clearly beneficial).
+
+**4. Capture evidence.** Write each review's output to the run's evidence directory
+alongside the QA evidence, so `/land-batch` and any later audit can see what was gated
+and what it said. A review that ran but left no artifact did not run.
+
+**5. Act on the verdict.**
+- **Blocking findings** → revise PLAN.md, re-run *that* review once. Still blocking →
+  stop, surface to Shane, do not proceed to Build. A refusal here is the gate working.
+- **Non-blocking findings** → record them in PLAN.md under a *Review notes* heading and
+  proceed.
+
+**Proportionality applies to review findings too.** A plan review that objects on
+grounds failing the Part 5 rubric in `Aestheticc/Reference/GRAPH_ARCHITECTURE.md`
+(no two adversarial parties, doesn't break a normal user, trivial real-world remedy) is
+not a blocking finding — note it and move on. The exemption list still bypasses that
+filter and always blocks: cross-tenant leakage, auth bypass, PII exposure, payment
+correctness, GDPR deletion, data loss, **and clinical-safety gates on the prescribing
+pathway** (BMI verification, contraindication blocks, dosing limits).
+
+🔴 **When "a human wouldn't do this check" collides with clinical safety, clinical safety
+wins.** A receptionist wouldn't demand ID over the phone — that correctly kills an
+age-verification build. A receptionist wouldn't check BMI either, but that must NOT kill a
+contraindication block, because on the prescribing pathway our software *is* the clinical
+record, not a general-purpose tool. Ask whose responsibility the surface carries: user-
+initiated marketing output is theirs (don't gate); the clinical record is ours (gate).
+Detail: `feedback_dont_over_gate_user_responsible_features`.
 
 ### Phase 3 — Build (Opus)
 
@@ -180,6 +283,9 @@ set +e
 {
   cat ~/.claude/skills/plan-build-qa/prompts/qa.md
   echo "---"
+  echo "PROJECT CLAUDE.md (calibration rules — apply before assigning S1/S2):"
+  [ -f CLAUDE.md ] && cat CLAUDE.md
+  echo "---"
   echo "PLANS:"
   for f in PLAN.md .plans/goal/*.md; do
     [ -f "$f" ] && echo "## $f" && cat "$f" && echo
@@ -215,17 +321,70 @@ printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
 # the output between the `^codex$` and `^tokens used$` markers.
 ```
 
-Parse the verdict:
-- **PASS + zero S1/S2 + valid evidence:** go to Phase 5.
+**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust Codex's severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — Codex still sometimes over-flags even when told not to.
+
+Parse the (calibrated) verdict:
+- **PASS + zero surviving S1/S2 + valid evidence:** go to Phase 5.
 - **PASS + only S3 + valid evidence:** log S3s as follow-up beads, go to Phase 5.
-- **NEEDS_CHANGES or BLOCK:** ingest findings, fix S1/S2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
-- **After 3 rounds still not clean:** file each remaining finding as a follow-up bead with `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes, and STOP. This is `failed:` not `result:`.
+- **NEEDS_CHANGES or BLOCK, with surviving findings:** ingest findings, fix S1/S2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
+- **After 3 rounds still not clean:** file each remaining finding **that survives calibration** as a follow-up bead with `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes (including any dismissed findings, for a fast audit trail), and STOP. This is `failed:` not `result:`.
 
 **Valid evidence is mandatory:** the verdict must cite the round's command,
 captured output, and exit-code artifacts under `$EVIDENCE_DIR`; those files must
 exist, the output must record the command that actually ran, and both the QA and
 Codex exit-code files must contain `0`. A model-returned PASS without those
 artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
+
+### Phase 4b — User-facing change note (MANDATORY for ANY user surface)
+
+*Fires on `userSurfaceNew`, `userSurfaceOverhaul` **or** `userSurfaceMinor` — all three.
+Unlike the Phase 2b routing, this gate does not grade by size: a one-control change is
+exactly how a capability quietly gets demoted.*
+
+Runs after QA passes, before the branch is pushed. **Backend-only change → one line, skip
+the rest.** Shane can't read the backend anyway and is waiting on tests and expected
+outcomes; this phase exists entirely for the front end.
+
+Write `CHANGE-NOTE.md` at the worktree root, addressed to Shane, in plain language — not
+engineer language, no file paths, no component names. If a sentence would mean nothing to
+a clinic owner, rewrite it.
+
+**The four questions:**
+
+1. **What can a user do now that they couldn't before?** Give the exact click path from
+   landing. "Dashboard → Marketing → New post → Before/after" — not "added to the studio".
+2. **What changed about something they already did?** Same path as before, or moved?
+3. 🔴 **What got harder to reach, or disappeared?** Enumerate every entry point that
+   existed before this change and does not now, or now takes more clicks. **This is the
+   silent-drop catcher and it is the most important line in the note.**
+4. **What did we promise that isn't wired?** Any control added whose label implies more
+   than it does — a button that saves nothing, a link to a page that doesn't exist yet.
+
+**Reachability check — evidence, not vibes.** List every route and nav entry the touched
+feature is reachable from, before and after. Diff the two lists. Then apply:
+
+🔴 **Hard FAIL conditions — these are blocking, not notes:**
+- The feature is built but reachable from **no** navigation path.
+- The only route to it is a link labelled some variant of *"old version" / "classic" /
+  "legacy" / "previous"*. That link is proof the migration did not complete — folding the
+  old thing in was the job, and an escape hatch means it wasn't done.
+- A control that previously had a first-class home is now a text link, below the fold, or
+  buried one level deeper with nothing left at the original location.
+
+A FAIL here does not get written up as a caveat. Fix it, or stop and surface it.
+
+> **Why this phase exists (2026-07-25, Shane).** Documented recurring failure: code
+> technically works — a button does *something* — but not the thing it promised, or a whole
+> feature ships with no path to it in the UI. Live case: the Growth-engine/Marketing-Studio
+> upgrade silently dropped functionality; before/after photos ended up buried in Library and
+> "create with AI" was demoted to a small text link at the bottom behind a "look at the old
+> version" escape hatch, when the whole intent was to fold it in. See
+> `feedback_code_blindness_ghost_features`, `project_promise_debt_feature_does_not_exist`
+> (BET-8: 127 broken promises), `feedback_buttons_dont_disappear_on_empty`.
+>
+> This is the harness that replaces asking Shane questions *before* the work. He says yes to
+> nearly everything up front; what he actually needs is a truthful account of what moved,
+> after, with the evidence in front of him.
 
 ### Phase 5 — Ship to branch (NO deploy)
 
@@ -235,8 +394,12 @@ artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
 
 Steps:
 
+0. **Precondition:** if the change touched any user surface, `CHANGE-NOTE.md` must exist at the worktree root
+   and contain no unresolved Phase 4b FAIL. Missing note or open FAIL → do not push; go
+   back to 4b. *(This precondition is what stops 4b becoming another orphaned gate — the
+   exact failure mode that silently killed the plan-review gate for six weeks.)*
 1. `/ship` to push the feature branch (runs tsc + lint + tests). Do NOT pass any flag that would merge to main.
-2. That's it. **No deploy step.** The branch is now ready for Shane to merge → `@deploy-staging` → QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
+2. That's it. **No deploy step.** The branch is now ready for Shane to merge, then staging QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
 
 If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `needs input:` not `result:` in Phase 7 — the bead stays open.
 
@@ -247,7 +410,7 @@ If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `
 **Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + branch name + list of closed children.
 
 ```bash
-bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Ready for Shane to merge → @deploy-staging for staging QA. No autonomous deploy."
+bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Ready for Shane to merge, then staging QA. No autonomous deploy."
 ```
 
 **Then verify every close stuck.** Per-bead:
@@ -286,10 +449,17 @@ If a precondition fails, leave the worktree in place and say so in the report.
 Final line:
 
 ```
-result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Ready for Shane to merge → @deploy-staging for staging QA. Warnings: <list or none>.
+result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Ready for Shane to merge, then staging QA. Warnings: <list or none>.
+
+USER-FACING CHANGES (Phase 4b):
+<paste CHANGE-NOTE.md in full, or "none — backend only">
 ```
 
-QA happens after Shane merges the branch to main and fires `@deploy-staging` (the main staging service is the only QA surface). /goal does not deploy.
+🔴 **Paste the change note in full, do not link to it.** Shane reads the report; a link to a
+file in a worktree he will never open is the same as not writing it. If any user surface was touched and
+this section is missing, the run is not reportable.
+
+QA happens after Shane merges the branch to main and the normal staging deploy runs (the main staging service is the only QA surface). **Never fire `@deploy-staging`** — that subagent is banned per CLAUDE.md (deploy subagents hallucinate "queued/monitoring/completed" without submitting). /goal does not deploy.
 
 For partial/failed runs:
 
@@ -326,7 +496,7 @@ Full `lib/stripe/` rewrite alone: **refused**. Sensitive-path budget blown.
 
 - Does not merge to main. Ever.
 - **Does not deploy anywhere.** No production, no staging, no worktree revision. No `gcloud builds submit`, no `gcloud run deploy`, no `--tag`, no `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on revisions (`feedback_cloud_run_warm_instance_cost_model.md`) — banned.
-- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER Shane merges the branch and fires `@deploy-staging` himself.
+- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs.
 - Does not refuse-vs-allow on staging deploys — it simply never deploys. (Still refuses with `failed:` if the bead body says "deploy to prod"/"production deploy" — mis-scoped.)
 - Does not bypass `/review` or `/ship` gates. They run inside Phase 5.
 - Does not pick its own bead. Shane (or a future supervisor cron) chooses what to fire on.

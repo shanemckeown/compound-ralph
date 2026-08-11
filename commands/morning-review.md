@@ -18,33 +18,39 @@ Drive the close-out of last night's night-batch results. Pull what shipped, summ
    - Dedupe by bead ID; processed/ wins (it's been actioned).
 
 2. **Gather context per bead.** For each:
-   - Title via `BEADS_DIR=/Users/shane/Documents/Obsidian/.beads bd show <BEAD_ID>` (need `dangerouslyDisableSandbox: true`)
+   - Title via `BEADS_DIR=/Users/shane/Documents/GitReBase/AestheticcNext/.beads bd show <BEAD_ID>` (need `dangerouslyDisableSandbox: true`)
    - Diff stat: `git -C ~/.worktrees/AestheticcNext/<BEAD_ID> diff --shortstat $(git ... merge-base HEAD main)..HEAD`
    - Commits: `git -C <worktree> log --oneline main..HEAD | head -5`
    - **Codex (Gate 3 gating) verdict**: read `<worktree>/.compound-review/codex-<BEAD_ID>.txt` — surface SUMMARY + counts; quote BLOCKER lines verbatim if present
    - **Blind-claude (parallel A/B) verdict**: read `<worktree>/.compound-review/blind-claude-<BEAD_ID>.txt` — secondary comparison data only, NOT a gate. Show counts inline; only quote BLOCKER lines if Codex disagreed.
    - PR state: `gh pr list --head auto/<BEAD_ID> --json url,state,title,number --jq '.[0]'`
+   - **Staging preview URL**: read `~/.claude/hooks/night-batch/state/<BEAD_ID>.preview-url` — `status=ready|pending|failed`; if ready, surface the URL inline so Shane can click-and-QA from any device.
 
-3. **Present rollup.** Single message, scannable:
+3. **Present rollup.** ONE message, scannable. Default mode is summary — no full diffs unless Shane asks. Each green bead gets a preview URL so Shane can click-and-QA from any device.
    ```
    ## Overnight review — YYYY-MM-DD
 
-   3 ready to merge · 1 needs your call · 1 guard failed
+   3 ready to ship · 1 needs your call · 1 guard failed
 
-   🟢 LUCY-XXXX: <title> — 4 files, 87 LOC, /review clean, codex clean (blind 0)
-   🟢 LUCY-YYYY: <title> — 1 file, 12 LOC, /review clean, codex clean (blind 1 NIT)
-   🟡 LUCY-ZZZZ: <title> — 6 files, 142 LOC, codex flagged 2 BLOCKERs (null deref, missing await) — blind agreed
-   🔴 LUCY-AAAA: <title> — Gate 2 fail: touched lib/stripe/checkout.ts (forbidden)
+   🟢 AestheticcNext-XXXX: <title> — 4 files, 87 LOC, codex clean
+       preview: https://auto-aestheticcnext-xxxx---aestheticc-next-staging-...run.app
+   🟢 AestheticcNext-YYYY: <title> — 1 file, 12 LOC, codex clean (blind 1 NIT)
+       preview: <url>
+   🟡 AestheticcNext-ZZZZ: <title> — 6 files, 142 LOC, codex flagged 2 BLOCKERs (null deref, missing await) — blind agreed
+       preview: <url> (use to verify the BLOCKER reproduces)
+   🔴 AestheticcNext-AAAA: <title> — Gate 2 fail: touched lib/stripe/checkout.ts (forbidden)
+       preview: _(not deployed — gate failed)_
 
-   What's the call? You can say:
-   • merge LUCY-XXXX  (or "merge all green" for the 🟢 bucket)
-   • explore LUCY-YYYY  (show full diff + review file)
-   • skip LUCY-ZZZZ   (archive without merging)
-   • deploy           (after merges, kick @deploy to push main → prod staging then prod)
-   • done             (close out, nothing to do)
+   What's the call?
+   • ship all green     ← merge every 🟢, deploy to prod, run canary verify
+   • ship AestheticcNext-XXXX  ← single bead: merge + prod deploy + canary
+   • merge AestheticcNext-XXXX ← merge to main only, no prod deploy yet
+   • explore AestheticcNext-YYYY ← show full diff + codex review text
+   • skip AestheticcNext-ZZZZ  ← archive without merging
+   • done               ← close out
    ```
 
-4. **Wait for Shane's reply.** This is interactive. Don't pre-execute merges.
+4. **Wait for Shane's reply.** Don't pre-execute. Shane mostly types `ship all green` and trusts the gates — explore is opt-in for spot-check days.
 
 ## Action handlers
 
@@ -58,7 +64,7 @@ For each target:
 4. `gh pr merge <number> --squash --delete-branch` (or `--merge` if Shane prefers)
 5. Append a one-liner to `Aestheticc/Ops/Hermes/SHANE_TODO.md` under "Done (most recent 5)": `[YYYY-MM-DD HH:MM UTC] Merged auto-bead <BEAD>: <title> (PR #N)`
 6. Move the marker from `state/<BEAD>.complete` to `state/processed/$(date)/<BEAD>.complete` (or just `rm` if already archived)
-7. Close the bead: `BEADS_DIR=/Users/shane/Documents/Obsidian/.beads bd close <BEAD>` (sandbox off)
+7. Close the bead: `BEADS_DIR=/Users/shane/Documents/GitReBase/AestheticcNext/.beads bd close <BEAD>` (sandbox off)
 
 If push fails (network, auth), surface the exact error — don't pretend success.
 
@@ -78,8 +84,28 @@ Then re-offer the action menu.
 3. Don't close the bead (it's still open for retry / human pickup).
 4. Worktree is left in place — Shane can `git worktree prune` if he wants.
 
-### `deploy`
-Only after at least one merge. Spawn `@deploy-staging` agent (this checks main is clean), then on Shane's word `@deploy` for prod. Don't auto-chain — staging-first is mandatory.
+### `ship all green` or `ship <BEAD>`
+The one-shot Shane uses most mornings: merge approved beads + deploy to prod + canary verify.
+
+**Sequence (NEVER skip a step, NEVER reorder):**
+1. **Confirm scope.** Echo back exactly which beads will ship and the prod URL. If there are 🟡 reviewed beads with codex BLOCKERs, do NOT include them in `ship all green` — those need explicit `ship <BEAD>` with the BLOCKER quoted back ("ship anyway despite null deref?").
+2. **Merge each target.** For each bead in scope: `cd ~/.worktrees/AestheticcNext/<BEAD>` → push if needed → `gh pr create` if no PR → `gh pr merge --squash --delete-branch`. Stop on first merge failure; report which merged + which didn't.
+3. **Update main locally** in `/Users/shane/Documents/GitReBase/AestheticcNext`: `git pull --ff-only origin main` so the prod deploy sees the merged commits.
+4. **Spawn `@deploy` agent.** This is Shane's explicit prod-deploy authorisation via `ship` command — agent rule "no self-deploy prod" doesn't apply because Shane invoked the action. The agent runs Cloud Build against main and waits.
+5. **Wait for build green.** If Cloud Build fails, ALERT loud (the "deploy agents LIE" rule applies — verify `gcloud builds list --ongoing --limit=5` if status looks too good). Do NOT proceed to canary on a failed build.
+6. **Run canary verify.** Spawn the `/canary` skill (post-deploy monitor via browse daemon) against `https://aestheti.cc`. Required checks:
+   - `/api/health` returns 200
+   - Homepage `/` renders without console errors
+   - `/dashboard` loads under demo auth (cookies via `setup-browser-cookies` if not cached)
+   - No Sentry error spike vs the 30-min pre-deploy baseline (compare event counts)
+   If ANY canary check fails: scream loudly, post the failure detail, and STOP. Do NOT close beads or claim success.
+7. **On full pass:** close each merged bead via `BEADS_DIR=/Users/shane/Documents/GitReBase/AestheticcNext/.beads bd close <BEAD>` (sandbox off), append a one-liner per bead to `Aestheticc/Ops/Hermes/SHANE_TODO.md` Done section, archive markers to `state/processed/$(date)/`.
+
+### `merge <BEAD>` (no deploy)
+Merge to main only — no prod deploy, no canary. Used for "I want this in main but I'll deploy a batch later." Same as old behaviour. Keep it for the rare days Shane wants to merge a fix and let the next overnight `@deploy` carry it.
+
+### `deploy` (deprecated, kept for compat)
+Equivalent to running canary-only against current prod (no merge). Spawn `/canary` and report. If you mean "ship", say `ship all green`.
 
 ### `done`
 Close out — confirm nothing left in state/, summarise what merged/skipped/lingered, exit.

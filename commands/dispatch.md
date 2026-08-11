@@ -17,13 +17,13 @@ LUCY-ceg7. Closes the gap between "I have a task right now" and "I want it built
 
 2. **Create a bead** with the description + context, labelled `auto-eligible`:
    ```bash
-   BEAD_ID=$(BEADS_DIR=/Users/shane/Documents/Obsidian/.beads bd create \
+   BEAD_ID=$(BEADS_DIR=/Users/shane/Documents/GitReBase/AestheticcNext/.beads bd create \
      --title "<task title from Shane's input>" \
      --description "<full task description + any reference paths from input>" \
      --type=task --priority=2 \
      --label=auto-eligible \
      --label=dispatch \
-     2>&1 | grep -oE 'LUCY-[a-z0-9]+' | head -1)
+     2>&1 | grep -oE 'AestheticcNext-[a-z0-9]+' | head -1)
    ```
    Need `dangerouslyDisableSandbox: true` for `bd` calls.
 
