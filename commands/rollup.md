@@ -41,7 +41,17 @@ Skip if `--local`.
 ListAgents
 ```
 
-Message **every `idle` interactive peer** with the single word `/closeout`.
+Message **every `idle` interactive peer** with `/closeout`.
+
+🔴 **Address peers as `"name [ref]"`, not `"name"`.** A bare name is rejected —
+`'aestheticc-d6' is not an agent in this conversation` — because cross-session sends require the
+ref as an explicit confirmation that you mean that peer. This costs a whole wasted round trip
+across every session in the fan-out if you get it wrong, so copy the `name [ref]` exactly as
+`ListAgents` printed it. (Verified the hard way, 2026-08-11.)
+
+Include in the message: re-read `~/.claude/commands/closeout.md` (sessions started before the
+rearchitecture may still hold the old 4-6 minute version in context), and an explicit
+"non-interactive, do not ask questions" — one session stopping to ask stalls the whole rollup.
 
 - **Skip `busy` sessions and background `bg` workers** — a session mid-`/goal` is doing real work
   and an inbound message starts a new turn on receipt, which would interrupt it. Note which ones
