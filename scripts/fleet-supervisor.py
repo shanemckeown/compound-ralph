@@ -22,6 +22,52 @@ Usage:
 import json, subprocess, sys, time, os, glob
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
+REPO = "/Users/shane/Documents/GitReBase/AestheticcNext"
+MANIFEST = "/Users/shane/Documents/Obsidian/Aestheticc/Ops/FLEET_MANIFEST.jsonl"
+
+
+def manifest():
+    """Rows written by fleet-dispatch.py, keyed by session id. Survives worktree
+    deletion, which is exactly why /land-batch's worktree-based discovery can't
+    see finished work and this can."""
+    rows = {}
+    try:
+        with open(MANIFEST) as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                    if r.get("session_id"):
+                        rows[r["session_id"]] = r
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return rows
+
+
+def landed(branch):
+    """Did this branch actually reach origin/main?
+
+    🔴 The load-bearing check. A finished session reports 'branch pushed', which
+    is NOT 'landed' — 4 of 10 finished branches were still off main, one for 55
+    days, and every other signal (bead closed, branch present, QA passed) read
+    healthy. Pushed and landed are different claims."""
+    if not branch:
+        return None
+    try:
+        r = subprocess.run(f"git merge-base --is-ancestor origin/{branch} origin/main",
+                           shell=True, cwd=REPO, capture_output=True, timeout=20)
+        if r.returncode == 0:
+            return "LANDED"
+        chk = subprocess.run(f"git rev-parse --verify origin/{branch}",
+                             shell=True, cwd=REPO, capture_output=True, timeout=20)
+        if chk.returncode != 0:
+            return "NO BRANCH"
+        ahead = subprocess.run(f"git rev-list --count origin/main..origin/{branch}",
+                               shell=True, cwd=REPO, capture_output=True, text=True, timeout=20)
+        return f"🔴 NOT LANDED ({ahead.stdout.strip()} commits)"
+    except Exception:
+        return None
 
 # Ordered: FIRST MATCH WINS, and the order is load-bearing.
 #
@@ -108,6 +154,8 @@ def main():
             pass
 
     fleet = agents()
+    man = manifest()
+    subprocess.run("git fetch -q origin", shell=True, cwd=REPO, capture_output=True, timeout=90)
     now = time.time() * 1000
     findings = []
 
@@ -121,7 +169,14 @@ def main():
         path = transcript(sid)
         kind, text, ts = last_turn(path) if path else (None, "", None)
         cls, advice = classify(text) if text else ("NO_TRANSCRIPT", "no transcript found — likely already gone")
+        row = man.get(sid, {})
+        name = a.get("name", "")
+        branch = row.get("expected_branch") or (
+            f"goal/{name.lower()}" if name.lower().startswith(("aestheticcnext-", "lucy-")) else None)
         findings.append({
+            "in_manifest": sid in man,
+            "branch": branch,
+            "landed": landed(branch) if cls in ("DONE_UNCLOSED", "INTERRUPTED") else None,
             "name": a.get("name", "(unnamed)"), "sessionId": sid, "id": a.get("id"),
             "age_days": round(age, 1), "cwd": a.get("cwd", "").split("/")[-1],
             "class": cls, "advice": advice,
@@ -150,9 +205,20 @@ def main():
             continue
         print(f"── {cls} ({len(rows)}) — {rows[0]['advice']}")
         for f in rows:
-            print(f"   {f['age_days']:>5.1f}d  {f['name'][:42]:44s} {f['id']}")
-            print(f"          └ {f['last_turn'][:150]}")
+            flag = "" if f["in_manifest"] else "  [not in manifest]"
+            print(f"   {f['age_days']:>5.1f}d  {f['name'][:42]:44s} {f['id']}{flag}")
+            if f.get("landed"):
+                print(f"          ├ branch {f['branch']}: {f['landed']}")
+            print(f"          └ {f['last_turn'][:140]}")
         print()
+
+    orphans = sum(1 for f in findings if not f["in_manifest"])
+    if orphans:
+        print(f"⚠ {orphans}/{len(findings)} sessions are NOT in the manifest — dispatched before")
+        print("  fleet-dispatch.py existed, or by hand. For those the branch is GUESSED as")
+        print("  `goal/<name>`, so a 'NO BRANCH' line may be a naming mismatch rather than")
+        print("  missing work (goal/9disp-12 uses a hyphen where the bead uses a dot).")
+        print("  Only manifest-recorded rows carry a branch you can trust.\n")
 
     print("🔴 Triage only. Nothing was answered, killed, or cleaned up — that is deliberate.")
     print("   AWAITING_DECISION needs Shane. INTERRUPTED needs re-verifying before it is trusted.")
