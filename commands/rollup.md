@@ -1,89 +1,132 @@
-# /rollup — Fold closeout fragments into session state, and compact
+# /rollup — Close out every chat, fold them in, compact
 
-The single point of merge and compaction. `/closeout` is deliberately cheap and never touches
-`LUCY_SESSION_STATE.md`; **this** is the skill that does.
+**The one verb.** Shane says "roll up" (usually to the orchestrator) and this does the whole
+end-of-arc cycle: closes out every live session, folds their fragments into
+`LUCY_SESSION_STATE.md`, recovers work that never got closed out, and compacts.
 
 Fire it when an **arc of work completes** — not on a clock. Shane's day doesn't end at bedtime,
-so a nightly auto-rollup would clobber threads he intends to keep working the next morning.
+so anything clock-triggered gets skipped, and a skipped compaction is what let the state file
+reach 392 KB and made `/closeout` cost 4-6 minutes.
+
+Supersedes `/night`, which is retired (2026-08-11) — its recovery scan and synthesis are Steps 1
+and 5 here.
 
 ## Usage
 ```
-/rollup              # fold fragments in, compact if needed
-/rollup --hard       # fold in + aggressive compaction regardless of size
-/rollup --dry        # show what would change, write nothing
+/rollup                  # fan out closeout, then merge + compact
+/rollup --local          # skip the fan-out; just merge fragments already on disk
+/rollup --hard           # aggressive compaction regardless of size
+/rollup --dry            # report what would change, write nothing
 ```
 
-## 🔴 Size ceiling — this is the job
+## 🔴 Division of labour — why this isn't one skill
 
-`LUCY_SESSION_STATE.md` must come out of this **under 60 KB**. It hit 392 KB / 1,697 lines by
-2026-08-11 because compaction lived inside `/night`, `/night` stopped being run, and nothing
-failed loudly. That growth is what made `/closeout` cost 4-6 minutes.
+`/closeout` **must** run inside each chat: only that session holds its own conversation, so
+nobody else can write its fragment. `/rollup` **must** run in exactly one place, because it
+merges. That's the entire reason there are two skills. Don't try to merge them.
 
-If the file is over 60 KB when you finish, you have not finished. Compact harder.
+```
+/rollup (here, once)  ──SendMessage──▶  /closeout in session A ──▶ fragment A ─┐
+                      ──SendMessage──▶  /closeout in session B ──▶ fragment B ─┼─▶ merge here
+                      ──SendMessage──▶  /closeout in session C ──▶ fragment C ─┘
+```
 
 ---
 
-## Step 1 — Inventory
+## Step 0 — Fan out `/closeout` to live sessions
 
-```bash
-ls -1 /Users/shane/Documents/Obsidian/Sessions/closeouts/*.md 2>/dev/null | wc -l
-wc -c /Users/shane/Documents/Obsidian/LUCY_SESSION_STATE.md
+Skip if `--local`.
+
+```
+ListAgents
 ```
 
-No fragments and the file is under 60 KB → say so and stop. Don't manufacture work.
+Message **every `idle` interactive peer** with the single word `/closeout`.
 
-## Step 2 — Read fragments, then state
+- **Skip `busy` sessions and background `bg` workers** — a session mid-`/goal` is doing real work
+  and an inbound message starts a new turn on receipt, which would interrupt it. Note which ones
+  you skipped; they get closed out on the next rollup.
+- **Do NOT filter by topic.** Session names (`aestheticc-d6`, `aestheticc-92`) carry no subject,
+  and asking each one what it's about costs a full round trip per session. Closeout is
+  **non-destructive** — it records the session, it doesn't end it, and Shane can carry on in that
+  chat afterwards. So close out everything idle and let each *fragment* declare its own topic and
+  initiative. Filtering belongs at merge time, where you actually have that information.
+- If Shane named a subset ("the marketing chats"), still close out all idle sessions, then say
+  which fragments matched his subset in the final report.
 
-Read every fragment in `Sessions/closeouts/`, oldest first. Then read `LUCY_SESSION_STATE.md`.
-This is the one skill allowed to read it in full.
+Then wait for fragments to land — poll `ls Sessions/closeouts/*.md` until the count stops rising,
+or ~90s, whichever comes first. Sessions that don't produce a fragment go in the report as
+`no fragment (session <name> did not respond)`. Don't block the whole rollup on one silent chat.
+
+## Step 1 — Recovery scan (was `/night` 1b/1c)
+
+Catch work that happened without a closeout — chats Shane closed cold, or a session that died.
+
+```bash
+git -C /Users/shane/Documents/GitReBase/AestheticcNext log --oneline --since="24 hours ago" --all
+git -C /Users/shane/Documents/Obsidian log --oneline --since="24 hours ago"
+git -C /Users/shane/Documents/AestheticcTools log --oneline --since="24 hours ago" 2>/dev/null
+```
+
+Plus beads changed today in both databases (Obsidian `LUCY-*`, AestheticcNext).
+
+Anything not accounted for by a fragment or already in `What We Did` gets folded in tagged
+`[recovered]`. This is the safety net for the whole system — without it, a chat closed without
+`/closeout` vanishes silently.
+
+## Step 2 — Read
+
+Read every fragment in `Sessions/closeouts/`, oldest first. Then `LUCY_SESSION_STATE.md`.
+This is the one skill allowed to read that file in full.
 
 ## Step 3 — Merge
 
-**`## What We Did`** — one line per fragment, `- [MM-DD HH:MM] <the fragment's headline>`.
-Collapse a session's 3-5 bullets into one line unless two are genuinely independent. Carry the
-caveats — a "done" that loses its qualifier here is exactly the failure this file guards against.
+**`## What We Did`** — one line per fragment, `- [MM-DD HH:MM] <headline>`. Collapse a session's
+3-5 bullets into one unless two are genuinely independent. **Carry the caveats** — a "done" that
+loses its qualifier here is exactly the failure this file exists to prevent
+(`Aestheticc/Strategy/PROMISE_AUDIT_COVERAGE_REVIEW_2026-06-17.md`). Group by theme, not by session.
 
-**`## Decisions Made`** — append each fragment's `## Decided` entries. Decisions are durable;
-compact wording, never drop one.
+**`## Decisions Made`** — append each fragment's `## Decided`. Dedupe. Keep rationale. If a
+decision contradicts an earlier one, **surface the conflict, don't resolve it.**
 
-**`## Active Threads`** — add new threads; update status/next for touched ones; for anything named
-in a fragment's `threads_resolved`, mark `Status: Resolved <date>` and drop it in the *next* rollup
-(one cycle of visibility, so `/morning` sees it land).
+**`## Active Threads`** — add new; update touched; anything named in a fragment's
+`threads_resolved` → `Status: Resolved <date>`, dropped at the *next* rollup so `/morning` sees
+it land once.
 
-**`## Queued for Next Session`** — merge, dedupe, drop anything the fragments show as done.
+**`## Queued for Next Session`** — merge, dedupe, drop what the fragments show as done.
 
-**`## Open Questions`** — add new ones; **delete** anything in a fragment's `questions_answered`.
-This is the one section where deletion is correct.
+**`## Open Questions`** — add new; **delete** anything in `questions_answered`. The one section
+where deletion is correct.
 
-**`## Stale Watch`** — add new items. Only remove one after actually verifying it's resolved;
-say in the rollup summary which you verified and how.
+**`## Stale Watch`** — add new. Only remove after actually verifying resolution, and say in the
+report which you verified and how.
 
-**`## Context Worth Knowing`** — append genuinely non-obvious insights. Ruthless here: this section
-is where bloat accumulates. If it reads as generic, it doesn't go in.
+**`## Context Worth Knowing`** — append only genuinely non-obvious insight. This is where bloat
+accumulates; be ruthless.
 
-### Metadata
-Aggregate fragment frontmatter into **one** `# --- Rollup Metadata [date] ---` yaml block at the end
-of `## What We Did` — combined bead/commit lists, sessions rolled, and an initiative tally
-(`LUCY-r2zp: 4, none: 1`). Replace the per-session blocks; do not accumulate 40 of them again.
+**Metadata** — aggregate all fragment frontmatter into **one** `# --- Rollup Metadata [date] ---`
+block: combined bead/commit lists, sessions rolled, initiative tally (`LUCY-r2zp: 4, none: 1`).
+Replace per-session blocks; never accumulate 40 again.
 
 ## Step 4 — Compact
 
-Over 60 KB (or `--hard`):
-- Fold anything older than **14 days** in `What We Did` into a single dated summary line per week.
-- Delete resolved threads that have already had their one cycle of visibility.
-- Drop `Context Worth Knowing` items now encoded somewhere durable (CLAUDE.md, a memory file, a bead) — **link to it instead**.
-- Collapse old rollup metadata blocks into one historical block.
-- **Never touch the 📌 PINNED block at the top.**
+**Hard ceiling: the file comes out under 60 KB.** If it doesn't, you haven't finished.
 
-Output must be shorter than input. Compaction, not restatement.
+- Fold `What We Did` older than **14 days** into one summary line per week
+- Delete resolved threads that have had their one cycle of visibility
+- Drop `Context Worth Knowing` items now encoded durably (CLAUDE.md, a memory file, a bead) — **link instead**
+- Collapse old metadata blocks into one historical block
+- **Never touch the 📌 PINNED block at the top**
+
+Output must be shorter than input.
 
 ## Step 5 — Write, prune, commit
 
 1. Write the merged `LUCY_SESSION_STATE.md`.
-2. Update `LUCY_ADVISORY_CADENCE.json` for any advisory domain the fragments show as reviewed
-   (`last_reviewed` → date, recalc `next_review` from `frequency_days`, `status: current`).
-3. Move rolled-up fragments to `Sessions/closeouts/rolled/<YYYY-MM>/`. Move, don't delete —
-   they're the audit trail, and they compress well in git.
+2. Update `LUCY_ADVISORY_CADENCE.json` for advisory domains the fragments show as reviewed
+   (`last_reviewed` → today, recalc `next_review` from `frequency_days`, `status: current`).
+3. **Move** rolled fragments to `Sessions/closeouts/rolled/<YYYY-MM>/` — move, don't delete.
+   They're the audit trail and they compress well.
 4. Commit:
 ```bash
 ~/.claude/scripts/lucy-closeout-commit.sh "rollup: <N> sessions folded, state <before>KB → <after>KB" \
@@ -94,12 +137,15 @@ Output must be shorter than input. Compaction, not restatement.
 
 ```
 Rolled up N sessions · state 392KB → 48KB
+Closed out: 5 idle · Skipped: 2 busy (AestheticcNext-541gn mid-/goal) · No fragment: 0
+Recovered: 2 commits with no closeout [recovered]
 Threads: +2 new, 3 resolved · Questions: 1 answered, 2 new
 Initiatives: LUCY-r2zp ×4, LUCY-osi9 ×2, none ×1
 ```
 
-Flag any fragment with `initiative: none` — unfocused work is worth Shane seeing.
+Flag every `initiative: none` — unfocused work is worth Shane seeing. Flag contradicting decisions.
 
 ## Related
-- **`/closeout`** — writes the fragments. Cheap, non-interactive, safe to fan out to 20 sessions.
+- **`/closeout`** — writes the fragments. Cheap, non-interactive, safe to fan out.
 - **`/morning`** — reads this file plus any fragments not yet rolled up.
+- ~~`/night`~~ — retired 2026-08-11, absorbed here.
