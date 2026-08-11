@@ -14,9 +14,13 @@ Run these data-gathering steps IN PARALLEL, then synthesize into the briefing fo
 
 ### Step 1: Gather State (All Parallel)
 
-**1a. Read last session state:**
-- Read `LUCY_SESSION_STATE.md` in Obsidian vault root
+**1a. Read last session state — BOTH halves:**
+- Read `LUCY_SESSION_STATE.md` in Obsidian vault root (the compacted, rolled-up history)
+- **Then read every fragment in `Sessions/closeouts/*.md`** — these are closeouts written since
+  the last `/rollup` and are NOT yet in the state file. They are the most recent work, so they
+  matter most. Missing them means briefing Shane on yesterday while last night is invisible.
 - Note: what was worked on, what's next, any open questions
+- If more than ~10 fragments are pending, mention it — that's a nudge to run `/rollup`
 
 **1b. Pull beads from BOTH databases:**
 ```
@@ -43,17 +47,51 @@ git -C /Users/shane/Documents/GitReBase/AestheticcNext status --short
 git -C /Users/shane/Documents/Obsidian log --oneline --since="2 days ago" | head -10
 ```
 
+**1c-bis. Auto-bead PRs ready to land (read-only — surfacing only, NEVER auto-land):**
+The overnight auto-bead pipeline emits fixes as `auto/*` GitHub PRs. They only reach
+main via an interactive `/land-batch` or a PR-based batch — nothing lands them
+automatically (by design: no autonomous deploys). This surfaces the backlog so it
+never silently stacks up (it hit 19 unmerged once). Count + list; do not merge.
+```bash
+git -C /Users/shane/Documents/GitReBase/AestheticcNext status >/dev/null 2>&1 && \
+gh pr list -R shanemckeown/AestheticcNext --state open --limit 80 \
+  --json number,title,headRefName \
+  --jq '[.[] | select(.headRefName|startswith("auto/"))] | "\(length) auto-bead PRs open & unmerged"' \
+  2>/dev/null || echo "gh unavailable"
+```
+- If the count is **> 6**, add a **"Ready to Land"** line to the Priority Stack:
+  "N auto-bead PRs green and unmerged — run `/land-batch` (or PR-based batch) with eyes on it."
+- Flag any that touch clinical/consent/prescribing/auth/stripe/migration paths as
+  **hold-for-review**, not batch-eligible.
+
 **1d. Check for staleness:**
-- Is LUCY_START_HERE.md more than 7 days old? (check "Last Updated" line)
+- Is STATE_OF_THE_BUSINESS.md more than 7 days old? (it's the canonical Layer-1 status file)
 - Any in_progress beads older than 5 days?
 - Any P0 beads older than 3 days?
 
 **1e. Read current context:**
-- Skim LUCY_START_HERE.md for current phase and runway
+- Read `STATE_OF_THE_BUSINESS.md` for current phase, runway, MRR, customer count, active strategic flags (this is canonical — NOT LUCY_START_HERE.md, which is deprecated/stale)
 - Check if any Ralph processes are running:
   ```bash
   ls ~/.worktrees/AestheticcNext/*/.compound/status.md 2>/dev/null
   ```
+
+**1j. Three-Week Plan — today's card (added 2026-07-21, per Shane: "I need you to see it every day"):**
+- Read `Strategy/FOUNDER_TRAJECTORY_2026-07/THREE_WEEK_PLAN_2026-07-20.md` (covers Mon 20 Jul – Fri 7 Aug 2026). This doc exists precisely because five prior "selling is the bottleneck" diagnoses produced zero behavior change — the whole point is that it gets surfaced, not re-discovered.
+- Work out which plan-day today is:
+  - Mon 20 – Fri 24 Jul: pull that exact day's card verbatim from §4 (each day is named and fully scripted).
+  - Sat 25 / Sun 26 Jul: weekend note from §4 (Sat max 2h CRM hygiene only; Sun zero business work).
+  - Mon 27 – Fri 31 Jul (Week 2) or Mon 3 – Fri 7 Aug (Week 3): use the daily template from §3 (sales block 08:30-11:00, dispatch window 11:00-12:00, demos/onboarding 13:30-16:00, flex 16:00-17:30, nightly log 21:00), then layer in any dated milestone from §5 that lands on today specifically (e.g. Mon 27 Jul = NY Skin go-live/cutover day + Jim/Marcelo day-5 bumps if no reply; Tue 28 Jul = cold calling starts, 10 dials/day, + Ansh Dhir slot; Tue 4 Aug = partnership slot; Fri 7 Aug = three-week review + Week 4 decision).
+  - Before 20 Jul or after 7 Aug: the plan window has ended or not started — say so plainly, check whether a retro/Week-4 decision was ever written (§7's fallback trigger: <3 demos delivered by Fri 31 Jul or the Fri 7 Aug bar unmet means the founder-does-outbound motion is falsified at its current design — flag if that threshold was ever evaluated).
+- **Dispatch-gate status (M2, the load-bearing mechanism):** "No fleet dispatches, land-batches, or build sessions before today's log shows ≥5 outbound touches. Sole exception: S1 production incidents." There is currently **no dedicated touch-log file** — the plan's own "nightly log" ritual (§3, §6) has no file to write to yet. Best available proxy until one exists: count today-dated entries in `Growth/LEAD_TRACKER.md` (the real CRM) plus any Gmail sends visible via Gmail search `after:` today to known warm contacts. State the count as a proxy explicitly, don't imply false precision.
+- **Say it plainly, don't bury it in review-length prose:** one line, e.g. `Dispatch gate: 2/5 warm touches today (proxy count, verify manually) — fleet dispatch should stay CLOSED until 5.` If it's already past 11:00 BST and the gate reads under 5, call that out as a live breach happening *today*, not something for tomorrow's CEO review to discover after the fact — that's the entire reason this section exists.
+- Cross-check against any live CEO-review response (`Brain/CEO_Reviews/Responses/[today].md` if one exists yet) — if the gate was already flagged bypassed there, don't re-litigate, just carry the status forward.
+
+**1i. Outreach data (PRIMARY during the outreach sprint):**
+Run these whenever the phase is an outreach/sales sprint — they lead the briefing.
+- **Instantly campaigns** (via `instantly` MCP): `count_unread_emails` (new replies waiting), `get_campaign_analytics` for the live campaigns (sent today, reply rate, **bounce rate** — the ramp is gated on bounce <3%), and `list_emails` to surface any positive replies needing a human.
+- **Warm-lead CRM:** read `Aestheticc/Growth/Outreach/OUTBOUND_CRM.md` — who's drafted-but-unsent, who's due a follow-up, the 📞 call-candidates, and any website signups owed a same-day hello.
+- If the `instantly` MCP is not connected, say so loudly (don't silently skip — replies = revenue) and fall back to the CRM file.
 
 **1h. Pull live platform data (via Aestheticc Ops MCP):**
 If the `aestheticc-ops` MCP server is available, call these tools:
@@ -93,13 +131,26 @@ Output the briefing directly to the conversation (DO NOT write to a file unless 
 ## Morning Briefing — [DATE]
 
 ### Pulse
-- **Runway:** ~X days (from LUCY_START_HERE or last known)
+- **Runway:** ~X days (from STATE_OF_THE_BUSINESS.md or last known)
 - **MRR:** £X (or £0 if pre-revenue)
-- **Phase:** [current phase from LUCY_START_HERE]
+- **Phase:** [current phase from STATE_OF_THE_BUSINESS.md]
 - **Beads:** X open across both DBs | X in progress | X blocked | X ready
+
+### Three-Week Plan — Today's Card
+[Plan-day identity, e.g. "Week 1, Tue 21 Jul — warm calls + the academy"]
+- **Dispatch gate (M2):** X/5 warm touches logged today (proxy — see 1j) — [OPEN for fleet dispatch / CLOSED, work the card first]
+- **Today's blocks:** [the actual time-blocked card for today, pulled from §3/§4/§5 per 1j — sales block first, always]
+- **Named actions due today:** [anyone specifically named for today — day-5 bumps, a go-live date, a partnership-slot contact, a milestone from §5]
+- [If the plan window hasn't started or has ended, or a scoreboard threshold (§6/§7) was due and never evaluated: say so directly]
 
 ### Last Session
 [1-2 sentences from LUCY_SESSION_STATE.md — what was done, what was queued]
+
+### Outreach (lead during a sales/outreach sprint — skip if phase isn't outreach)
+- **Replies waiting:** X unread in Instantly [flag any positive/booking replies by name]
+- **Campaign health:** sent today X | reply rate X% | **bounce X%** [if ≥3%, ramp is blocked — say so]
+- **Warm leads due:** [drafted-but-unsent, follow-ups owed, call-candidates from OUTBOUND_CRM]
+- **Signups owed a hello:** [new website signups not yet contacted]
 
 ### Priority Stack (Today)
 1. **[P0]** [Most critical item — customer-facing or revenue-blocking]
@@ -151,9 +202,9 @@ Output the briefing directly to the conversation (DO NOT write to a file unless 
 ### Daily Promoter Checklist
 Shane is the promoter. These non-negotiable daily activities take <30 mins total:
 - [ ] **LinkedIn** (1 post, 10 mins) — 42 packs ready at `~/Documents/AestheticcTools/project_files/linkedin/`. Use `CONTENT_PILLARS.md` for today's pillar. Mon=Industry, Tue=Founder, Wed=Compliance, Thu=Ops, Fri=Hot Take, Sat=Soft Sell, Sun=Building in Public.
-- [ ] **Follow up warm leads** — Check Instantly for replies. Anyone who opened/clicked but didn't respond gets a manual nudge. Sequence: `Aestheticc/Growth/Playbooks/WARM_LEAD_FOLLOWUP_SEQUENCE.md`
+- [ ] **Follow up warm leads** — Check Instantly for replies + work the `Aestheticc/Growth/Outreach/OUTBOUND_CRM.md` queue. Anyone who opened/clicked but didn't respond gets a manual nudge. Sequence: `Aestheticc/Growth/Playbooks/WARM_LEAD_FOLLOWUP_SEQUENCE.md`
 - [ ] **Cold walk-in planned?** — If near clinic areas today, which 2-3 are on the list?
-[Lucy: flag if any of these haven't happened in 3+ days based on SESSION_STATE.md]
+[Lucy: flag if any of these haven't happened in 3+ days based on LUCY_SESSION_STATE.md]
 
 ### One Thing You Might Not Have Thought Of
 [A genuinely useful observation — could be about the business, a pattern in the data,
@@ -218,7 +269,13 @@ If an advisory domain review is due and Shane has time/interest:
 - Beads MCP plugin (for stats, list, ready, blocked)
 - Git (for recent activity)
 - LUCY_SESSION_STATE.md (for session continuity)
-- LUCY_START_HERE.md (for phase and runway context)
+- STATE_OF_THE_BUSINESS.md (canonical phase / runway / MRR / customer count — replaces deprecated LUCY_START_HERE.md)
+- `instantly` MCP (for reply + campaign health during outreach sprints)
+- Aestheticc/Growth/Outreach/OUTBOUND_CRM.md (warm-lead + signup queue)
 - LUCY_ADVISORY_CADENCE.json (for domain review tracking)
 - AestheticcNext/Product/QA/ (for QA health — dashboard, findings, methodology)
 - Google Sheets MCP (optional — for CFO domain, pending setup)
+
+## Sprint Emphasis
+
+During an **outreach/sales sprint** (check STATE_OF_THE_BUSINESS.md phase), the briefing leads with **Outreach** + **Priority Stack** + **Ops Health**. The **QA Health**, **Beads/git**, and code-dev sections drop to background — show QA only if an S1 is open (it's still a deploy gate) or a weekly audit is overdue; otherwise one line or skip. Don't let code-dev detail bury the sales picture.

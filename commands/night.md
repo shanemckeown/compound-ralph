@@ -1,6 +1,15 @@
 # /night - End-of-Day Refinement
 
-The single point of compaction and synthesis. Run once as Shane's last action before bed. This is the ONLY operation that does a full rewrite of `LUCY_SESSION_STATE.md`.
+End-of-day synthesis and recovery scan.
+
+> 🔴 **`/night` no longer owns compaction — `/rollup` does** (changed 2026-08-11).
+> Shane's day doesn't end at bedtime, so a bedtime-triggered compaction was routinely skipped;
+> `LUCY_SESSION_STATE.md` reached 392 KB as a result, which is what made `/closeout` cost 4-6
+> minutes. Folding fragments and compacting the state file now happens in **`/rollup`**, fired
+> when an arc of work completes. If you want both, run `/rollup` then `/night`.
+>
+> **Do not rewrite `LUCY_SESSION_STATE.md` from this skill.** Two skills claiming the same
+> write is how the old gate went silently unenforced.
 
 ## Usage
 ```
@@ -9,7 +18,13 @@ The single point of compaction and synthesis. Run once as Shane's last action be
 
 ## Why This Exists
 
-Throughout the day, multiple `/closeout` calls append to `LUCY_SESSION_STATE.md`. By evening, it may have 3-5 sessions' worth of accumulated bullets, some redundant, some outdated. `/night` compacts this into a clean handover document for tomorrow's `/morning`.
+Throughout the day, multiple `/closeout` calls each drop a fragment into `Sessions/closeouts/`.
+`/rollup` folds those into `LUCY_SESSION_STATE.md` and compacts it. `/night` is the *synthesis*
+pass on top of that: the recovery scan for work that was never closed out, and the narrative
+handover for tomorrow's `/morning`.
+
+If fragments are still sitting in `Sessions/closeouts/` when `/night` runs, say so and suggest
+`/rollup` — don't fold them in here.
 
 ## When Invoked
 
