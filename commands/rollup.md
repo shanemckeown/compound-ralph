@@ -122,25 +122,35 @@ Replace per-session blocks; never accumulate 40 again.
 
 **Hard ceiling: the file comes out under 60 KB.** If it doesn't, you haven't finished.
 
-- Fold `What We Did` older than **14 days** into one summary line per week
+🔴 **Archive verbatim; compact the live file. Do not summarise history into oblivion.**
+A 14-day age rule does NOT work here — on 2026-08-11 the entire `What We Did` section was inside
+14 days and still 200 KB, because each bullet is a dense paragraph. The vault's own convention is
+the right one: **move old content, word for word, into `LUCY_SESSION_STATE_ARCHIVE_<date>.md`** and
+leave a pointer at the top of the live file. Verify afterwards that live + archive ≥ the original
+byte count; if it's smaller, you deleted something.
+
+- Move `What We Did` older than **~7 days** to the archive verbatim; keep a one-line-per-week pointer
+- Move whole superseded sections (old Decisions/Threads/Queued/Open/Stale/Context) to the archive
+  verbatim, then rewrite the live ones from what is still *live*
 - Delete resolved threads that have had their one cycle of visibility
-- Drop `Context Worth Knowing` items now encoded durably (CLAUDE.md, a memory file, a bead) — **link instead**
-- Collapse old metadata blocks into one historical block
+- Drop `Context Worth Knowing` items now encoded durably (CLAUDE.md, a memory file, a bead) — **link instead**.
+  This is the biggest section and the one that most needs ruthlessness (61 KB of 178 KB on 08-11)
+- Collapse per-session metadata blocks into one Rollup Metadata block — never accumulate 40 again
 - **Never touch the 📌 PINNED block at the top**
 
-Output must be shorter than input.
+The live file must be shorter than it was. The *total* must not be.
 
 ## Step 5 — Write, prune, commit
 
 1. Write the merged `LUCY_SESSION_STATE.md`.
-2. Update `LUCY_ADVISORY_CADENCE.json` for advisory domains the fragments show as reviewed
-   (`last_reviewed` → today, recalc `next_review` from `frequency_days`, `status: current`).
+2. ~~Update `LUCY_ADVISORY_CADENCE.json`~~ — **that file is retired** (found only in `Archive/`,
+   last updated 2026-02-10). Don't look for it. Canonical status lives in `STATE_OF_THE_BUSINESS.md`.
 3. **Move** rolled fragments to `Sessions/closeouts/rolled/<YYYY-MM>/` — move, don't delete.
    They're the audit trail and they compress well.
-4. Commit:
+4. Commit — include the archive file, or the compaction reads as deletion in the diff:
 ```bash
 ~/.claude/scripts/lucy-closeout-commit.sh "rollup: <N> sessions folded, state <before>KB → <after>KB" \
-  LUCY_SESSION_STATE.md LUCY_ADVISORY_CADENCE.json Sessions/closeouts
+  LUCY_SESSION_STATE.md LUCY_SESSION_STATE_ARCHIVE_<date>.md Sessions/closeouts
 ```
 
 ## Step 6 — Report
