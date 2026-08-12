@@ -48,6 +48,14 @@ construct the pages as data in `portal_settings.website_config` → apply to pro
   carousels). Ask WebFetch explicitly about a "scrolling or moving text bar".
 - 🔴 Exact fonts + hex usually need a browser or the client's login — note them as unconfirmed and
   move on; approximate now, refine later. Do not rabbit-hole on scraping CSS.
+- 🔴 **WIX and other JS-heavy builders TRUNCATE in WebFetch** (found on Contour Privé's WIX site,
+  2026-08-12 — content cut off, locations garbled). For those sources, capture via a browser session
+  (Claude-in-Chrome, render each page) OR get the content from the client. Do not trust a truncated
+  WebFetch — it will invent plausible-but-wrong details (it reported "London & Hemel Hempstead" for a
+  Romford/Chelmsford clinic).
+- 🔴 **"New build" ≠ "clone".** If the deal is a *new* site (not a faithful port of the existing one),
+  the existing site is a weak source — the real content comes FROM THE CLIENT (their treatment list,
+  addresses, hours, brand). Don't over-invest in scraping; gather the client's inputs instead.
 - Write it all to `Clients/<Name>/website-clone-source.md`: page inventory, verbatim content mapped
   to intended block types, design notes, and an asset list (which images, how many). This is the
   durable spec every later step reads.
