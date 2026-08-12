@@ -167,9 +167,16 @@ Run `python3 ~/.claude/scripts/fleet-supervisor.py` and report it here. **If it 
 
 > **Why this lives here and not in a timer** (decided 2026-08-11, after Codex and Fable split on it): a launchd job would join `bd-reap`, `capture-watcher` and `ops-daemon` — all of which run unwatched, and not one has ever reported itself down. `capture-watcher` was dead for 30 hours with an empty error log and five unprocessed client captures piling up, and nothing said a word. `/morning` is the one recurring trigger attached to something Shane wants **for himself**, so it will not quietly stop being run the way bedtime did. The who-watches-the-watcher regress terminates at a human's own recurring want — that is the only place it can terminate. Blocked work rots over days, so there is no latency argument for a timer.
 
+### 🔴 Live Work In Flight — DO NOT DUPLICATE
+Read every `Sessions/closeouts/*--ACTIVE.md` (frontmatter `status: in-progress`). For each, check its `session_id` against `claude agents --json`:
+- **Session still live** → list it as "OWNED by `<active_session>`, do not dispatch: `<the DO NOT DUPLICATE items>`". If you are the orchestrator, this is the authoritative list of what's already claimed — do not re-file or re-dispatch any of it.
+- **Session dead** (not in `claude agents --json`, or heartbeat > ~3h stale) → the claim is abandoned. Surface its "If I've died" section as recoverable work.
+
+An ACTIVE fragment is a live claim on a body of work; the whole point is that a fresh `/morning` knows what's being driven elsewhere before it acts.
+
 ### Last Session
 [1-2 sentences from `LUCY_SESSION_STATE.md` — what was done, what was queued]
-- **Un-rolled closeouts:** N fragments in `Sessions/closeouts/`, oldest X days, state file Y KB — from `ls` and `stat`, no rollup logic. **If N > 10 or the state file is over 60 KB, say "run `/rollup`".** `/rollup` fires on Shane's memory, which is the same trigger class that killed `/night`; this line is what makes forgetting it visible.
+- **Un-rolled closeouts:** N fragments in `Sessions/closeouts/`, oldest X days, state file Y KB — from `ls` and `stat`, no rollup logic. **If N > 10 or the state file is over 60 KB, say "run `/rollup`".** `/rollup` fires on Shane's memory, which is the same trigger class that killed `/night`; this line is what makes forgetting it visible. **Never fold an `--ACTIVE` fragment into the state file while its session is alive.**
 
 ### Outreach (lead during a sales/outreach sprint — skip if phase isn't outreach)
 - **Replies waiting:** X unread in Instantly [flag any positive/booking replies by name]
