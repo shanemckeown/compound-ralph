@@ -213,3 +213,21 @@ def test_collect_prefers_active_then_recent(monkeypatch, tmp_path):
     out = sessions.collect(sessions_dir=sdir)
     key = os.path.realpath(cwd)
     assert out[key]["pid"] == 200  # active beats newer-but-dead
+
+
+def test_collect_all_preserves_sessions_that_share_a_cwd(monkeypatch, tmp_path):
+    sdir = tmp_path / "sessions"
+    sdir.mkdir()
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path / "noprojects")
+    monkeypatch.setattr(sessions, "pid_alive", lambda pid: True)
+    cwd = tmp_path / "shared"
+    cwd.mkdir()
+    _session_file(sdir, 100, "sid-parent", str(cwd), "busy", 1000, name="goal AestheticcNext-abcde")
+    _session_file(sdir, 200, "sid-child", str(cwd), "busy", 2000, name="goal AestheticcNext-abcde.2")
+
+    all_records = sessions.collect_all(sessions_dir=sdir)
+    preferred = sessions.collect(sessions_dir=sdir)
+
+    assert [record["session_id"] for record in all_records] == ["sid-parent", "sid-child"]
+    assert len(preferred) == 1
+    assert preferred[os.path.realpath(str(cwd))]["session_id"] == "sid-child"

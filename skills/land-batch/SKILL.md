@@ -1,10 +1,10 @@
 ---
 name: land-batch
-version: 0.3.0
+version: 0.3.1
 description: |
   Serialises parallel Claude worktree landing with a durable lock, FIFO queue,
   and cross-run QA ledger. Default /land-batch cheaply discovers, curates, and
-  lands finished worktrees to main without deploying. /land-batch --ship runs
+  lands finished branches to main without deploying. /land-batch --ship runs
   the full gate, staging QA, and attended prod promotion.
 triggers:
   - merge deploy and qa
@@ -64,9 +64,12 @@ reversal.
    the local merge=ours generated-churn driver; that is not conflict resolution.
 6. **Sensitive paths never auto-land.** Require explicit Shane opt-in and exclude
    a candidate depending on a held sensitive branch.
-7. **Finish gate unchanged.** Require effectively_clean, ahead >=1, non-active
-   session, premise OK, non-sensitive, non-conflicting, non-retired. Optional
-   .claude/land-ready.json boosts confidence and supplies bead_id; tail vetoes
+7. **Worktree finish gate preserved; branch-only completion quarantined.** A
+   worktree source still requires effectively_clean, ahead >=1, non-active
+   session, premise OK, non-sensitive, non-conflicting, and non-retired.
+   A remote-only source is discoverable but never auto-landable in this release,
+   even when exact bead CLOSED + pinned patch-unique tip proves it finished.
+   Optional .claude/land-ready.json remains confidence metadata; tail vetoes
    only, never approves.
 8. **Evidence fail-closed and traffic verified.** Every command/output/exit-code
    artifact must be cited. Build SUCCESS alone does not prove Cloud Run traffic.
@@ -90,8 +93,10 @@ ledger.json.
 
 ### Step 0 — Admission
 
-For a non-dry run, create a stable run/evidence identity and fetch origin/main.
-Dry-run runs read-only discovery/plan first and skips this admission step.
+For a non-dry run, create a stable run/evidence identity and acquire admission.
+Dry-run runs read-only discovery/plan first and skips this admission step. The
+authoritative fetch now occurs after admission, immediately before discovery in
+Step 1, so the admitted run pins one coherent main + goal/* snapshot.
 Resolve the actual current Claude PID and its ps lstart value from session
 metadata; never use an ephemeral shell PID that dies after one tool command.
 
@@ -100,7 +105,6 @@ REPO=/Users/shane/Documents/GitReBase/AestheticcNext
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-<current-claude-pid>"
 EVIDENCE_DIR="$HOME/.claude/evidence/land-batch/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
-git -C "$REPO" fetch origin main --quiet
 ADMISSION_RESULT="$EVIDENCE_DIR/admission.json"
 ADMISSION_EXIT="$EVIDENCE_DIR/admission.exit"
 ADMISSION_LOG="$EVIDENCE_DIR/admission.log"
@@ -176,22 +180,51 @@ Release only during final cleanup. --status never takes a lock.
 
 ## LAND mode
 
-### Step 1 — Discovery and unchanged curation
+### Step 1 — Branch discovery and curation
 
 ~~~bash
-bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" > "$EVIDENCE_DIR/discover.json"
+# Non-dry only, after admission. Keep discovery immediately after this fetch.
+git -C "$REPO" fetch origin main \
+  '+refs/heads/goal/*:refs/remotes/origin/goal/*' --quiet
+LAND_BATCH_REF_SNAPSHOT=fetched-after-admission \
+  bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" \
+  > "$EVIDENCE_DIR/discover.json"
 ~~~
 
-Discovery is read-only and preserves its current candidate contract and complete
-WILL LAND / HELD / BLOCKED / SKIP / SIBLING CONFLICTS rendering. It now excludes
-all land-batch/* branches, preventing in-progress scratch branches from becoming
-candidates, and emits top-level lock_queue state for dashboards. It reads
-kickbacks.json through that state and adds only a presentation label:
+Strict dry-run performs no fetch and uses the cached remote-tracking snapshot:
+
+~~~bash
+DISCOVERY_JSON="$(LAND_BATCH_REF_SNAPSHOT=cached-remote-tracking \
+  bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO")"
+~~~
+
+Discovery never fetches or mutates refs itself. Verify `ref_snapshot.mode` in
+its JSON and print **“dry-run: cached remote-tracking snapshot; no fetch”** for
+dry-run. It enumerates the union of eligible attached worktrees and cached
+`refs/remotes/origin/goal/*`; a matching worktree preserves the legacy source
+and gate, while an otherwise invisible remote branch is nullable enrichment:
+`source_kind=remote-branch`, `worktree_path/root/clean/effectively_clean=null`.
+It batch-classifies ancestry first and omits already-merged remote-only refs
+before candidate construction or per-candidate enrichment, reporting only the
+top-level `skipped_merged_count`; a worktree-backed branch remains visible as
+`skip-merged` even when its tip is already in main. Every candidate carries
+`source_ref` and `tip_sha`. It classifies fully landed
+patches as `skip-patch-equivalent` before merge analysis, explicit retired.txt
+matches as hard `skip-retired`, age >45 as loud `held-stale`, and base conflicts
+as loud `held-conflict` with `conflicting_files`.
+
+An exact/uniquely aliased CLOSED bead plus a pinned patch-unique remote tip is
+finish evidence only. Render it exactly as **HELD — branch-only completion;
+premise review required** and never offer it in this release. Unresolved or
+ambiguous bead identity is also HELD, never guessed. Discovery still renders
+complete WILL LAND / HELD / BLOCKED / SKIP / SIBLING CONFLICTS sections,
+excludes all land-batch/* branches, and emits top-level lock_queue state. It
+reads kickbacks.json through that state and adds only a presentation label:
 
 - an original branch with a lineage is "KICKED BACK — fix in flight (bead <id>,
   session <name>)";
-- a candidate whose marker's bead_id (or recorded fix_branch) matches a
-  lineage is "KICKBACK FIX — <original branch> (bead <id>)".
+- a candidate whose resolved bead_id, marker bead_id, or recorded fix_branch
+  matches a lineage is "KICKBACK FIX — <original branch> (bead <id>)".
 
 That is presentation, not a rewrite of candidate facts. Do not offer a
 presentation.role == kicked-back-original candidate in multiSelect even if its
@@ -218,7 +251,10 @@ Keep the multiSelect curation gate exactly:
   offer the highest-confidence 16 and visibly log every remainder.
 - Print HELD/BLOCKED/SKIP beside the selector. Deselection is held by Shane.
 - Sensitive candidates require separate explicit opt-in; choose at most one of a
-  sibling-conflict pair; offer only safe clean ahead=0/retired bulk pruning.
+  sibling-conflict pair.
+- Offer safe pruning only for `source_kind=worktree` records that satisfy the
+  existing clean ahead=0 or explicit-retired rules. A `remote-branch` record
+  must never enter pruning: pruning removes worktrees, and it has none.
 
 Dry-run stops after that plan without admission/mutation.
 
@@ -226,10 +262,24 @@ Dry-run stops after that plan without admission/mutation.
 
 Create fresh scratch off origin/main on local branch land-batch/RUN_ID. Configure
 the existing .beads merge=ours driver in common git info attributes. For every
-selected branch, merge sequentially:
+selected branch, use the candidate's pinned `source_ref` and `tip_sha`. Verify
+the ref again immediately before its merge; if it is missing or moved, HOLD it
+as **source-moved — rediscovery required** and do not merge any other ref or a
+same-named local branch in its place:
 
 ~~~bash
-git merge --no-ff --no-verify "$BR" -m "land: $BR (batch $RUN_ID via /land-batch)"
+BR="<candidate.branch>"
+SOURCE_REF="<candidate.source_ref>"
+SOURCE_SHA="<candidate.tip_sha>"
+if ! CURRENT_SOURCE_SHA="$(
+  ~/.claude/skills/land-batch/bin/verify-pinned-source.sh \
+    "$REPO" "$SOURCE_REF" "$SOURCE_SHA"
+)"; then
+  printf 'HELD source missing/moved; rediscover: %s\n' "$SOURCE_REF"
+  continue
+fi
+git merge --no-ff --no-verify "$SOURCE_SHA" \
+  -m "land: $BR @ $SOURCE_SHA (batch $RUN_ID via /land-batch)"
 MERGE_SHA="$(git rev-parse HEAD)"
 ~~~
 
@@ -406,13 +456,17 @@ Immediately after every green push, move the former three-source QA assembly
 here, rather than delaying it until SHIP:
 
 1. candidate.session.last_assistant_tail and optional marker known_issues,
-   planning input only;
+   planning input only. Either may be null for branch-only records; do not
+   fabricate a tail/marker or treat absence as failure;
 2. bd show bead acceptance criteria;
 3. git show --stat MERGE_SHA to derive a smoke check when needed.
 
 Write harvested-checks.json and harvested-checks.md in evidence, with one feature
-entry containing branch, merge_sha, landed_at, sources, concrete checks, and
-per-feature checklist markdown. These plans are not QA evidence. Append them:
+entry containing branch, `source_kind`, `source_ref`, `source_sha` (the pinned
+candidate `tip_sha`), merge_sha, landed_at, sources, concrete checks, and
+per-feature checklist markdown. When session/marker data is null, derive the
+plan from bead acceptance + the pinned source diff/stat. These plans are not QA
+evidence. Append them:
 
 ~~~bash
 python3 ~/.claude/skills/land-batch/bin/land-state.py ledger-append \

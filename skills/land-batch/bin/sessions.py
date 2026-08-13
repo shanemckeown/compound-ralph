@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Join live Claude sessions to worktrees and read transcript tails.
 
-Stdout: a JSON object mapping ``realpath(cwd)`` -> session record. Consumed by
-``discover.sh`` to enrich land-batch candidates with session + chat state.
+Stdout: by default, a JSON object mapping ``realpath(cwd)`` -> preferred session
+record. ``--all`` emits every session record so branch-level joins do not lose
+sessions that share a cwd. Consumed by ``discover.sh`` for both joins.
 
 Locked contract (ENG_REVIEW.md, 2026-05-28):
 - transcript located by sessionId glob under ~/.claude/projects (NO newest-jsonl
@@ -213,6 +214,7 @@ def build_session_record(meta, now=None):
 
     idle_min = round((now - transcript_mtime) / 60, 1) if transcript_mtime else None
 
+    process_alive = pid_alive(pid)
     return {
         "pid": pid,
         "session_id": session_id,
@@ -224,6 +226,7 @@ def build_session_record(meta, now=None):
         "transcript_mtime": transcript_mtime,
         "idle_min": idle_min,
         "active": is_active(pid, status, transcript_mtime, now=now),
+        "process_alive": process_alive,
         "last_assistant_tail": assistant_tail,
         "last_user": last_user,
         "sentinel": sentinel,
@@ -239,9 +242,9 @@ def _prefer(new, old):
     return (new.get("updated_at") or 0) > (old.get("updated_at") or 0)
 
 
-def collect(sessions_dir=SESSIONS_DIR, now=None):
+def collect_all(sessions_dir=SESSIONS_DIR, now=None):
     now = time.time() if now is None else now
-    out = {}
+    out = []
     for session_file in sorted(Path(sessions_dir).glob("*.json")):
         try:
             meta = json.loads(session_file.read_text(encoding="utf-8"))
@@ -255,6 +258,16 @@ def collect(sessions_dir=SESSIONS_DIR, now=None):
         except OSError:
             key = cwd
         record = build_session_record(meta, now=now)
+        record["cwd"] = cwd
+        record["real_cwd"] = key
+        out.append(record)
+    return out
+
+
+def collect(sessions_dir=SESSIONS_DIR, now=None):
+    out = {}
+    for record in collect_all(sessions_dir=sessions_dir, now=now):
+        key = record["real_cwd"]
         existing = out.get(key)
         if existing is None or _prefer(record, existing):
             out[key] = record
@@ -262,7 +275,8 @@ def collect(sessions_dir=SESSIONS_DIR, now=None):
 
 
 def main():
-    json.dump(collect(), sys.stdout, separators=(",", ":"))
+    payload = collect_all() if "--all" in sys.argv[1:] else collect()
+    json.dump(payload, sys.stdout, separators=(",", ":"))
 
 
 if __name__ == "__main__":

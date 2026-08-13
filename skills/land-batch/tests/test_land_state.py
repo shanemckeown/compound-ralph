@@ -10,12 +10,41 @@ import time
 
 
 LAND_STATE_PATH = Path(__file__).resolve().parent.parent / "bin" / "land-state.py"
+VERIFY_PINNED_SOURCE = Path(__file__).resolve().parent.parent / "bin" / "verify-pinned-source.sh"
 SPEC = importlib.util.spec_from_file_location(
     "land_batch_state",
     LAND_STATE_PATH,
 )
 land_state = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(land_state)
+
+
+def _run(args, cwd=None, check=True):
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=check,
+    )
+
+
+def _git(repo, *args, check=True):
+    return _run(["git", "-C", str(repo), *args], check=check)
+
+
+def _init_git_repo(path, bare=False):
+    args = ["git", "init"]
+    if bare:
+        args.append("--bare")
+    else:
+        args.extend(["-b", "main"])
+    args.append(str(path))
+    _run(args)
+    if not bare:
+        _git(path, "config", "user.email", "test@example.com")
+        _git(path, "config", "user.name", "Test User")
 
 
 def _identity(run_id, mode="land"):
@@ -220,6 +249,84 @@ def test_ledger_read_write_round_trip(tmp_path):
         }
     ]
     assert "Verify settings persist." in (state_dir / "pending-qa.md").read_text(encoding="utf-8")
+
+
+def test_remote_only_pinned_sha_merges_and_appends_source_evidence_to_ledger(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    feature = tmp_path / "feature"
+    scratch = tmp_path / "scratch"
+    state_dir = tmp_path / "state"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+
+    _git(repo, "worktree", "add", "-b", "goal/aestheticcnext-pin01", str(feature))
+    (feature / "remote-only.txt").write_text("pinned work\n", encoding="utf-8")
+    _git(feature, "add", ".")
+    _git(feature, "commit", "-m", "remote-only feature")
+    source_sha = _git(feature, "rev-parse", "HEAD").stdout.strip()
+    source_ref = "refs/remotes/origin/goal/aestheticcnext-pin01"
+    _git(feature, "push", "origin", "HEAD:refs/heads/goal/aestheticcnext-pin01")
+    _git(repo, "worktree", "remove", "--force", str(feature))
+    _git(repo, "branch", "-D", "goal/aestheticcnext-pin01")
+    _git(repo, "fetch", "origin")
+
+    verified = _run(["bash", str(VERIFY_PINNED_SOURCE), str(repo), source_ref, source_sha])
+    assert verified.stdout.strip() == source_sha
+
+    _git(repo, "worktree", "add", "-b", "land-batch/integration-test", str(scratch), "origin/main")
+    _git(scratch, "merge", "--no-ff", "--no-verify", source_sha, "-m", "land pinned remote source")
+    merge_sha = _git(scratch, "rev-parse", "HEAD").stdout.strip()
+    assert (scratch / "remote-only.txt").read_text(encoding="utf-8") == "pinned work\n"
+
+    record = {
+        "run_id": "pinned-integration",
+        "features": [
+            {
+                "branch": "goal/aestheticcnext-pin01",
+                "source_kind": "remote-branch",
+                "source_ref": source_ref,
+                "source_sha": source_sha,
+                "merge_sha": merge_sha,
+                "checks": [{"expected": "Pinned remote-only content is present."}],
+            }
+        ],
+    }
+    land_state.append_ledger(state_dir, record, "- Verify pinned remote-only content.")
+    pending = land_state.read_ledger(state_dir)["pending"]
+
+    assert pending[0]["source_kind"] == "remote-branch"
+    assert pending[0]["source_ref"] == source_ref
+    assert pending[0]["source_sha"] == source_sha
+    assert pending[0]["merge_sha"] == merge_sha
+
+
+def test_pinned_source_verifier_holds_when_remote_tracking_ref_moves(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    old_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    source_ref = "refs/remotes/origin/goal/aestheticcnext-move1"
+    _git(repo, "update-ref", source_ref, old_sha)
+    (repo / "app.txt").write_text("moved\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "move source")
+    new_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "update-ref", source_ref, new_sha)
+
+    result = _run(
+        ["bash", str(VERIFY_PINNED_SOURCE), str(repo), source_ref, old_sha],
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert f"was {old_sha} now {new_sha}; rediscover" in result.stderr
 
 
 def test_prod_archive_preserves_pending_evidence_then_resets_ledger(tmp_path):
