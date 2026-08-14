@@ -33,6 +33,11 @@ REPO_BEADS = "/Users/shane/Documents/GitReBase/AestheticcNext/.beads"
 MANIFEST = "/Users/shane/Documents/Obsidian/Aestheticc/Ops/FLEET_MANIFEST.jsonl"
 POLL_SECONDS = 45
 
+# Tier A: spawned code workers load NO MCP servers. See ~/.claude/mcp-tiers/README.md
+# for the evidence. Deliberately NOT in /tmp — a config that can evaporate between
+# reboots would take the restriction with it, silently.
+TIER_A_MCP = os.path.expanduser("~/.claude/mcp-tiers/tier-a-code-worker.json")
+
 
 def beads_dir(bead):
     """Two databases. LUCY-* is the vault; everything else is the code repo.
@@ -166,7 +171,35 @@ def run_gate(bead, is_epic):
 # ------------------------------------------------------------- the dispatch ---
 def dispatch(bead, is_epic, dispatched_by):
     before = {a.get("sessionId") for a in registry()}
-    cmd = f'claude --bg --name "{bead}" "/{"long-goal" if is_epic else "goal"} {bead}"'
+
+    # 🔴 TIER A: a spawned code worker loads NO MCP servers.
+    #
+    # `--strict-mcp-config` makes the config below the ONLY source, ignoring
+    # ~/.claude.json (global) and every project .mcp.json. Measured 2026-08-14:
+    # each spawned session was starting 6 MCP servers and 2 persistent autossh
+    # tunnels to the Hermes VPS — times ~10 concurrent sessions — and calling
+    # none of them. MCP servers spawn at launch, not on first use, so the cost
+    # is paid whether or not a tool is ever invoked.
+    #
+    # The config is empty ON EVIDENCE, not on caution: /goal and /long-goal
+    # contain no mcp__ reference, and grepping the whole skill chain they invoke
+    # (/autoplan, /codex, /review, /ship, /plan-build-qa, /plan-*-review) turns up
+    # mcp__conductor__ ONLY — dead references to a tool retired on 2026-05-31.
+    # A worker needing graph traversal escalates to its orchestrator, which is
+    # already the documented sub-Claude route and costs no tunnel.
+    #
+    # Do NOT add servers here without re-running that two-hop grep. Full reasoning:
+    # ~/.claude/mcp-tiers/README.md
+    if not os.path.isfile(TIER_A_MCP):
+        print(f"\n   ✗ REFUSING TO DISPATCH: Tier A MCP config missing at {TIER_A_MCP}")
+        print("     Without it the worker would silently fall back to the FULL global")
+        print("     MCP set — 6 servers + 2 SSH tunnels it does not use. Restore the")
+        print("     file (see ~/.claude/mcp-tiers/README.md) and re-run.")
+        sys.exit(1)
+
+    cmd = (f'claude --bg --name "{bead}" '
+           f'--mcp-config "{TIER_A_MCP}" --strict-mcp-config '
+           f'"/{"long-goal" if is_epic else "goal"} {bead}"')
     print(f"\n── dispatching: {cmd}")
     code, out, err = sh(cmd, cwd=REPO, timeout=120)
     if code != 0:
@@ -205,7 +238,15 @@ def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by)
         "short_id": session.get("id") if session else None,
         "name": bead,
         "cwd": REPO,
-        "expected_branch": f"goal/{bead.lower()}",
+        # 🔴 An epic branches as long-goal/<bead>, NOT goal/<bead>. Lines above already
+        # branch on is_epic for the command; this one did not, so every epic dispatched
+        # before 2026-08-14 recorded a branch that never existed.
+        # This is load-bearing, not cosmetic: /long-goal runs `git worktree remove` after
+        # pushing, and /land-batch discovers finished work by SCANNING WORKTREES
+        # (reference_goal_land_batch_worktree_discovery_gap). So an epic goes invisible at
+        # the exact moment it is ready, and this manifest row is the only durable record
+        # left pointing at it. A wrong branch name here means finished work nobody can find.
+        "expected_branch": f"{'long-goal' if is_epic else 'goal'}/{bead.lower()}",
         "dispatched_by": dispatched_by,
         "gate_failures": gate_failures or None,
         "forced": bool(forced),
