@@ -427,6 +427,19 @@ def test_kickback_classification_holds_baseline_red_and_accepts_branch_introduce
     assert baseline_green["signature"] == "files=src/widget.ts;tests=-"
 
 
+def test_top_level_drizzle_sql_is_sensitive_but_generated_metadata_uses_its_own_gate():
+    assert "drizzle/" in land_state.SENSITIVE_PREFIXES
+    assert "drizzle/migrations/" not in land_state.SENSITIVE_PREFIXES
+    assert land_state.sensitive_paths(
+        [
+            "drizzle/0240_new_table.sql",
+            "drizzle/meta/_journal.json",
+            "drizzle/README.md",
+            "src/ordinary.ts",
+        ]
+    ) == ["drizzle/0240_new_table.sql"]
+
+
 def test_kickback_status_marks_in_flight_ready_and_stalled_without_retrying(tmp_path):
     state_dir = tmp_path / "state"
     land_state.record_kickback(

@@ -1,6 +1,6 @@
 ---
 name: land-batch
-version: 0.3.1
+version: 0.4.0
 description: |
   Serialises parallel Claude worktree landing with a durable lock, FIFO queue,
   and cross-run QA ledger. Default /land-batch cheaply discovers, curates, and
@@ -58,10 +58,12 @@ reversal.
    main moved, fetch, rebase, re-gate, retry; abort and hold any rebase conflict.
 4. **Direct evidenced deploys only.** One AskUserQuestion at the prod gate,
    defaulting to post-19:30 BST except explicit S1. Never trust deploy agents.
-5. **Never auto-resolve conflicts.** Abort/hold conflicts; never touch conflicts
-   in lib/db/, drizzle/migrations/, lib/stripe/, lib/auth/, lib/payments/,
-   pages/api/auth|admin|webhooks/, or lib/email/templates/. .beads/ gets only
-   the local merge=ours generated-churn driver; that is not conflict resolution.
+5. **Never auto-resolve authored conflicts.** Abort/hold conflicts; never touch
+   conflicts in lib/db/, authored drizzle/NNNN_*.sql, lib/stripe/, lib/auth/,
+   lib/payments/, pages/api/auth|admin|webhooks/, or lib/email/templates/.
+   .beads/ gets only the local merge=ours generated-churn driver. The dedicated
+   migration gate may mechanically rebuild generated journal/snapshot metadata;
+   it never changes migration SQL and does not license resolving an SQL conflict.
 6. **Sensitive paths never auto-land.** Require explicit Shane opt-in and exclude
    a candidate depending on a held sensitive branch.
 7. **Worktree finish gate preserved; branch-only completion quarantined.** A
@@ -189,6 +191,7 @@ git -C "$REPO" fetch origin main \
 LAND_BATCH_REF_SNAPSHOT=fetched-after-admission \
   bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" \
   > "$EVIDENCE_DIR/discover.json"
+BASE_SHA="$(jq -er '.base_sha' "$EVIDENCE_DIR/discover.json")"
 ~~~
 
 Strict dry-run performs no fetch and uses the cached remote-tracking snapshot:
@@ -231,6 +234,19 @@ presentation.role == kicked-back-original candidate in multiSelect even if its
 Git facts would otherwise make it auto-landable. A KICKBACK FIX remains a
 normal candidate once it independently satisfies the usual gate.
 
+Discovery also hashes every candidate-added `drizzle/NNNN_*.sql` at its pinned
+tip. `migration_analysis.collisions` groups a number with more than one content
+hash and mirrors every differing-hash branch pair into `sibling_conflicts` with
+`kind=migration-number-collision`. Render these as **MIGRATION COLLISION —
+NNNN** beside Git conflicts. `migration_analysis.inheritance` is the opposite:
+multiple branches carry one byte-identical hash. That is stacked-branch
+inheritance, not a blocker; never infer identity from filename alone.
+
+`sensitive_prefix_validation.valid` must be true. Discovery fails closed before
+candidate construction if any configured directory is absent from the target
+repo. The `drizzle/` rule matches only top-level `NNNN_*.sql`; generated metadata
+is protected by the reconciliation/proof gate below.
+
 After admission, and only outside dry-run, update a discovered fix branch while
 keeping discover.sh read-only:
 
@@ -250,8 +266,10 @@ Keep the multiSelect curation gate exactly:
 - At most four options/question and four questions/call. Chunk >4; above 16,
   offer the highest-confidence 16 and visibly log every remainder.
 - Print HELD/BLOCKED/SKIP beside the selector. Deselection is held by Shane.
-- Sensitive candidates require separate explicit opt-in; choose at most one of a
-  sibling-conflict pair.
+- Sensitive candidates require separate explicit opt-in. Choose at most one of
+  an authored/Git sibling-conflict pair. A `migration-number-collision` pair may
+  be jointly selected only through the all-or-nothing migration transaction in
+  Step 2; it is blocked from the ordinary per-feature push path.
 - Offer safe pruning only for `source_kind=worktree` records that satisfy the
   existing clean ahead=0 or explicit-retired rules. A `remote-branch` record
   must never enter pruning: pruning removes worktrees, and it has none.
@@ -346,6 +364,93 @@ git push origin HEAD:main
 If push is rejected because main moved, fetch, rebase --rebase-merges origin/main,
 re-gate, retry. Abort/hold rebase conflicts. Never force-push. The no-ff merge
 message ties every land to RUN_ID.
+
+#### Mandatory migration-batch transaction
+
+Selected candidates with any `migration_claims` are a single integration
+transaction and run after ordinary candidates. Sensitive-path opt-in still
+applies to each one. Do not push the first migration feature while another
+selected migration feature is still unintegrated: parallel branches commonly
+claim the same next number, and only the complete selected set can be safely
+numbered.
+
+Merge and scoped-gate each migration feature sequentially in deterministic
+candidate-branch order. A conflict in authored SQL or application code is still
+held under Guardrail 5. Generated `drizzle/meta/_journal.json` and numeric
+`drizzle/meta/NNNN_snapshot.json` conflicts are the narrow mechanical exception:
+verify the complete unmerged-path list contains no authored path, keep the
+integration-side generated files temporarily, and finish the merge. Never take
+one branch's generated snapshot as the final answer. The wrapper below rebuilds
+those files from every selected candidate's pinned `tip_sha`; a missing or moved
+source, SQL hash change, SQL path/tag collision, or byte-identical SQL with a
+divergent snapshot body is red.
+
+Write `MIGRATION_CANDIDATES_JSON` from the already-curated selection only (never
+the complete discovery report):
+
+~~~bash
+MIGRATION_CANDIDATES_JSON="$EVIDENCE_DIR/migration-candidates.json"
+# SELECTED_MIGRATION_BRANCHES_JSON is the JSON array accepted at curation.
+jq --argjson selected "$SELECTED_MIGRATION_BRANCHES_JSON" \
+  '{candidates: [.candidates[] |
+    select(.branch as $branch | $selected | index($branch))]}' \
+  "$EVIDENCE_DIR/discover.json" > "$MIGRATION_CANDIDATES_JSON"
+jq -e '.candidates | length > 0' "$MIGRATION_CANDIDATES_JSON" >/dev/null
+~~~
+
+Once every surviving migration feature is present, run the repository's
+documented land-time recipe through the wrapper (it calls
+`scripts/reconcile-drizzle-migrations.mjs` directly because `package.json` may
+itself have suffered a clean-merge overwrite):
+
+~~~bash
+MIGRATION_RECONCILE_JSON="$EVIDENCE_DIR/migration-reconcile.json"
+MIGRATION_RECONCILE_EXIT=0
+python3 ~/.claude/skills/land-batch/bin/migration_batch.py reconcile \
+  --repo "$SCRATCH" --base-ref "$BASE_SHA" \
+  --candidates "$MIGRATION_CANDIDATES_JSON" \
+  > "$MIGRATION_RECONCILE_JSON" || MIGRATION_RECONCILE_EXIT="$?"
+test "$MIGRATION_RECONCILE_EXIT" -eq 0
+jq -e '.valid == true and .added_entry_count == .snapshots_rebuilt' \
+  "$MIGRATION_RECONCILE_JSON" >/dev/null
+~~~
+
+The wrapper hash-verifies and reconstructs each selected migration from its
+pinned source, collapses byte-identical inheritance to one artifact, preserves
+the documented deterministic `(when, tag)` order, renumbers added entries into
+the next free contiguous indices, safely stages rename destinations, invokes
+the target's reconciliation implementation, then three-way rebuilds every added
+snapshot cumulatively from its original `prevId`. Incompatible concurrent
+snapshot edits fail loudly. Never hand-edit
+`drizzle/meta/_journal.json`; never accept a reconcile result with a missing SQL
+file, non-increasing `when`, duplicate tag, index gap, new tag prefix that differs
+from its index, or fewer rebuilt snapshots than added entries. Historical prefix
+mismatches already present on the pinned base are baseline evidence, not silently
+rewritten by LAND.
+
+Now run the load-bearing gate before any migration batch push:
+
+~~~bash
+MIGRATION_PROOF_JSON="$EVIDENCE_DIR/migration-proof.json"
+python3 ~/.claude/skills/land-batch/bin/migration_batch.py prove \
+  --repo "$SCRATCH" --base-ref "$BASE_SHA" \
+  --evidence "$MIGRATION_PROOF_JSON"
+jq -e '.valid == true and .scratch_database_from_empty == true
+  and .new_failure_count == 0 and (.object_errors | length) == 0' \
+  "$MIGRATION_PROOF_JSON" >/dev/null
+~~~
+
+This creates separate empty scratch databases, replays both the full pinned-base
+chain and the full integration chain, rejects every new replay failure, and
+derives the expected added/changed tables, columns, constraints, and indexes
+from the rebuilt snapshot delta before checking the integration database object
+by object. Native PostgreSQL is primary; PostgreSQL-WASM is an allowed sandbox
+fallback, not a mock. Missing PostgreSQL capability is red evidence, never a
+skip. Commit the generated reconciliation as
+`chore(migrations): reconcile <RUN_ID> migration batch`, rerun the scoped gates
+against the reconciled names, then make one normal non-force fast-forward push.
+If main moved, rebase, rerun reconciliation and the entire from-empty proof, and
+only then retry the push.
 
 ### Step 2.5 — Dispatch qualifying kickback fixes after the final LAND push
 
@@ -615,6 +720,9 @@ the same state.
 Never rename, close, or kill Agent View tabs. Report existing tab names mapped to
 branch/bead, landed/held/conflict/reverted items, scratch cleanup, ledger count,
 staging/prod revision or NOT touched, cited evidence paths, and exact next action.
+For every migration batch, report collision groups, inheritance groups, the
+renumber map, snapshot rebuild count, base/integration replay counts, proof
+backend, expected-object counts, and the migration-proof evidence path.
 For LAND, add a separate **AUTO-DISPATCHED FIXES** section listing original
 branch, kickback bead ID, Agent View session name, one-line failure summary,
 attempt number, and primary evidence path. Keep it strictly separate from the

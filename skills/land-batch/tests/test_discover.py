@@ -56,6 +56,18 @@ def _init_repo(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test User")
     _write(repo / "app.txt", "base\n")
+    for sensitive_dir in (
+        "lib/db",
+        "lib/stripe",
+        "lib/auth",
+        "lib/payments",
+        "pages/api/auth",
+        "pages/api/admin",
+        "pages/api/webhooks",
+        "lib/email/templates",
+    ):
+        _write(repo / sensitive_dir / ".keep", "\n")
+    _write(repo / "drizzle" / "0000_base.sql", "SELECT 1;\n")
     _commit_all(repo, "initial")
     return repo
 
@@ -487,6 +499,85 @@ def test_auto_land_blocked_by_sensitive_files(tmp_path):
     assert candidate["touches_sensitive"] is True
     assert candidate["auto_land"] is False
     assert candidate["finish_signal"] == "held-sensitive"
+
+
+def test_three_different_0240_migrations_are_first_class_sibling_blockers(tmp_path):
+    repo = _init_repo(tmp_path)
+    branches = []
+    for name, table in (("mig-a", "alpha"), ("mig-b", "beta"), ("mig-c", "gamma")):
+        branch = f"fix/AestheticcNext-{name}"
+        wt = _add_worktree(repo, tmp_path, branch)
+        _write(wt / "drizzle" / f"0240_{table}.sql", f"CREATE TABLE {table} (id int);\n")
+        _commit_all(wt, f"add {table} migration")
+        branches.append(branch)
+
+    report = _discover(repo, tmp_path / "home")
+
+    assert report["migration_analysis"]["collision_count"] == 1
+    collision = report["migration_analysis"]["collisions"][0]
+    assert collision["number"] == "0240"
+    assert collision["branches"] == sorted(branches)
+    assert len(collision["variants"]) == 3
+    blockers = [
+        conflict
+        for conflict in report["sibling_conflicts"]
+        if conflict.get("kind") == "migration-number-collision"
+    ]
+    assert len(blockers) == 3
+    assert all(blocker["migration_number"] == "0240" for blocker in blockers)
+    assert all(_candidate(report, branch)["touches_sensitive"] for branch in branches)
+
+
+def test_byte_identical_0240_migrations_are_inheritance_not_collision(tmp_path):
+    repo = _init_repo(tmp_path)
+    branches = []
+    for name in ("inherit-a", "inherit-b"):
+        branch = f"fix/AestheticcNext-{name}"
+        wt = _add_worktree(repo, tmp_path, branch)
+        _write(
+            wt / "drizzle" / "0240_shared.sql",
+            "CREATE TABLE inherited_table (id int);\n",
+        )
+        _commit_all(wt, "carry shared migration")
+        branches.append(branch)
+
+    report = _discover(repo, tmp_path / "home")
+
+    assert report["migration_analysis"]["collision_count"] == 0
+    assert report["migration_analysis"]["inheritance"] == [
+        {
+            "kind": "migration-inheritance",
+            "number": "0240",
+            "sha256": report["migration_analysis"]["claims"][0]["sha256"],
+            "branches": sorted(branches),
+            "paths": ["drizzle/0240_shared.sql"],
+        }
+    ]
+    assert not any(
+        conflict.get("kind") == "migration-number-collision"
+        for conflict in report["sibling_conflicts"]
+    )
+
+
+def test_one_branch_reusing_a_number_already_on_base_is_a_blocker(tmp_path):
+    repo = _init_repo(tmp_path)
+    branch = "fix/AestheticcNext-base-number"
+    wt = _add_worktree(repo, tmp_path, branch)
+    _write(wt / "drizzle/0000_different.sql", "SELECT 2;\n")
+    _commit_all(wt, "reuse base migration number")
+
+    report = _discover(repo, tmp_path / "home")
+
+    collision = report["migration_analysis"]["collisions"][0]
+    assert collision["number"] == "0000"
+    assert collision["branches"] == [f"BASE:{report['base_ref']}", branch]
+    assert _candidate(report, branch)["migration_collision_numbers"] == ["0000"]
+    assert any(
+        conflict.get("kind") == "migration-number-collision"
+        and {conflict["branch_a"], conflict["branch_b"]}
+        == {f"BASE:{report['base_ref']}", branch}
+        for conflict in report["sibling_conflicts"]
+    )
 
 
 def test_auto_land_blocked_by_active_session(tmp_path):

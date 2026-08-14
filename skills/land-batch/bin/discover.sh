@@ -15,6 +15,7 @@ export TARGET_REPO
 export RETIRED_FILE="$RETIRED_FILE_PATH"
 export SESSIONS_SCRIPT="$SCRIPT_DIR/sessions.py"
 export LAND_STATE_SCRIPT="$SCRIPT_DIR/land-state.py"
+export LAND_BATCH_LIB_DIR="$SCRIPT_DIR"
 export GIT_OPTIONAL_LOCKS=0
 
 python3 <<'PY'
@@ -26,23 +27,18 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, os.environ["LAND_BATCH_LIB_DIR"])
+from land_batch_safety import (  # noqa: E402
+    SENSITIVE_PREFIXES,
+    sensitive_paths as configured_sensitive_paths,
+    validate_sensitive_prefixes,
+)
+from migration_batch import scan_candidate_migrations  # noqa: E402
+
 REPO = os.environ.get("TARGET_REPO") or "/Users/shane/Documents/GitReBase/AestheticcNext"
 RETIRED_FILE = os.environ.get("RETIRED_FILE")
 LAND_STATE_SCRIPT = os.environ.get("LAND_STATE_SCRIPT")
 REF_SNAPSHOT_MODE = os.environ.get("LAND_BATCH_REF_SNAPSHOT", "cached-remote-tracking")
-SENSITIVE_PREFIXES = (
-    "lib/db/",
-    "drizzle/migrations/",
-    "lib/stripe/",
-    "lib/auth/",
-    "lib/payments/",
-    "pages/api/auth/",
-    "pages/api/admin/",
-    "pages/api/webhooks/",
-    "lib/email/templates/",
-)
-
-
 def diag(message):
     print(message, file=sys.stderr)
 
@@ -99,6 +95,16 @@ def empty_report(repo_field=None, base_ref=None, base_sha=None):
         "candidates": [],
         "sibling_conflicts": [],
         "sibling_analysis": {"selectable_candidate_count": 0, "pair_checks": 0},
+        "migration_analysis": {
+            "valid": True,
+            "claims": [],
+            "collisions": [],
+            "inheritance": [],
+            "collision_count": 0,
+            "inheritance_count": 0,
+            "errors": [],
+        },
+        "sensitive_prefix_validation": {"valid": True, "missing": []},
         "active_sessions": [],
         "lock_queue": load_lock_queue_state(),
     }
@@ -563,7 +569,7 @@ def changed_files(repo, base_ref, branch_ref):
 
 
 def sensitive_files(paths):
-    return [path for path in paths if path.startswith(SENSITIVE_PREFIXES)]
+    return configured_sensitive_paths(paths)
 
 
 def looks_like_path(token):
@@ -961,6 +967,20 @@ def main():
         print(json.dumps(empty_report(repo_field=repo_field, base_ref=base_ref, base_sha=base_sha), separators=(",", ":")))
         return
 
+    missing_sensitive_prefixes = validate_sensitive_prefixes(REPO, SENSITIVE_PREFIXES)
+    if missing_sensitive_prefixes:
+        diag(
+            "error: sensitive path configuration does not exist in target repo: "
+            + ", ".join(missing_sensitive_prefixes)
+        )
+        report = empty_report(repo_field=repo_field, base_ref=base_ref, base_sha=base_sha)
+        report["sensitive_prefix_validation"] = {
+            "valid": False,
+            "missing": missing_sensitive_prefixes,
+        }
+        print(json.dumps(report, separators=(",", ":")))
+        return
+
     pr_by_branch = get_prs(REPO)
     sessions_map, sessions_all = load_sessions()
     lock_queue = load_lock_queue_state()
@@ -1238,6 +1258,35 @@ def main():
             }
         )
 
+    migration_analysis = scan_candidate_migrations(REPO, base_ref, candidates)
+    claims_by_branch = {}
+    for claim in migration_analysis["claims"]:
+        claims_by_branch.setdefault(claim["branch"], []).append(claim)
+    collision_numbers_by_branch = {}
+    for collision in migration_analysis["collisions"]:
+        for branch in collision["branches"]:
+            collision_numbers_by_branch.setdefault(branch, []).append(collision["number"])
+    inheritance_numbers_by_branch = {}
+    for inherited in migration_analysis["inheritance"]:
+        for branch in inherited["branches"]:
+            inheritance_numbers_by_branch.setdefault(branch, []).append(inherited["number"])
+    scan_errors_by_branch = {}
+    for error in migration_analysis["errors"]:
+        scan_errors_by_branch.setdefault(error["branch"], []).append(error)
+    for candidate in candidates:
+        branch = candidate["branch"]
+        candidate["migration_claims"] = claims_by_branch.get(branch, [])
+        candidate["migration_collision_numbers"] = sorted(collision_numbers_by_branch.get(branch, []))
+        candidate["migration_inheritance_numbers"] = sorted(inheritance_numbers_by_branch.get(branch, []))
+        candidate["migration_scan_errors"] = scan_errors_by_branch.get(branch, [])
+        if candidate["migration_scan_errors"]:
+            candidate["auto_land"] = False
+            candidate["finished"] = False
+            candidate["finish_signal"] = "held-migration-scan-error"
+            candidate["recommendation"] = "held-migration-scan-error"
+            candidate["hold_reasons"].append("held-migration-scan-error")
+            candidate["held_labels"].append("HELD — migration scan failed; fail-closed")
+
     sibling_conflicts = []
     selectable = [
         candidate
@@ -1267,6 +1316,30 @@ def main():
                         "files": real_files or files,
                     }
                 )
+
+    for collision in migration_analysis["collisions"]:
+        for branch_a, branch_b in collision["branch_pairs"]:
+            paths = sorted(
+                {
+                    claim["path"]
+                    for variant in collision["variants"]
+                    for claim in variant["claims"]
+                    if claim["branch"] in (branch_a, branch_b)
+                }
+            )
+            sibling_conflicts.append(
+                {
+                    "kind": "migration-number-collision",
+                    "branch_a": branch_a,
+                    "branch_b": branch_b,
+                    "migration_number": collision["number"],
+                    "files": paths,
+                    "content_hashes": [
+                        variant["sha256"] for variant in collision["variants"]
+                        if branch_a in variant["branches"] or branch_b in variant["branches"]
+                    ],
+                }
+            )
 
     for candidate in candidates:
         candidate.pop("_branch_ref", None)
@@ -1303,6 +1376,8 @@ def main():
             "selectable_candidate_count": len(selectable),
             "pair_checks": sibling_pair_checks,
         },
+        "migration_analysis": migration_analysis,
+        "sensitive_prefix_validation": {"valid": True, "missing": []},
         "active_sessions": active_sessions,
         "lock_queue": lock_queue,
     }

@@ -22,6 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from land_batch_safety import SENSITIVE_PREFIXES, sensitive_paths as configured_sensitive_paths
+
 
 POLL_MIN_SECONDS = 120
 POLL_MAX_SECONDS = 180
@@ -352,30 +355,8 @@ def read_ledger(state_dir: Path | None = None) -> dict[str, Any]:
     }
 
 
-# Keep this list in lockstep with SKILL.md's sensitive-path guardrail. It is
-# intentionally prefix based so changed paths and failing-gate paths receive
-# the same conservative treatment.
-SENSITIVE_PREFIXES = (
-    "lib/db/",
-    "drizzle/migrations/",
-    "lib/stripe/",
-    "lib/auth/",
-    "lib/payments/",
-    "pages/api/auth/",
-    "pages/api/admin/",
-    "pages/api/webhooks/",
-    "lib/email/templates/",
-)
-
-
 def sensitive_paths(paths_to_check: list[str] | tuple[str, ...] | None) -> list[str]:
-    return sorted(
-        {
-            path
-            for path in (paths_to_check or [])
-            if isinstance(path, str) and path.startswith(SENSITIVE_PREFIXES)
-        }
-    )
+    return configured_sensitive_paths(paths_to_check)
 
 
 def read_kickbacks_from_value(raw: dict[str, Any] | None) -> dict[str, Any]:
