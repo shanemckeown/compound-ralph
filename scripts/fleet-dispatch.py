@@ -119,16 +119,40 @@ def check_bead_is_dispatchable(bead):
     return []
 
 
+DEP_SECTION_HEADERS = {"DEPENDS ON", "BLOCKED BY"}
+# Any other bare all-caps section header ends a DEPENDS ON/BLOCKED BY section.
+# `bd show`'s own vocabulary, kept explicit rather than inferred from case —
+# inferring "looks like a header" nearly re-created this exact bug one layer up.
+ALL_SECTION_HEADERS = DEP_SECTION_HEADERS | {
+    "DESCRIPTION", "NOTES", "ACCEPTANCE CRITERIA", "PARENT", "BLOCKS",
+    "CHILDREN", "COMMENTS",
+}
+
+
 def check_dependencies(bead):
     """Check 2: every dependency must be CLOSED. A clean worktree is not enough —
-    a sibling that must land first makes this undispatchable regardless."""
+    a sibling that must land first makes this undispatchable regardless.
+
+    🔴 Fixed 2026-08-19 — was silently a no-op. `bd show`'s DEPENDS ON is a
+    SECTION: the header ("DEPENDS ON") is its own line; each dependency is on
+    a following indented line ("  → ◐ AestheticcNext-x: ..."), not the same
+    line as the header. The old per-line `"depends on" in line.lower()` check
+    only ever matched the header line itself, which contains no bead id — so
+    `BEAD_RE.findall(line)` always found zero ids and this check always
+    reported "closed" with nothing actually checked. Confirmed on
+    AestheticcNext-6644b.4.4: reported clean while its real dependency
+    (AestheticcNext-6644b.4.2) was IN_PROGRESS. This is section-scoped instead."""
     _, out = bead_status(bead)
     if not out:
         return []
     problems = []
+    current_section = None
     for line in out.splitlines():
-        low = line.lower()
-        if "depends on" not in low and "blocked by" not in low:
+        stripped = line.strip()
+        if stripped in ALL_SECTION_HEADERS:
+            current_section = stripped
+            continue
+        if current_section not in DEP_SECTION_HEADERS or not stripped:
             continue
         for dep in BEAD_RE.findall(line):
             if dep.lower() == bead.lower():
