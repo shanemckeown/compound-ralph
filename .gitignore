@@ -60,3 +60,12 @@ settings.local.json
 # Project-specific learnings (keep locally, don't publish)
 *_LEARNINGS.md
 !LEARNINGS.example.md
+.gstack/
+
+# Secrets — never commit, this repo is PUBLIC (github.com/shanemckeown/compound-ralph)
+.credentials.json
+*.credentials.json
+.env
+.env.*
+*_token.json
+*_secret.json
