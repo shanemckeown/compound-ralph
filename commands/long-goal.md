@@ -54,7 +54,7 @@ Refuse if the bead has no `CHILDREN` listed — this command is for epics. Point
 Refuse immediately if:
 - Epic is closed
 - Any in-scope child's status is in_progress and claimed by another active session
-- Epic or any child's `updated_at` is >60 days old without a re-validation note. Post `bd update --notes "verified still relevant $(date +%F)"` first and re-evaluate.
+- Epic or any child's `updated_at` is >60 days old without a re-validation note. Post `bd comment <ID> "verified still relevant $(date +%F)"` first and re-evaluate (never `--notes` — see Phase 1).
 
 #### 0c. Collect scope
 
@@ -68,13 +68,29 @@ For each child, pull:
 
 Build `AFFECTED_PATHS` per child and a combined set for the epic.
 
+#### 0d.1. Invariant injection — push, don't wait to be asked
+
+🔴 **Added 2026-08-23, extended same day — see `/goal` Phase 0d.1 for the full rationale and
+both sources: (A) `invariants/*.yaml` — why "book two treatments together" shipped and
+blocked every multi-treatment booking, nothing surfaced `no_double_booking` before the data
+model got designed; (B) `Product/Architecture/promise_inventory.jsonl` — 563 already-audited
+promises, matched by `surface`/`trigger_path`/`persists_to`, injecting the WHOLE connected
+cluster sharing a persist target or runtime consumer, not just the touched row.** Same
+mechanism here, per child, using each child's own `AFFECTED_PATHS` from 0d — paste matches
+into that child's Phase 2 planning context, require "Invariant interactions" and "Promise
+interactions" fields in that child's PLAN.md (inherited automatically, Phase 2 below already
+says child plans use the same fields as `/goal`), and if a child's plan adds a new
+save/persist action, it must add its own `promise_inventory.jsonl` row before that child is
+considered plan-complete (0d.1B in `/goal`). No matches (including missing files/dirs) is a
+no-op for either source.
+
 #### 0e. The scoping-quality gate (replaces `/goal`'s child-count cap)
 
 An epic is eligible for `/long-goal` only if **every** open child has:
 - A non-empty, concrete `ACCEPTANCE CRITERIA` field (not a placeholder, not "TBD") — this is what makes an 8-hour unattended run safe: Codex's QA pass in Phase 4 has something real to check the diff against.
 - At least one concrete file/path reference in the description (from 0d) — an epic child with no named surface is a research task, not a build task, and doesn't belong in this mode.
 
-If any child fails this check: **do not refuse the whole epic.** Exclude that child from scope, note why on the bead (`bd update <id> --notes "excluded from /long-goal run $(date -Iseconds): missing concrete acceptance criteria / file references — needs scoping before autonomous execution"`), and continue with the remaining eligible children. Report the exclusion in Phase 7.
+If any child fails this check: **do not refuse the whole epic.** Exclude that child from scope, note why on the bead (`bd comment <id> "excluded from /long-goal run $(date -Iseconds): missing concrete acceptance criteria / file references — needs scoping before autonomous execution"` — never `--notes`), and continue with the remaining eligible children. Report the exclusion in Phase 7.
 
 No hard cap on child count. If the eligible set is unusually large (>25), say so in the Phase 7 report as a `note:` — not a refusal — so the founder has visibility, but don't stop.
 
@@ -99,11 +115,61 @@ So: sensitive-path and migration work is **allowed**, not excluded — but it ge
 1. If the fork is something the *scoping* pass should already have resolved (i.e., it's answerable from the bead's own acceptance criteria, the linked scope doc, or prior decisions in this epic's history), resolve it that way — don't re-litigate a settled decision mid-build.
 2. If it's genuinely novel and unresolved, apply the Shane Decision Frame from `Reference/HEADLESS_MODE` (most robust long-term choice; don't overscope for imaginary scenarios; overscope only when cheap and clearly beneficial), make the call, and log it plainly in that child's PLAN.md under a `Judgment call:` line — one sentence on what was decided and why. Never block Build waiting for an answer nobody's there to give. Every `Judgment call:` line across the run gets collected into the Phase 7 report so Shane reviews them as a batch in the morning — a considerations list, not a gate.
 
+#### 0g. Epic-level completeness check — does the eligible child set actually cover the epic's own ask?
+
+🔴 **Added 2026-08-23, alongside Phase 4b.** Phase 4b (below) verifies, per child, that
+work claiming to be user-facing actually produced a reachable frontend. That's necessary
+but not sufficient: it can only judge a child that exists. If a "build X for users"-shaped
+epic gets scoped into children that are all backend/API/schema and **no child ever touches
+a frontend surface**, every one of those children can pass Phase 4b cleanly (each
+legitimately *is* backend-only) while the epic as a whole ships with zero UI — exactly the
+"reported done, frontend is literally zero" pattern this exists to stop. This check catches
+that gap before Build starts, not after.
+
+1. Read the epic's own title/description — the founder's original ask, not any child's.
+   Apply the same UI-signal check as `/goal` Phase 4b's tightened backend-only rule: does it
+   contain `UI`, `frontend`, `screen`, `page`, `dashboard`, `studio`, `portal`, `flow`, `for
+   users`, `let clients/users`, `client-facing`, or similar signals of intended user-facing
+   capability?
+2. If yes: check whether **at least one** child surviving 0e/0f has an affected path (from
+   0d) touching a frontend surface — `pages/`, `app/`, `components/`, `*.tsx`/`*.jsx`, or an
+   explicit UI-surface label. Backend/API/schema paths alone don't count, no matter how many
+   children there are.
+3. If no eligible child touches a frontend surface despite the epic clearly asking for one:
+   **do not silently proceed as if the scope is complete.** File a new child bead against
+   the epic scoping the missing frontend work as concretely as you can from the epic's own
+   description (apply the Shane Decision Frame — most robust long-term choice, don't
+   overscope — the same way Phase 0f already resolves judgment forks). Run it back through
+   0e:
+   - If it clears 0e's bar (real acceptance criteria, real file references), it's now part
+     of this run's scope — proceed with it included.
+   - If it doesn't (the frontend need is real but can't be scoped precisely enough to build
+     blind), it stays open and excluded, same as any other 0e exclusion. This is the
+     important part: because it's a genuine open child of the epic, Phase 6's existing rule
+     ("close the epic itself only if zero children remain open") now correctly keeps the
+     epic open instead of letting it close as done with no frontend ever tracked.
+4. Note the check's outcome on the epic (`bd comment "$EPIC_ID" "0g completeness
+   check $(date -Iseconds): <passed clean | filed child <id> for missing frontend
+   coverage>"` — never `--notes`) so this is visible in the epic's own history, not just
+   buried in a run log.
+
+This does not replace Phase 4b — it catches a scoping gap Phase 4b structurally cannot see
+(no child means nothing for 4b to check), while 4b catches the case a frontend was promised
+in one specific child's plan but not actually delivered.
+
 ### Phase 1 — Worktree + claim
 
 1. `EnterWorktree` if not already in one.
 2. Branch name: `long-goal/<epic-id-lowercase>`.
-3. For each eligible child: `bd update <ID> --claim --status=in_progress --notes "started /long-goal $(date -Iseconds)"`.
+3. For each eligible child:
+   ```bash
+   bd update <ID> --claim --status=in_progress
+   bd comment <ID> "started /long-goal $(date -Iseconds)"
+   ```
+   🔴 **Never `--notes` here (fixed 2026-08-23, same as `/goal`).** `--notes` REPLACES
+   the field wholesale — a child bead's prior scoping notes or close reason would be lost
+   the instant this ran. `bd comment` is append-only. See
+   `reference_bd_update_notes_replaces_use_comment`.
 
 ### Phase 2 — Plan (Opus, in-context)
 
@@ -137,23 +203,59 @@ If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first.
 After each child's commit + typecheck/lint pass:
 
 ```bash
-bd update "$EPIC_ID" --notes "long-goal progress $(date -Iseconds): <N>/<TOTAL_ELIGIBLE> children committed. Last: <child-id> — <one-line summary>."
+bd comment "$EPIC_ID" "long-goal progress $(date -Iseconds): <N>/<TOTAL_ELIGIBLE> children committed. Last: <child-id> — <one-line summary>."
 ```
 
-This is the only piece of state the founder needs to check mid-run (`bd show <epic-id>`) without disturbing the session.
+🔴 **Never `--notes` here (fixed 2026-08-23) — this call runs after EVERY child, so
+`--notes` wasn't just risking one overwrite, it was silently erasing the previous
+checkpoint on every single commit, defeating the entire point of a progress trail.**
+`bd comment` is append-only, so the founder gets the full run history, not just the
+latest line.
+
+This is the state the founder needs to check mid-run (`bd show <epic-id>`, comments
+section) without disturbing the session.
 
 ### Phase 4 — QA (adversarial) — per-child fault isolation, escalated for sensitive paths
 
 Unlike `/goal`'s single end-of-bundle QA pass, run QA **after each child's commit**, against that child's diff plus everything already landed on the branch so far (`git diff origin/main...HEAD`) — catching cross-child interaction issues as they accumulate, not just at the very end. This costs more Codex calls than `/goal`'s bundle mode; that's the right trade for an unattended run, since a bad interaction caught at child 12 instead of child 4 is much more expensive to unwind.
 
-**Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern, same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
+**Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 
-**Sensitive-path children (Stripe/payments/auth) and migration children (per 0f): dual-model.** Run the standard Codex pass, and separately run `glm review` against the same diff (`glm review "<one-line focus matching the bead's acceptance criteria>" --cd "$(pwd)" --base origin/main -o "$EVIDENCE_DIR/glm-verdict-round-N.txt"`) — give GLM the same qa.md calibration text, not just a one-line acceptance-criteria focus. Neither reviewer sees the other's verdict before producing its own. Both artifacts go in `$EVIDENCE_DIR`. A child is QA-clean only when **both** are PASS with no unresolved *calibrated* S1/S2 (re-apply the calibration gate to each finding before counting it — see above). If they disagree after calibration, resolve toward whichever raised the surviving issue — do not average two verdicts into a pass, and do not skip calibration just because two models happened to agree.
+**Sensitive-path children (Stripe/payments/auth) and migration children (per 0f): dual-model.** Run the standard Codex pass, and separately run `glm review` against the same diff (`~/.claude/scripts/fleet-guarded.sh glm "$EPIC_ID/$CHILD_ID phase4 dual-model" glm review "<one-line focus matching the bead's acceptance criteria>" --cd "$(pwd)" --base origin/main -o "$EVIDENCE_DIR/glm-verdict-round-N.txt"`) — give GLM the same qa.md calibration text, not just a one-line acceptance-criteria focus. 🔴 The `fleet-guarded.sh` wrapper claims/releases against the same 11-total fleet budget as Agent View dispatch — with two dual-model children potentially running Codex+GLM concurrently across several worktrees, this is exactly where uncounted load would otherwise pile up fastest. Neither reviewer sees the other's verdict before producing its own. Both artifacts go in `$EVIDENCE_DIR`. A child is QA-clean only when **both** are PASS with no unresolved *calibrated* S1/S2 (re-apply the calibration gate to each finding before counting it — see above). If they disagree after calibration, resolve toward whichever raised the surviving issue — do not average two verdicts into a pass, and do not skip calibration just because two models happened to agree.
 
 **Per-child round cap: 3, same as `/goal`** (for dual-model children, 3 rounds applies to the pair together, not 3 each). If a child hits the cap still not clean:
 - **Do not abort the run.** Revert or leave that child's commit isolated (don't build subsequent children on top of a known-broken one unless nothing else depends on it), file a follow-up bead (`--parent <epic-id>`, label `qa-followup`), note the state on the original child bead, leave it open.
 - If a later child's plan genuinely depends on the failed child's output, skip that dependent child too (same treatment: note, leave open, follow-up bead referencing the blocking child) rather than building on unverified ground.
 - Continue to the next independent child in `BUNDLE.md` order.
+
+### Phase 4b — User-facing change note (MANDATORY for ANY user surface, per child)
+
+🔴 **Added 2026-08-23 — this phase did not exist in `/long-goal` before.** `/goal` has had a
+mandatory frontend-completeness gate since 2026-07-25 (see its Phase 4b: reachability diff,
+hard FAIL conditions, the whole mechanism built specifically to stop "feature built, no
+frontend, reported done"). `/long-goal` forked from `/goal` without carrying it over, so
+every epic run since then — which is exactly where a "build me a marketing studio"-shaped
+ask lands, being multi-surface by definition — shipped children with **zero mechanism
+checking whether a frontend existed at all.** Found live, not theoretical: confirmed against
+`PROMISE_DEBT_REGISTER.md`'s 258 live broken/undelivered promises, a meaningful share of
+which are exactly this shape.
+
+Use `/goal` Phase 4b verbatim for the check itself (same four questions, same reachability
+diff, same hard FAIL conditions, same "backend-only requires evidence" rule above — one
+source of truth, do not fork the checklist here). Epic-specific adaptation:
+
+- Runs **per child**, after that child's QA passes (Phase 4), before its commit is
+  considered final — same fault-isolation principle as Phase 4 itself. A child with an
+  unresolved Phase 4b FAIL is treated exactly like a child that hit the QA round cap: leave
+  it open, file a follow-up bead, do not build later children on top of it if they depend on
+  it, continue with the rest.
+- Write one `CHANGE-NOTE-<child-id>.md` per child at the worktree root (or "none — backend
+  only" per the evidence rule above).
+- At Phase 7, concatenate every child's note into the single `USER-FACING CHANGES` section —
+  Shane reads one report per epic, not one per child.
+
+Precondition for Phase 5 (below) is unchanged in spirit from `/goal`: no child ships with an
+unresolved Phase 4b FAIL.
 
 ### Phase 5 — Ship to branch (NO deploy) — unchanged from `/goal`
 
@@ -177,6 +279,24 @@ Collect failures; report them in Phase 7 rather than silently proceeding.
 ### Phase 6.5 — Reclaim the worktree — unchanged from `/goal`
 
 Same preconditions, same `ExitWorktree`/`git worktree remove` steps, only after the branch is pushed and every closeable child is verified closed.
+
+### Phase 6.6 — Release fleet slot + advance the queue — same as `/goal`
+
+🔴 **Added 2026-08-23.** Identical to `/goal` Phase 6.6 — this epic run claimed one of 5
+Agent View slots at dispatch time. Release it unconditionally (even on a partial-success
+report with some children left open), then attempt to advance the queue:
+
+```bash
+python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_EPIC_ID>
+NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
+if [ "$NEXT" != "NONE" ]; then
+  EPIC_FLAG=""
+  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
+  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+fi
+```
+
+Note in the Phase 7 report if you advanced the queue.
 
 ### Phase 7 — Report
 
@@ -217,6 +337,9 @@ failed: epic <EPIC_ID> — 0 eligible children (all excluded at 0e, see notes). 
 | Worktree / branch model | One worktree, one branch | Same |
 | Progress visibility mid-run | None until Phase 7 | New: epic notes updated after every child (Phase 3.5) |
 | Post-hoc review surface | None specific | **New: "Considerations for review" in Phase 7 — judgment calls + sensitive-path/migration work, for a fast morning look, not a gate** |
+| Frontend completeness gate (Phase 4b, per child) | Mandatory since 2026-07-25 | 🔴 **Was MISSING entirely until 2026-08-23 — every prior epic run shipped children with zero check for "backend built, no reachable frontend." Now mandatory, per child.** |
+| Epic-level scope completeness (0g) | N/A (single beads don't split scope) | 🔴 **New 2026-08-23 — catches the case Phase 4b can't: an epic that never scoped a frontend-building child at all, so every child passes 4b clean while the epic ships with zero UI.** |
+| Invariant + promise injection (0d.1) | New 2026-08-23, same mechanism | Same — per-child, using each child's own `AFFECTED_PATHS` from 0d; promise clusters pull in every connected row, not just the one touched |
 
 ## What this does NOT do
 

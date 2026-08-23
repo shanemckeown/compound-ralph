@@ -65,7 +65,7 @@ bd show "$BEAD_ID"
 Refuse immediately if:
 - Bead is closed
 - Status is in_progress and claimed by another active session
-- `updated_at` is >60 days old without a re-validation note. Post `bd update --notes "verified still relevant $(date +%F)"` first and re-evaluate.
+- `updated_at` is >60 days old without a re-validation note. Post `bd comment <ID> "verified still relevant $(date +%F)"` first and re-evaluate (never `--notes` — it replaces the field wholesale, see Phase 1).
 
 #### 0c. Identify scope: single bead or epic-bundle
 
@@ -82,6 +82,59 @@ For each bead in scope (singleton or every child), pull affected paths from:
 
 Build a set: `AFFECTED_PATHS`.
 
+#### 0d.1. Invariant injection — push, don't wait to be asked
+
+🔴 **Added 2026-08-23.** A graph or doc the agent has to decide to go read fails exactly
+when it matters most, because the agent doesn't know it needs to look — confirmed live:
+a "book two treatments in one visit" feature shipped and blocked *every* multi-treatment
+booking, because nothing surfaced the existing `no_double_booking` constraint to the agent
+designing the new data model, before it decided how to model it. Checking after the fact
+can't fix a design-time miss like that; the fact has to arrive unasked, before Build.
+
+Two independent sources feed this, matched separately (they answer different questions —
+one is "does this violate a rule," the other is "does this actually deliver what it claims"):
+
+**A. `invariants/*.yaml`** (see `AestheticcNext-1luoq` — starts as one pilot file,
+`scheduling.no_double_booking`, grows from there; missing dir or no match = no-op):
+
+1. Grep each invariant file's `enforced_at`/`object`/table/path fields against
+   `AFFECTED_PATHS`.
+2. For every match, paste that invariant file's **full content** — statement, enforced_at,
+   relaxed_by, never_relaxed_for, tests — directly into the context Phase 2 plans from. Not
+   a pointer, not a filename — the actual text, so there's nothing left to decide to go read.
+
+**B. `Product/Architecture/promise_inventory.jsonl`** (563 rows, built by the `zuqrk`
+promise-audit epic — already exists, do not rebuild it):
+
+1. Match each row's `surface`/`trigger_path`/`persists_to` fields against `AFFECTED_PATHS`.
+2. 🔴 **On any match, don't inject just that one row — pull every other row that shares the
+   same `persists_to` table/column or any `runtime_consumers` entry, and inject the whole
+   connected cluster.** This is the literal mechanism for "touching one promise should light
+   up every promise connected to it" (Shane, 2026-08-23) — a save action and the code that's
+   supposed to read it back out are two different rows in this file, and both need to be in
+   front of the agent, not just whichever one its diff happens to touch.
+3. If a matched row's `status` is `BROKEN` or `SUSPICIOUS`, say so explicitly in what gets
+   injected — a plan that's about to touch code already known to break a promise needs that
+   fact in its face, not buried in a severity field it wasn't told to check.
+
+Phase 2's PLAN.md must then include **"Invariant interactions"** and **"Promise
+interactions"** fields (see Phase 2 below) explicitly addressing every injected item from
+either source: does this change respect it unmodified, deliberately interact with it via a
+stated mechanism, or genuinely not apply and why. A plan that touches a matched
+invariant/promise without the corresponding field populated fails Phase 0f's re-check below.
+
+**Keeping B honest — updating is part of the work, not a separate sweep.** If this bead's
+plan adds or changes a user-facing save/persist action (a new setting, a new "Save X"
+control, a new template field) that isn't already a row in `promise_inventory.jsonl`, Phase
+2's plan must add one — `surface`, `promise` (plain English, what a clinic owner would think
+it does), `trigger_path`, `persists_to`, `runtime_consumers` (the actual file(s) that read it
+back out — if the plan can't name one, that's the ghost-setting bug being built in real
+time; stop and fix the design before Build, don't ship it and let a future audit catch it),
+`status: VERIFIED`. Phase 0f's re-check enforces the row exists before Build proceeds. This
+is what keeps the file current without a separate periodic re-audit: every future save
+action that goes through `/goal` or `/long-goal` writes its own row as a condition of
+shipping, the same way Phase 4b already makes a CHANGE-NOTE.md a condition of shipping.
+
 #### 0e. Sensitive-path budgets (the only hard caps)
 
 Refuse if **any** of:
@@ -93,7 +146,7 @@ Refuse if **any** of:
 - Epic has > 10 open children
 - Bead carries a `requires-shane-eyes` label (manual escalation lever)
 
-If refused: post a refusal note on the bead via `bd update --notes`, print a `failed:` line with the specific budget that tripped, exit cleanly.
+If refused: post a refusal note on the bead via `bd comment <ID> "..."` (never `--notes`), print a `failed:` line with the specific budget that tripped, exit cleanly.
 
 Trust the bead's own size estimate where present. Do not pre-emptively re-estimate. If Shane wrote "small fix", believe it.
 
@@ -108,11 +161,27 @@ Warnings are surfaced in the final result line, not blockers.
 
 After Phase 2 produces PLAN.md (per child for bundles), re-extract affected paths from the plan. If the plan reveals sensitive paths or sizes the bead description didn't, run Phase 0e again. If it now trips, refuse there and surface — do not proceed to Build.
 
+Also re-run 0d.1's invariant AND promise-inventory match against the plan's own *Affected
+files* list, not just the original bead body — a design can reveal it touches an invariant's
+table, or a promise's persist/read path, that wasn't obvious from the bead description
+alone. Any new match must get its corresponding "Invariant interactions" / "Promise
+interactions" line added to PLAN.md before Build proceeds. If the plan adds a new
+save/persist action, confirm PLAN.md names the new `promise_inventory.jsonl` row (see 0d.1B)
+— missing row is treated the same as a missing CHANGE-NOTE.md: do not push.
+
 ### Phase 1 — Worktree + claim
 
 1. If not already in a worktree, call `EnterWorktree`. Otherwise work in place.
 2. Branch name: `goal/<bead-id-lowercase>` for singletons, `goal/<epic-id-lowercase>` for bundles.
-3. For each bead in scope: `bd update <ID> --claim --status=in_progress --notes "started /goal $(date -Iseconds)"`.
+3. For each bead in scope:
+   ```bash
+   bd update <ID> --claim --status=in_progress
+   bd comment <ID> "started /goal $(date -Iseconds)"
+   ```
+   🔴 **Never `--notes` here (fixed 2026-08-23).** `--notes` REPLACES the field wholesale
+   — a bead claimed mid-lifecycle (a prior close reason, prior scoping notes) would lose
+   that history the instant this ran. `bd comment` is append-only; use it for anything
+   that isn't meant to overwrite. See `reference_bd_update_notes_replaces_use_comment`.
 
 ### Phase 2 — Plan (Opus, in-context)
 
@@ -124,6 +193,15 @@ Each PLAN contains:
 - Goal — one sentence
 - Bead context — verbatim description quote
 - Affected files — list (this is what Phase 0f re-checks against)
+- Invariant interactions — one line per invariant injected at 0d.1A: respected unmodified /
+  deliberately interacts via [mechanism] / doesn't apply because [reason]. Omit the field
+  entirely only when 0d.1A found zero matches.
+- Promise interactions — one line per promise_inventory.jsonl row injected at 0d.1B (the
+  full connected cluster, not just the directly-touched row): stays VERIFIED / now BROKEN
+  because [reason, fix before Build] / not affected because [reason]. If this bead adds a
+  new save/persist action, name the new row being added (surface, promise, persists_to,
+  runtime_consumers) — see 0d.1B. Omit the field entirely only when 0d.1B found zero matches
+  and nothing new is being persisted.
 - Approach — bullet list of changes
 - Risk — what could break, especially boundary-crossing
 - Rollback — how to undo
@@ -306,7 +384,7 @@ set +e
   echo "$EVIDENCE_DIR/qa-command-round-N.txt"
   echo "$EVIDENCE_DIR/qa-output-round-N.log"
   echo "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
-} | codex exec \
+} | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
   --cd "$(pwd)" \
   --ephemeral \
   --sandbox read-only \
@@ -319,6 +397,12 @@ printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
 # (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
 # (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt; parse it from
 # the output between the `^codex$` and `^tokens used$` markers.
+#
+# 🔴 Added 2026-08-23: routed through fleet-guarded.sh, which claims a slot against
+# the same 11-total fleet budget Agent View dispatch uses (see fleet-slots.py) before
+# running Codex, and releases it on exit regardless of outcome. Fails open after 90s
+# at capacity rather than blocking a QA gate indefinitely — never remove this wrapper
+# to "simplify" the command; that's exactly how this budget leaks back to uncounted.
 ```
 
 **Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust Codex's severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — Codex still sometimes over-flags even when told not to.
@@ -344,6 +428,19 @@ exactly how a capability quietly gets demoted.*
 Runs after QA passes, before the branch is pushed. **Backend-only change → one line, skip
 the rest.** Shane can't read the backend anyway and is waiting on tests and expected
 outcomes; this phase exists entirely for the front end.
+
+🔴 **The "backend-only" call cannot be self-asserted — it needs evidence, same bar as
+everything else in this phase.** Confirmed 2026-08-23: this was a live escape hatch — an
+agent could write "backend only" in one line and skip the entire reachability check, hard
+FAILs included, even when the bead's own intent was obviously user-facing. Before writing
+"backend only," grep the bead's title/description/acceptance criteria for signs of intended
+user-facing capability (`UI`, `frontend`, `screen`, `page`, `dashboard`, `studio`, `portal`,
+`flow`, `for users`, `let clients/users`, `client-facing`, or similar). If any such signal is
+present, "backend only" requires an explicit one-line justification naming where the
+frontend work is tracked instead (a sibling/child bead ID) — an unqualified "backend only"
+on a bead whose own ask implied a UI is not acceptable and the full reachability check must
+run instead. When genuinely uncertain, default to running the full check — the check is
+cheap; a shipped-and-reported "done" feature with a real frontend gap is not.
 
 Write `CHANGE-NOTE.md` at the worktree root, addressed to Shane, in plain language — not
 engineer language, no file paths, no component names. If a sentence would mean nothing to
@@ -438,11 +535,37 @@ Steps:
 2. Remove it:
    - Worktree created via the **EnterWorktree** tool → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
    - Worktree created manually (`git worktree add`) → `git worktree remove --force <worktree-path> && git worktree prune`.
-3. This is the LAST mutating step — only the Phase 7 report follows (run it from the trunk).
+3. Run from the trunk (see Phase 6.6 below for what actually now follows).
 
 If a precondition fails, leave the worktree in place and say so in the report.
 
 **Backlog backstop:** stale worktrees from older runs accumulate (they're what fill the disk — branch refs are 41 bytes, worktrees are GBs). Periodically run `scripts/cleanup-merged-worktrees.sh` from the trunk (dry-run, then `--apply`). It reclaims only worktrees whose work already landed on main, preserves branch refs, never touches DIRTY (uncommitted) worktrees, and flags STALE ones for manual review.
+
+### Phase 6.6 — Release fleet slot + advance the queue
+
+🔴 **Added 2026-08-23.** This session was dispatched through `fleet-dispatch.py`, which
+claimed one of 5 Agent View slots (of an 11-total fleet budget) before starting. Release
+it now, unconditionally — even if earlier phases failed or wrote `needs input:` — a
+session that exits without releasing leaks a slot until the next stale-holder reap:
+
+```bash
+python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_BEAD_ID>
+```
+
+Then check whether a queued bead can now take the freed slot, and if so, dispatch it —
+this is what makes the queue self-driving instead of requiring the orchestrator to poll:
+
+```bash
+NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
+if [ "$NEXT" != "NONE" ]; then
+  EPIC_FLAG=""
+  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
+  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+fi
+```
+
+Note in the Phase 7 report if you advanced the queue (which bead, if any). This is now
+genuinely the LAST mutating step — only the Phase 7 report follows.
 
 ### Phase 7 — Report
 

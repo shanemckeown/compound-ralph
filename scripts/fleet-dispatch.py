@@ -27,6 +27,8 @@ Usage:
 """
 import json, os, re, subprocess, sys, time, datetime
 
+SLOTS = os.path.expanduser("~/.claude/scripts/fleet-slots.py")
+
 REPO = "/Users/shane/Documents/GitReBase/AestheticcNext"
 VAULT_BEADS = "/Users/shane/Documents/Obsidian/.beads"
 REPO_BEADS = "/Users/shane/Documents/GitReBase/AestheticcNext/.beads"
@@ -308,7 +310,30 @@ def main():
         print("\n--dry-run: gate only, nothing dispatched.")
         sys.exit(0)
 
+    # 🔴 Concurrency gate (added 2026-08-23). Total fleet load — Agent View sessions
+    # PLUS Codex/GLM calls PLUS the orchestrator's own implicit slot — was capped only
+    # by a memory note nobody re-checks under pressure ("~6-8 max"), while the actual
+    # laptop-grinding-to-a-halt failure mode is oversubscription: N sessions each
+    # spawning Jest's own worker fan-out with zero cross-session awareness. This makes
+    # the Agent View half of that budget (5 of 11 total) a real refusal instead of
+    # prose. See ~/.claude/scripts/fleet-slots.py for the full design and the other
+    # half (Codex/GLM claiming, Jest maxWorkers) that shares this budget.
+    claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
+    if claim[0] != 0:
+        sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
+        print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
+        print(f"   Run `python3 {SLOTS} status` to see current load.")
+        print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
+        print(f"   closing phase releases its own slot and dispatches the next queued")
+        print(f"   bead automatically — no polling needed).")
+        sys.exit(3)
+
     session = dispatch(bead, is_epic, dispatched_by)
+    if session:
+        sh(f"python3 {SLOTS} attach-session-id {bead} {session['sessionId']}")
+    else:
+        # dispatch itself failed -- don't let a phantom slot sit claimed forever.
+        sh(f"python3 {SLOTS} release-agent-view {bead}")
     write_manifest(bead, is_epic, session, failures, force, dispatched_by)
     if not session:
         sys.exit(1)
