@@ -1,4 +1,5 @@
 {
+  "cleanupPeriodDays": 3650,
   "env": {},
   "permissions": {
     "allow": [
@@ -8,7 +9,12 @@
       "Bash(python *)",
       "Bash(python3 *)",
       "Bash(eas *)",
-      "Bash(gcloud *)"
+      "Bash(gcloud *)",
+      "Bash(curl *)",
+      "Bash(~/.gstack/bin/*)",
+      "Bash(~/.claude/skills/gstack/browse/dist/browse *)",
+      "Bash(~/.claude/skills/gstack/bin/*)",
+      "Bash(./scripts/with-env.sh:*)"
     ],
     "deny": [
       "Read(.env)",
@@ -17,6 +23,7 @@
     ],
     "defaultMode": "auto"
   },
+  "model": "sonnet",
   "hooks": {
     "SessionStart": [
       {
@@ -26,6 +33,16 @@
             "type": "command",
             "command": "/Users/shane/.claude/hooks/observer.sh",
             "statusMessage": "Observer: loading..."
+          },
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/hooks/ceo-review-prompt.sh",
+            "statusMessage": "CEO review check..."
+          },
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/hooks/fleet-role-sessionstart.sh",
+            "statusMessage": "Fleet role check..."
           }
         ]
       }
@@ -35,7 +52,23 @@
         "hooks": [
           {
             "type": "command",
+            "command": "/Users/shane/.claude/hooks/agentview-name-session.py"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "/Users/shane/.claude/hooks/observer.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/hooks/voice-check.sh"
           }
         ]
       }
@@ -48,6 +81,16 @@
             "type": "command",
             "command": "/Users/shane/.claude/hooks/observer.sh",
             "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__claude_ai_Gmail__search_threads",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/hooks/gmail-thread-guard.py",
+            "statusMessage": "Gmail thread guard…"
           }
         ]
       }
@@ -69,6 +112,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "_gstack_source": "gstack-timeline-stop",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/skills/gstack/hosts/claude/hooks/timeline-stop-hook",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -81,6 +134,16 @@
             "statusMessage": "Conductor deploy guard…"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/shane/.claude/hooks/codex-background-guard.sh",
+            "statusMessage": "Codex foreground guard…"
+          }
+        ]
       }
     ]
   },
@@ -91,33 +154,63 @@
   },
   "enabledPlugins": {
     "beads@beads-marketplace": true,
-    "ralph-wiggum@claude-plugins-official": true,
-    "typescript-lsp@claude-plugins-official": true,
-    "frontend-design@claude-plugins-official": true
+    "typescript-lsp@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": false
   },
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,
     "allowUnsandboxedCommands": true,
     "network": {
+      "allowedDomains": [
+        "aestheti.cc",
+        "*.aestheti.cc",
+        "*.run.app",
+        "*.googleapis.com",
+        "storage.googleapis.com"
+      ],
       "allowUnixSockets": [
         "~/.ssh/agent-socket"
-      ]
+      ],
+      "allowLocalBinding": true
     },
     "filesystem": {
       "allowWrite": [
-        "/Users/shane/Documents/AestheticcTools"
+        "/Users/shane/.gstack",
+        "/Users/shane/.gstack/chromium-profile",
+        "/Users/shane/Documents/AestheticcTools",
+        "/private/tmp/login-as-qa-*",
+        "/private/tmp/login-as-qa-cookies-*",
+        "/private/tmp/qa-impersonate-*",
+        "/tmp/login-as-qa-*",
+        "/tmp/login-as-qa-cookies-*",
+        "/tmp/qa-impersonate-*",
+        "/private/tmp/login-as-qa-cookies.*",
+        "/private/tmp/login-as-qa-import.*"
       ]
     },
     "excludedCommands": [
       "docker",
       "watchman",
-      "eas"
+      "eas",
+      "gcloud",
+      "curl",
+      "login-as-qa",
+      "qa-impersonate",
+      "browse"
     ]
   },
-  "effortLevel": "xhigh",
+  "effortLevel": "high",
+  "tui": "fullscreen",
   "skipDangerousModePermissionPrompt": true,
-  "skipAutoPermissionPrompt": true,
+  "skipWorkflowUsageWarning": true,
   "theme": "auto",
-  "agentPushNotifEnabled": true
+  "crossSessionInbound": "accept",
+  "agentPushNotifEnabled": true,
+  "skipAutoPermissionPrompt": true,
+  "autoMode": {
+    "allow": [
+      "$defaults"
+    ]
+  }
 }
