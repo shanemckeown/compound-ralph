@@ -329,6 +329,170 @@ def test_pinned_source_verifier_holds_when_remote_tracking_ref_moves(tmp_path):
     assert f"was {old_sha} now {new_sha}; rediscover" in result.stderr
 
 
+def _push_remote_only_branch(repo, tmp_path, branch, filename="feature.txt"):
+    """Mirror test_discover.py's fixture: push, then delete the local copy so
+    the branch is only reachable via refs/remotes/origin/<branch> — exactly
+    what discover.sh classifies as source_kind=remote-branch."""
+    feature = tmp_path / f"wt-{branch.replace('/', '_')}"
+    _git(repo, "worktree", "add", "-b", branch, str(feature))
+    (feature / filename).write_text(f"{branch}\n", encoding="utf-8")
+    _git(feature, "add", ".")
+    _git(feature, "commit", "-m", f"add {branch}")
+    tip_sha = _git(feature, "rev-parse", "HEAD").stdout.strip()
+    _git(feature, "push", "origin", f"HEAD:refs/heads/{branch}")
+    _git(repo, "worktree", "remove", "--force", str(feature))
+    _git(repo, "branch", "-D", branch)
+    _git(repo, "fetch", "origin")
+    return tip_sha
+
+
+def _qualifying_candidate(branch, tip_sha):
+    """A candidate shaped exactly like discover.sh's output for a fully
+    qualified 'HELD — branch-only completion; premise review required' —
+    the only signal recreate_worktrees() reads."""
+    return {
+        "branch": branch,
+        "source_kind": "remote-branch",
+        "source_ref": f"refs/remotes/origin/{branch}",
+        "tip_sha": tip_sha,
+        "finish_signal": "held-branch-only-premise-review",
+    }
+
+
+def test_recreate_worktrees_creates_worktree_for_qualifying_candidate(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+    branch = "goal/aestheticcnext-recr1"
+    tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    report = {"candidates": [_qualifying_candidate(branch, tip_sha)]}
+
+    result = land_state.recreate_worktrees(str(repo), report)
+
+    assert result["errors"] == []
+    assert result["skipped"] == []
+    assert len(result["recreated"]) == 1
+    recreated = result["recreated"][0]
+    assert recreated["branch"] == branch
+    assert recreated["tip_sha"] == tip_sha
+    worktree_path = Path(recreated["path"])
+    assert worktree_path.is_dir()
+    assert _git(worktree_path, "rev-parse", "HEAD").stdout.strip() == tip_sha
+    assert _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0
+
+
+def test_recreate_worktrees_is_idempotent_on_rerun(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+    branch = "goal/aestheticcnext-recr2"
+    tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    report = {"candidates": [_qualifying_candidate(branch, tip_sha)]}
+
+    first = land_state.recreate_worktrees(str(repo), report)
+    second = land_state.recreate_worktrees(str(repo), report)
+
+    assert len(first["recreated"]) == 1
+    assert second["recreated"] == []
+    assert len(second["skipped"]) == 1
+    assert second["skipped"][0]["reason"] == "already-worktree"
+    assert second["errors"] == []
+
+
+def test_recreate_worktrees_skips_when_source_moved(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+    branch = "goal/aestheticcnext-recr3"
+    stale_tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    # Branch moved on origin after discover.sh's snapshot was taken.
+    mover = tmp_path / "mover"
+    _git(repo, "worktree", "add", str(mover), branch)
+    (mover / "extra.txt").write_text("later commit\n", encoding="utf-8")
+    _git(mover, "add", ".")
+    _git(mover, "commit", "-m", "moved on")
+    _git(mover, "push", "origin", f"HEAD:refs/heads/{branch}")
+    _git(repo, "worktree", "remove", "--force", str(mover))
+    _git(repo, "branch", "-D", branch)
+    _git(repo, "fetch", "origin")
+    report = {"candidates": [_qualifying_candidate(branch, stale_tip_sha)]}
+
+    result = land_state.recreate_worktrees(str(repo), report)
+
+    assert result["recreated"] == []
+    assert result["errors"] == []
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "source-moved"
+    assert not (Path(repo) / ".claude" / "worktrees" / branch.replace("/", "-")).exists()
+
+
+def test_recreate_worktrees_ignores_non_qualifying_candidates(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+    branch = "goal/aestheticcnext-recr4"
+    tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    candidate = _qualifying_candidate(branch, tip_sha)
+    candidate["finish_signal"] = "held-conflict"  # e.g. a genuinely-held candidate
+    report = {"candidates": [candidate]}
+
+    result = land_state.recreate_worktrees(str(repo), report)
+
+    assert result == {"recreated": [], "skipped": [], "errors": []}
+    assert not (Path(repo) / ".claude" / "worktrees" / branch.replace("/", "-")).exists()
+
+
+def test_recreate_worktrees_skips_diverged_local_branch_without_clobbering(tmp_path):
+    origin = tmp_path / "origin.git"
+    repo = tmp_path / "repo"
+    _init_git_repo(origin, bare=True)
+    _init_git_repo(repo)
+    (repo / "app.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-u", "origin", "main")
+    branch = "goal/aestheticcnext-recr5"
+    tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    base_sha = _git(repo, "rev-parse", "main").stdout.strip()
+    # A stale local branch of the same name exists, pointing somewhere else
+    # entirely (not attached to any worktree).
+    _git(repo, "branch", branch, base_sha)
+    report = {"candidates": [_qualifying_candidate(branch, tip_sha)]}
+
+    result = land_state.recreate_worktrees(str(repo), report)
+
+    assert result["recreated"] == []
+    assert result["errors"] == []
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "local-branch-diverged"
+    assert _git(repo, "rev-parse", branch).stdout.strip() == base_sha
+
+
 def test_prod_archive_preserves_pending_evidence_then_resets_ledger(tmp_path):
     state_dir = tmp_path / "state"
     evidence_dir = tmp_path / "evidence"

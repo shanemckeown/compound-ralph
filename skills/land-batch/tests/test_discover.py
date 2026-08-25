@@ -779,3 +779,52 @@ def test_remote_only_kickback_fix_is_identified_by_resolved_bead_without_marker(
         "original_branch": "fix/AestheticcNext-original",
         "state": "stalled",
     }
+
+
+LAND_STATE = ROOT / "bin" / "land-state.py"
+
+
+def test_recreate_worktrees_then_rediscover_reclassifies_branch_only_as_auto_landable(tmp_path):
+    """AestheticcNext-blmku: the exact mechanism Shane did by hand — recreate
+    the worktree, re-run discovery — now runs through recreate-worktrees."""
+    repo = _init_repo(tmp_path)
+    _add_origin(repo, tmp_path)
+    branch = "goal/aestheticcnext-blmku1"
+    tip_sha = _push_remote_only_branch(repo, tmp_path, branch)
+    _write_beads(
+        repo / ".beads" / "issues.jsonl",
+        [{"id": "AestheticcNext-blmku1", "status": "closed"}],
+    )
+    home = tmp_path / "home"
+
+    report_before = _discover(repo, home)
+    before = _candidate(report_before, branch)
+    assert before["source_kind"] == "remote-branch"
+    assert before["finish_signal"] == "held-branch-only-premise-review"
+    assert before["auto_land"] is False
+
+    discover_json = tmp_path / "discover-before.json"
+    discover_json.write_text(json.dumps(report_before), encoding="utf-8")
+    recreate = _run(
+        [
+            "python3",
+            str(LAND_STATE),
+            "recreate-worktrees",
+            "--repo",
+            str(repo),
+            "--discover-json",
+            str(discover_json),
+        ]
+    )
+    recreate_result = json.loads(recreate.stdout)
+    assert recreate_result["errors"] == []
+    assert recreate_result["skipped"] == []
+    assert [r["branch"] for r in recreate_result["recreated"]] == [branch]
+
+    after = _candidate(_discover(repo, home), branch)
+    assert after["source_kind"] == "worktree"
+    assert after["tip_sha"] == tip_sha
+    assert after["clean"] is True
+    assert after["effectively_clean"] is True
+    assert after["auto_land"] is True
+    assert after["finish_signal"] == "finished"

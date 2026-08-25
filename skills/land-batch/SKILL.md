@@ -1,6 +1,6 @@
 ---
 name: land-batch
-version: 0.4.0
+version: 0.4.1
 description: |
   Serialises parallel Claude worktree landing with a durable lock, FIFO queue,
   and cross-run QA ledger. Default /land-batch cheaply discovers, curates, and
@@ -72,7 +72,12 @@ reversal.
    A remote-only source is discoverable but never auto-landable in this release,
    even when exact bead CLOSED + pinned patch-unique tip proves it finished.
    Optional .claude/land-ready.json remains confidence metadata; tail vetoes
-   only, never approves.
+   only, never approves. Step 1 may mechanically satisfy this precondition —
+   not bypass it — by recreating a real worktree for a branch already fully
+   qualified as `held-branch-only-premise-review` (AestheticcNext-blmku); the
+   candidate is then re-evaluated from scratch by this same unmodified gate
+   under `source_kind=worktree`, on real on-disk cleanliness and ahead/behind,
+   not remote-only heuristics.
 8. **Evidence fail-closed and traffic verified.** Every command/output/exit-code
    artifact must be cited. Build SUCCESS alone does not prove Cloud Run traffic.
 9. **Production is pinned.** Since 2026-06-15, never use --to-latest on prod.
@@ -219,10 +224,47 @@ as loud `held-conflict` with `conflicting_files`.
 An exact/uniquely aliased CLOSED bead plus a pinned patch-unique remote tip is
 finish evidence only. Render it exactly as **HELD — branch-only completion;
 premise review required** and never offer it in this release. Unresolved or
-ambiguous bead identity is also HELD, never guessed. Discovery still renders
-complete WILL LAND / HELD / BLOCKED / SKIP / SIBLING CONFLICTS sections,
-excludes all land-batch/* branches, and emits top-level lock_queue state. It
-reads kickbacks.json through that state and adds only a presentation label:
+ambiguous bead identity is also HELD, never guessed.
+
+🔴 **Recreate the worktree for that HELD class before curation
+(AestheticcNext-blmku).** `finish_signal == "held-branch-only-premise-review"`
+is only reachable once every other axis already passed (bead exact/alias
+resolved + CLOSED, tip pinned, patch-unique, session inactive, non-conflicting,
+non-stale, non-sensitive, non-retired — any of those produces a *different*
+signal instead), so filtering on it already *is* "meets every other
+finish-evidence axis." The remaining reason it's held is purely mechanical:
+there's no worktree to run the real finish gate against. That is exactly what
+Shane did by hand the first two times this happened (`git worktree add`, then
+re-run) — mechanical, no conflict resolution, no guardrail bypass, just
+satisfying the guardrail's actual precondition. Automate it, immediately after
+the discover.sh call above and before curation is offered, keeping discover.sh
+itself read-only:
+
+~~~bash
+python3 ~/.claude/skills/land-batch/bin/land-state.py recreate-worktrees \
+  --repo "$REPO" --discover-json "$EVIDENCE_DIR/discover.json" \
+  > "$EVIDENCE_DIR/recreate-worktrees.json"
+if jq -e '(.recreated | length) > 0' "$EVIDENCE_DIR/recreate-worktrees.json" >/dev/null; then
+  LAND_BATCH_REF_SNAPSHOT=fetched-after-admission \
+    bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" \
+    > "$EVIDENCE_DIR/discover.json"
+fi
+~~~
+
+Re-run discover.sh only when something was actually recreated — an empty
+`recreated` list means every branch-only candidate was skipped (source moved,
+worktree already exists, or a diverged same-named local branch), so nothing
+changed to re-classify. A recreated worktree is evaluated by the exact same
+unmodified worktree finish gate as any other — real on-disk cleanliness, real
+ahead/behind — not a rubber stamp; a candidate the gate still holds afterwards
+(e.g. main moved between the two discover.sh passes) is held again under its
+own correct reason. Curation and the final candidate list always come from the
+*second* (post-recreation) `discover.json`, not the first.
+
+Discovery still renders complete WILL LAND / HELD / BLOCKED / SKIP / SIBLING
+CONFLICTS sections, excludes all land-batch/* branches, and emits top-level
+lock_queue state. It reads kickbacks.json through that state and adds only a
+presentation label:
 
 - an original branch with a lineage is "KICKED BACK — fix in flight (bead <id>,
   session <name>)";
