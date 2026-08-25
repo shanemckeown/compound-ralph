@@ -87,6 +87,26 @@ gh pr list -R shanemckeown/AestheticcNext --state open --limit 80 \
 - **Say it plainly, don't bury it in review-length prose:** one line, e.g. `Dispatch gate: 2/5 warm touches today (proxy count, verify manually) — fleet dispatch should stay CLOSED until 5.` If it's already past 11:00 BST and the gate reads under 5, call that out as a live breach happening *today*, not something for tomorrow's CEO review to discover after the fact — that's the entire reason this section exists.
 - Cross-check against any live CEO-review response (`Brain/CEO_Reviews/Responses/[today].md` if one exists yet) — if the gate was already flagged bypassed there, don't re-litigate, just carry the status forward.
 
+**1k. Active engagements — 🔴 MANDATORY, NEVER OMIT (added 2026-08-12 at Shane's request):**
+
+> **Shane, 2026-08-12:** *"we've got more and more clients joining now and so me trying to juggle them is getting difficult, so this morning call needs to basically be aware of anyone who we're actively working for, and by actively working for I mean in the process of onboarding or creating something for them, like an existing client who wants a new feature or whatever else."*
+
+The briefing was code-shaped and client-blind. A client mid-onboarding, or one waiting on a feature we promised, was invisible unless a bead happened to surface. Run:
+
+```bash
+node /Users/shane/Documents/Obsidian/Aestheticc/Ops/scripts/active-engagements.mjs
+```
+
+**Derived, never hand-maintained** — it reads `Clients/PROMISE_TRACKER.md` (rows at 🔴/⏳/🔨/🧩), open client-labelled beads in both DBs, and each `Clients/<Name>/INDEX.md` status line. All three update as a side effect of doing the work, so this cannot go stale the way `STATE_OF_THE_BUSINESS.md` did (84 days, because its maintenance contract lived only in its own frontmatter).
+
+Report the **top 5–6 by score**, not all 17 — the point is triage, not a directory. For each: client, overdue count, what's owed *today or tomorrow*, and the single next physical act. Then:
+
+- **🔴 Lead with anything dated today or tomorrow.** A promise with a date attached is the one that turns into a broken promise overnight.
+- **Call out meetings agreed in chat but absent from both calendars** — highest-frequency failure in the whole taxonomy, and it has already cost a real week with The Refine Room.
+- **Name new revenue asks.** An existing client asking for something we don't sell yet (NY Skin asking about managed ads, 12 Aug) is a revenue line, not a support ticket. Never let one sit as an unanswered WhatsApp.
+- **Flag any active client with no `INDEX.md`** — Chris Flanagan and Tom Welby both had live promises and no index. `Clients/README.md` is the map; a client missing from it gets worked on blind.
+- If a client has gone quiet **while we owe them something**, say so. Their silence is not the same as no debt.
+
 **1i. Outreach data (PRIMARY during the outreach sprint):**
 Run these whenever the phase is an outreach/sales sprint — they lead the briefing.
 - **Instantly campaigns** (via `instantly` MCP): `count_unread_emails` (new replies waiting), `get_campaign_analytics` for the live campaigns (sent today, reply rate, **bounce rate** — the ramp is gated on bounce <3%), and `list_emails` to surface any positive replies needing a human.
@@ -122,6 +142,59 @@ If the MCP server is not connected, skip this step silently (don't error).
 - Flag if: any S1 is OPEN, any layer not audited in >14 days, or any fixed findings unverified
 - Check last pass date from `QA_PASSES.md` — if >7 days since last pass, flag for audit
 - Note: Full methodology at `AestheticcNext/Product/QA/QA_METHODOLOGY.md`
+
+**1l. Repo health — 🔴 MANDATORY, NEVER OMIT (added 2026-08-24, after a real incident):**
+
+> **Shane, 2026-08-24, on discovering it:** *"jesus that's crazy... I think we likely need /morning modified so this sort of buildup is limited to at least alerting me when I use /morning."*
+
+The AestheticcNext trunk checkout (`/Users/shane/Documents/GitReBase/AestheticcNext`) is meant to stay clean between sessions — all real work happens in isolated worktrees, per its own CLAUDE.md. It didn't: local `main` was found 375 commits behind `origin/main` (a stale checkout, not "unpushed work" — a session that morning misread the divergence direction and initially reported the opposite), and ~90 real files (client onboarding/import scripts going back 10+ days) were sitting uncommitted in that same checkout, one `git clean -fd` from being unrecoverable. Nothing had ever checked for either condition. Run:
+
+```bash
+python3 ~/.claude/scripts/repo-health-check.py
+```
+
+- Report exactly what it prints — ahead count, behind count, uncommitted-file count, with its own directional wording (it exists specifically so this never gets eyeballed and misread again).
+- **If it exits non-zero, this is not a background note — lead with it**, above Priority Stack if the count is large (multi-day drift or >10 uncommitted files). Small/expected noise (a handful of files mid-session) doesn't need alarm framing, but say the number.
+- Never resolve it yourself as part of `/morning` — `/morning` is read-only. Surface it; let Shane decide the fix (fast-forward, push, or — if genuinely uncommitted client work is found — whether to commit it, since a prior session may have deliberately deferred exactly that decision, as one did on 23 Aug for ~80 of these scripts).
+
+**1m. Ready to Deploy — 🔴 MANDATORY, NEVER OMIT (added 2026-08-25, after a real miss):**
+
+> **Shane, 2026-08-25, on finding out by accident:** *LUCY-bubgs (Adela's Chelmsford location page) was merged to main 24 Aug but never deployed — nothing surfaced this proactively.*
+
+`/land-batch` already tracks exactly this: `~/.claude/state/land-batch/ledger.json` is the canonical
+record of everything merged to main but not yet in a shipped/deployed prod revision (since the last
+prod SHA), and `pending-qa.md` is its human-readable projection — both written by LAND's Step 3
+harvest. The data already exists; it was just never surfaced outside a manual `/land-batch --status`
+call. Run:
+
+```bash
+python3 ~/.claude/skills/land-batch/bin/land-state.py status 2>/dev/null | python3 -c "
+import json, sys, datetime
+d = json.load(sys.stdin)
+ledger = d['ledger']
+pending = ledger['pending']
+now = datetime.datetime.now(datetime.timezone.utc)
+print(f\"prod_sha={ledger.get('prod_sha')} last_successful_prod_at={ledger.get('last_successful_prod_at')} pending_count={len(pending)}\")
+for f in pending:
+    bead = f.get('bead_id') or f.get('bead_title') or 'unknown'
+    branch = f.get('branch', 'unknown')
+    landed = f.get('landed_at')
+    days = '?'
+    if landed:
+        try:
+            dt = datetime.datetime.fromisoformat(landed.replace('Z', '+00:00'))
+            days = (now - dt).days
+        except Exception:
+            days = '?'
+    print(f'{bead}\t{branch}\t{landed}\t{days}d')
+"
+```
+
+- Report every row: bead ID, branch, landed date, days pending.
+- 🔴 **If `pending_count` is 0, say so explicitly** — "Ledger clean — nothing pending deploy since prod
+  SHA `<prod_sha>`" — never omit the section just because it's empty.
+- Flag anything sitting **2+ days pending** — that's customer-visible value already merged and just
+  not live; it should read the same as an alarm, not a footnote.
 
 ### Step 2: Synthesize Briefing
 
@@ -167,6 +240,21 @@ Run `python3 ~/.claude/scripts/fleet-supervisor.py` and report it here. **If it 
 
 > **Why this lives here and not in a timer** (decided 2026-08-11, after Codex and Fable split on it): a launchd job would join `bd-reap`, `capture-watcher` and `ops-daemon` — all of which run unwatched, and not one has ever reported itself down. `capture-watcher` was dead for 30 hours with an empty error log and five unprocessed client captures piling up, and nothing said a word. `/morning` is the one recurring trigger attached to something Shane wants **for himself**, so it will not quietly stop being run the way bedtime did. The who-watches-the-watcher regress terminates at a human's own recurring want — that is the only place it can terminate. Blocked work rots over days, so there is no latency argument for a timer.
 
+### Repo Health — 🔴 MANDATORY, NEVER OMIT
+[From `repo-health-check.py` per 1l. If it fails to run, print literally `REPO HEALTH CHECK DID NOT RUN: <reason>` rather than omitting the section.]
+- **AestheticcNext trunk:** [✅ clean, or the exact ahead/behind/uncommitted counts it printed]
+- [If issues found: one line on what it means and what unblocks it — e.g. "375 behind = stale checkout, fast-forward it" or "12 uncommitted files = real work at risk, needs a commit decision"]
+
+### Ready to Deploy — 🔴 MANDATORY, NEVER OMIT
+[From `land-state.py status` per 1m. If the command fails, print literally `READY TO DEPLOY DID NOT RUN: <reason>` rather than omitting the section. If pending is empty, print "Ledger clean — nothing pending deploy since prod SHA `<prod_sha>`" rather than omitting the section.]
+- **Pending since prod:** N feature(s), last successful prod at [last_successful_prod_at]
+
+| Bead | Branch | Landed | Days pending |
+|---|---|---|---|
+| [bead_id] | [branch] | [landed_at date] | [N] |
+
+- [If any row is 2+ days pending, lead with it: "N days pending" reads as merged-but-not-live customer value, not a footnote]
+
 ### 🔴 Live Work In Flight — DO NOT DUPLICATE
 Read every `Sessions/closeouts/*--ACTIVE.md` (frontmatter `status: in-progress`). For each, check its `session_id` against `claude agents --json`:
 - **Session still live** → list it as "OWNED by `<active_session>`, do not dispatch: `<the DO NOT DUPLICATE items>`". If you are the orchestrator, this is the authoritative list of what's already claimed — do not re-file or re-dispatch any of it.
@@ -177,6 +265,21 @@ An ACTIVE fragment is a live claim on a body of work; the whole point is that a 
 ### Last Session
 [1-2 sentences from `LUCY_SESSION_STATE.md` — what was done, what was queued]
 - **Un-rolled closeouts:** N fragments in `Sessions/closeouts/`, oldest X days, state file Y KB — from `ls` and `stat`, no rollup logic. **If N > 10 or the state file is over 60 KB, say "run `/rollup`".** `/rollup` fires on Shane's memory, which is the same trigger class that killed `/night`; this line is what makes forgetting it visible. **Never fold an `--ACTIVE` fragment into the state file while its session is alive.**
+
+### 🔴 Active Engagements — who we're working FOR right now
+[From `active-engagements.mjs` per 1k. Top 5–6 by score, never the full list. This section is MANDATORY — if the script fails, print `ACTIVE ENGAGEMENTS DID NOT RUN: <reason>` rather than omitting it.]
+
+**Owed today or tomorrow:**
+- **[Client]** — [the dated thing, and the single next physical act]
+
+**Live engagements:**
+| Client | Where they are | Overdue | Next act |
+|---|---|---|---|
+| [Name] | [onboarding step / building X / waiting on Y] | [N] | [specific act, not "follow up"] |
+
+- **🔴 Agreed in chat, missing from both calendars:** [meeting + who + when, or "none"]
+- **💷 New revenue asks:** [an existing client asking for something we don't sell yet — price it, don't let it rot in WhatsApp]
+- **No INDEX.md:** [active clients with no `Clients/<Name>/INDEX.md` — we're working on them blind]
 
 ### Outreach (lead during a sales/outreach sprint — skip if phase isn't outreach)
 - **Replies waiting:** X unread in Instantly [flag any positive/booking replies by name]
@@ -307,6 +410,7 @@ If an advisory domain review is due and Shane has time/interest:
 - LUCY_ADVISORY_CADENCE.json (for domain review tracking)
 - AestheticcNext/Product/QA/ (for QA health — dashboard, findings, methodology)
 - Google Sheets MCP (optional — for CFO domain, pending setup)
+- ~/.claude/state/land-batch/ledger.json (for Ready to Deploy — pending QA/deploy ledger since last prod SHA)
 
 ## Sprint Emphasis
 
