@@ -2,9 +2,9 @@
 
 Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
 
-Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
+Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER `/land-batch` lands the branch to main and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
 
-🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached by Shane merging to main, then the normal staging deploy. /goal stops at "branch pushed + bead closed."
+🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached via `/land-batch`, then the normal staging deploy. /goal stops at "branch pushed + bead closed + worktree left intact for discovery."
 
 ## 🔴 HARD RULE: No `result:` until every in-scope bead is verified CLOSED
 
@@ -496,7 +496,7 @@ Steps:
    back to 4b. *(This precondition is what stops 4b becoming another orphaned gate — the
    exact failure mode that silently killed the plan-review gate for six weeks.)*
 1. `/ship` to push the feature branch (runs tsc + lint + tests). Do NOT pass any flag that would merge to main.
-2. That's it. **No deploy step.** The branch is now ready for Shane to merge, then staging QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
+2. That's it. **No deploy step.** The branch is now ready for `/land-batch` to discover and land (worktree stays intact — see Phase 6.5), then staging QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
 
 If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `needs input:` not `result:` in Phase 7 — the bead stays open.
 
@@ -507,7 +507,7 @@ If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `
 **Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + branch name + list of closed children.
 
 ```bash
-bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Ready for Shane to merge, then staging QA. No autonomous deploy."
+bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Worktree left intact for /land-batch. No autonomous deploy."
 ```
 
 **Then verify every close stuck.** Per-bead:
@@ -521,25 +521,44 @@ If even one verification fails, do NOT proceed to Phase 7's `result:` line. Writ
 
 If QA failed at the 3-round cap: leave beads open with notes documenting state, don't close, and write `needs input:` not `result:`.
 
-### Phase 6.5 — Reclaim the worktree (disk hygiene)
+### Phase 6.5 — Leave the worktree for `/land-batch` (do NOT remove it)
 
-The branch is pushed (Phase 5) and every bead is verified CLOSED (Phase 6), so all work is captured on the remote branch + branch ref. The worktree itself (a full checkout, often 100MB–2GB with node_modules) is now dead weight — remove it so /goal runs don't accumulate disk. **Removing a worktree does NOT delete the branch ref or the pushed remote branch**, so Shane can still merge.
+🔴 **Reversed 2026-08-26.** This phase used to remove the worktree here as disk hygiene,
+reasoning "the branch ref is enough, Shane can still merge from that." That was true but
+wrong: `/land-batch` discovery treats a worktree-backed branch and a worktree-*less*
+("remote-only") branch very differently. A worktree-backed candidate can become
+`auto_land=true` and land itself through the normal multiSelect gate. A remote-only
+candidate is **hard-quarantined — `held-branch-only-*`, never offered, no matter how
+complete the evidence** (exact bead CLOSED + pinned patch-unique tip is not enough) —
+because discovery can no longer independently confirm the tree was clean when the
+session finished; it would have to trust the session's own self-report, which is exactly
+what `/land-batch`'s own first principle refuses to do ("narration is input, never
+evidence"). Deleting the worktree here was quietly forcing every single `/goal` run onto
+the dead-end path that needs a human to run raw `git merge` — the thing Shane has never
+had to do in 18 months of running this system, and does not want to start doing now.
+Landing is `/land-batch`'s job; `/goal` handing it a live worktree is what lets it do that
+job without a human touching git.
 
-Preconditions (ALL must hold — else SKIP and note why in the report):
-- Branch was pushed to origin in Phase 5.
-- `git -C <worktree> status --porcelain --untracked-files=no` is empty (no uncommitted tracked changes — never discard unsynced work).
+So: **do not remove the worktree.** Its only remaining purpose here is proving the
+precondition below, for the report — not for deletion.
 
-Steps:
-1. `cd` to the trunk first — you cannot remove the worktree you are standing in:
-   `cd /Users/shane/Documents/GitReBase/AestheticcNext`
-2. Remove it:
-   - Worktree created via the **EnterWorktree** tool → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
-   - Worktree created manually (`git worktree add`) → `git worktree remove --force <worktree-path> && git worktree prune`.
-3. Run from the trunk (see Phase 6.6 below for what actually now follows).
+Precondition to note in the report (informational only — do NOT act on a failure by
+removing the worktree; a dirty tree is `/land-batch` discovery's problem to flag, not this
+phase's problem to clean up):
+- `git -C <worktree> status --porcelain --untracked-files=no` — empty means clean, which is
+  exactly the signal that lets `/land-batch` classify this as auto-landable later.
 
-If a precondition fails, leave the worktree in place and say so in the report.
+Nothing else in this phase mutates anything. Proceed straight to Phase 6.6.
 
-**Backlog backstop:** stale worktrees from older runs accumulate (they're what fill the disk — branch refs are 41 bytes, worktrees are GBs). Periodically run `scripts/cleanup-merged-worktrees.sh` from the trunk (dry-run, then `--apply`). It reclaims only worktrees whose work already landed on main, preserves branch refs, never touches DIRTY (uncommitted) worktrees, and flags STALE ones for manual review.
+**Disk hygiene still exists — it just happens AFTER landing, not before.** Once
+`/land-batch` has actually merged a worktree's branch to main, `scripts/cleanup-merged-worktrees.sh`
+(dry-run, then `--apply`, run periodically from the trunk) reclaims it — it only removes
+worktrees whose work already landed on main, preserves branch refs, never touches DIRTY
+(uncommitted) worktrees, and flags STALE ones for manual review. `/land-batch`'s own
+discovery also offers safe pruning for exactly this shape (`source_kind=worktree`,
+clean, `ahead=0` after landing) through the same multiSelect gate. A worktree living from
+"branch pushed" to "branch landed" is the cost of `/land-batch` being able to act without
+a human — a few hundred MB for a few hours/days, not indefinitely.
 
 ### Phase 6.6 — Release fleet slot + advance the queue
 
@@ -572,7 +591,7 @@ genuinely the LAST mutating step — only the Phase 7 report follows.
 Final line:
 
 ```
-result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Ready for Shane to merge, then staging QA. Warnings: <list or none>.
+result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Worktree left intact for /land-batch to discover and land. Warnings: <list or none>.
 
 USER-FACING CHANGES (Phase 4b):
 <paste CHANGE-NOTE.md in full, or "none — backend only">
@@ -582,7 +601,7 @@ USER-FACING CHANGES (Phase 4b):
 file in a worktree he will never open is the same as not writing it. If any user surface was touched and
 this section is missing, the run is not reportable.
 
-QA happens after Shane merges the branch to main and the normal staging deploy runs (the main staging service is the only QA surface). **Never fire `@deploy-staging`** — that subagent is banned per CLAUDE.md (deploy subagents hallucinate "queued/monitoring/completed" without submitting). /goal does not deploy.
+QA happens after `/land-batch` lands the branch to main and the normal staging deploy runs (the main staging service is the only QA surface). **Never fire `@deploy-staging`** — that subagent is banned per CLAUDE.md (deploy subagents hallucinate "queued/monitoring/completed" without submitting). /goal does not deploy.
 
 For partial/failed runs:
 
@@ -619,7 +638,7 @@ Full `lib/stripe/` rewrite alone: **refused**. Sensitive-path budget blown.
 
 - Does not merge to main. Ever.
 - **Does not deploy anywhere.** No production, no staging, no worktree revision. No `gcloud builds submit`, no `gcloud run deploy`, no `--tag`, no `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on revisions (`feedback_cloud_run_warm_instance_cost_model.md`) — banned.
-- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs.
+- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER `/land-batch` lands the branch and the normal staging deploy runs.
 - Does not refuse-vs-allow on staging deploys — it simply never deploys. (Still refuses with `failed:` if the bead body says "deploy to prod"/"production deploy" — mis-scoped.)
 - Does not bypass `/review` or `/ship` gates. They run inside Phase 5.
 - Does not pick its own bead. Shane (or a future supervisor cron) chooses what to fire on.

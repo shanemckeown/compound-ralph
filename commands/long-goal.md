@@ -276,9 +276,14 @@ bd show "$ID" 2>&1 | grep -qiE "^Status:.*closed|\[CLOSED\]|· CLOSED" \
 
 Collect failures; report them in Phase 7 rather than silently proceeding.
 
-### Phase 6.5 — Reclaim the worktree — unchanged from `/goal`
+### Phase 6.5 — Leave the worktree for `/land-batch` — unchanged from `/goal`
 
-Same preconditions, same `ExitWorktree`/`git worktree remove` steps, only after the branch is pushed and every closeable child is verified closed.
+🔴 **Reversed 2026-08-26, same as `/goal`.** Do NOT remove the worktree. A worktree-less
+("remote-only") branch is hard-quarantined by `/land-batch` discovery no matter how
+complete its evidence — it forces a human `git merge`, which is exactly the workflow
+Shane does not want. Leave the worktree intact once the branch is pushed and every
+closeable child is verified closed; only note the `git status --porcelain` cleanliness
+check in the report. See `/goal` Phase 6.5 for the full reasoning.
 
 ### Phase 6.6 — Release fleet slot + advance the queue — same as `/goal`
 
@@ -301,7 +306,7 @@ Note in the Phase 7 report if you advanced the queue.
 ### Phase 7 — Report
 
 ```
-result: epic <EPIC_ID> — <N> of <TOTAL> children closed, <M> excluded (scoping/budget, see notes), <K> QA-capped (follow-up beads filed). Branch long-goal/<id> pushed. Evidence: <artifact paths, one set per child>. Ready for Shane to merge, then staging QA.
+result: epic <EPIC_ID> — <N> of <TOTAL> children closed, <M> excluded (scoping/budget, see notes), <K> QA-capped (follow-up beads filed). Branch long-goal/<id> pushed. Evidence: <artifact paths, one set per child>. Worktree left intact for /land-batch to discover and land.
 ```
 
 If everything closed cleanly, `<M>` and `<K>` are 0 — say so plainly, don't pad the report.
