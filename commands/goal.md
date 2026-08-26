@@ -169,11 +169,71 @@ interactions" line added to PLAN.md before Build proceeds. If the plan adds a ne
 save/persist action, confirm PLAN.md names the new `promise_inventory.jsonl` row (see 0d.1B)
 — missing row is treated the same as a missing CHANGE-NOTE.md: do not push.
 
+🔴 **Re-verify `TARGET_REPO` (Phase 1, step 0) against PLAN.md's finished *Affected files*
+list too — not just sensitive-path budgets.** Phase 1's guess runs off raw bead-body text
+before any real investigation; Phase 2's plan is the first point the true affected files
+are known for certain. If the plan's affected files resolve to a **different** repo than
+the one Phase 1 already isolated into: nothing has been committed yet (Phase 2 is
+plan-only), so discard that worktree (`ExitWorktree` with `action: "remove"` for case 1, or
+delete the scratch dir + `git -C <that repo> worktree remove --force` for case 2) and redo
+Phase 1 against the correct `TARGET_REPO` before Build (Phase 3) touches a single file.
+Never carry a plan built on the wrong repo's `TARGET_REPO` guess into Build.
+
 ### Phase 1 — Worktree + claim
 
-1. If not already in a worktree, call `EnterWorktree`. Otherwise work in place.
-2. Branch name: `goal/<bead-id-lowercase>` for singletons, `goal/<epic-id-lowercase>` for bundles.
-3. For each bead in scope:
+🔴 **Isolate BEFORE any `git checkout -b` / `git commit` / `git push` — never run those
+yourself "to save a step," even when `EnterWorktree` will be called moments later.** This
+exact ordering mistake caused `LUCY-ay7xu`: a raw `git checkout -b` ran directly in the
+shared `/Users/shane/Documents/Obsidian` trunk checkout before isolation, and because
+Phase 0b's `cd "$REPO_ROOT"` had just moved the session into a repo different from the one
+it launched in, the branch switch silently landed on the interactive orchestrator session
+sitting in that same shared checkout mid-conversation — two real commits went to the wrong
+branch and missed `origin/main` until manually caught. (Tracked and fixed as `LUCY-hvryu`.)
+
+0. **Confirm which repo you're actually about to mutate — don't assume it's `REPO_ROOT`.**
+   Phase 0a's per-prefix routing is a *default*, not a guarantee: it maps every `LUCY-*`
+   bead to Obsidian and every `AestheticcNext-*` bead to the code repo, but a bead's real
+   `AFFECTED_PATHS` (Phase 0d) can point somewhere else entirely — e.g. a bead about
+   `/goal`'s own instructions lives in `~/.claude` (repo `compound-ralph`), not Obsidian,
+   even though it's filed as `LUCY-*`. Set `TARGET_REPO` from where `AFFECTED_PATHS`
+   actually resolves on disk — resolve each path's *containing directory* (`AFFECTED_PATHS`
+   entries are usually files; `git -C` requires a directory, so `dirname` first:
+   `git -C "$(dirname <path>)" rev-parse --show-toplevel`), falling back to `REPO_ROOT` only
+   when they agree. Every step below keys off `TARGET_REPO`, not the raw `REPO_ROOT` string.
+   🔴 **This is a best-effort guess from bead-body text, not a guarantee — Phase 0d can miss
+   the real target entirely for an investigation-heavy bug** (this bead's own fix files
+   were only discovered via a dedicated investigation subagent, not text-scraping the bead
+   body). Phase 0f re-checks `TARGET_REPO` against Phase 2's finished plan for exactly this
+   reason — treat this step's guess as provisional until that re-check passes.
+1. **`TARGET_REPO` is the repo this session launched in** (the common case — most
+   `AestheticcNext-*` dispatches, and any `LUCY-*`/vault-tooling dispatch launched directly
+   in that repo): call `EnterWorktree` now, before touching git at all. It creates the
+   worktree and moves you inside it in one step.
+2. **`TARGET_REPO` is a *different* repo than the one this session launched in** (e.g. a
+   `LUCY-*` bead running in a session whose launch repo is `AestheticcNext`, a bead whose
+   affected files live in yet a third repo like `~/.claude`, or the reverse direction):
+   `EnterWorktree` is hard-pinned to the launch repo — calling it here silently isolates
+   the *wrong* repo, it does not fail loudly. Isolate manually instead, before any
+   commit-affecting command:
+   ```bash
+   SCRATCH="${CLAUDE_JOB_DIR:+$CLAUDE_JOB_DIR/tmp}"; SCRATCH="${SCRATCH:-$(mktemp -d)}"
+   git -C "$TARGET_REPO" fetch origin main --quiet   # or the repo's actual default branch
+   git -C "$TARGET_REPO" worktree add "$SCRATCH/goal-<bead-id-lowercase>" \
+     -b goal/<bead-id-lowercase> origin/main
+   cd "$SCRATCH/goal-<bead-id-lowercase>"
+   ```
+   Every subsequent git command in this run happens inside that path. **Never
+   `cd "$TARGET_REPO"` and run `git checkout -b` there** — that mutates the shared trunk
+   checkout a human or another session may be sitting in right now. Remember this repo for
+   Phase 6.5 cleanup (`git -C "$TARGET_REPO" worktree remove`, not a bare command run from
+   wherever the session happens to be).
+3. **Verify before the first git-mutating command, every time, regardless of which case
+   above applied:** confirm `pwd` is a path under `.claude/worktrees/` (case 1) or under
+   your scratch worktree dir (case 2) — never `$TARGET_REPO` itself. If `pwd` still equals
+   `$TARGET_REPO` exactly, STOP. You have not isolated yet; fix that before any
+   `git checkout`, `git commit`, or `git push`.
+4. Branch name: `goal/<bead-id-lowercase>` for singletons, `goal/<epic-id-lowercase>` for bundles.
+5. For each bead in scope:
    ```bash
    bd update <ID> --claim --status=in_progress
    bd comment <ID> "started /goal $(date -Iseconds)"
@@ -530,11 +590,12 @@ Preconditions (ALL must hold — else SKIP and note why in the report):
 - `git -C <worktree> status --porcelain --untracked-files=no` is empty (no uncommitted tracked changes — never discard unsynced work).
 
 Steps:
-1. `cd` to the trunk first — you cannot remove the worktree you are standing in:
-   `cd /Users/shane/Documents/GitReBase/AestheticcNext`
+1. `cd` away from the worktree first — you cannot remove the worktree you are standing in.
+   - **Phase 1 case 1** (EnterWorktree, same repo as launch): `cd /Users/shane/Documents/GitReBase/AestheticcNext`.
+   - **Phase 1 case 2** (manual `git worktree add -C "$TARGET_REPO"` into a scratch dir, different repo than launch): `cd` to that same `$TARGET_REPO`, not to the AestheticcNext trunk — `git worktree remove` operates against the repo whose `.git` owns the worktree, and AestheticcNext's `.git` knows nothing about a worktree registered under a different repo's `git-common-dir`.
 2. Remove it:
-   - Worktree created via the **EnterWorktree** tool → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
-   - Worktree created manually (`git worktree add`) → `git worktree remove --force <worktree-path> && git worktree prune`.
+   - Worktree created via the **EnterWorktree** tool (case 1) → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
+   - Worktree created manually (case 2, `git -C "$TARGET_REPO" worktree add ...`) → `git -C "$TARGET_REPO" worktree remove --force <worktree-path> && git -C "$TARGET_REPO" worktree prune`. Always pass `-C "$TARGET_REPO"` (or an equivalent `cd` into that repo first) — a bare `git worktree remove` run from the wrong repo silently no-ops or errors, and the scratch checkout is left behind accumulating disk exactly like the case-1 leak this phase exists to prevent.
 3. Run from the trunk (see Phase 6.6 below for what actually now follows).
 
 If a precondition fails, leave the worktree in place and say so in the report.

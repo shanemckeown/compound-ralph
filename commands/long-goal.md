@@ -159,9 +159,48 @@ in one specific child's plan but not actually delivered.
 
 ### Phase 1 — Worktree + claim
 
-1. `EnterWorktree` if not already in one.
-2. Branch name: `long-goal/<epic-id-lowercase>`.
-3. For each eligible child:
+🔴 **Isolate BEFORE any `git checkout -b` / `git commit` / `git push` — never run those
+yourself "to save a step," even when `EnterWorktree` will be called moments later.** Same
+ordering mistake as `/goal`'s Phase 1 (see `LUCY-ay7xu`, fixed as `LUCY-hvryu`): a raw
+`git checkout -b` in a shared trunk checkout, before isolation, can silently switch a
+human's or another session's branch mid-conversation.
+
+0. **Confirm which repo you're actually about to mutate — don't assume it's `REPO_ROOT`.**
+   Phase 0a's per-prefix routing is a *default*, not a guarantee: a bead's real
+   `AFFECTED_PATHS` (Phase 0d, per child) can point somewhere else entirely. Set
+   `TARGET_REPO` from where `AFFECTED_PATHS` actually resolves on disk — resolve each
+   path's *containing directory* (`AFFECTED_PATHS` entries are usually files; `git -C`
+   requires a directory, so `dirname` first: `git -C "$(dirname <path>)" rev-parse
+   --show-toplevel`), falling back to `REPO_ROOT` only when they agree. Every step below
+   keys off `TARGET_REPO`, not the raw `REPO_ROOT` string. 🔴 This is a best-effort guess
+   from bead-body text, not a guarantee — treat it as provisional until Phase 2's finished
+   plan confirms it (same re-check `/goal`'s Phase 0f runs; apply it here too, per child).
+1. **`TARGET_REPO` is the repo this session launched in** (the common case): call
+   `EnterWorktree` now, before touching git at all. It creates the worktree and moves you
+   inside it in one step.
+2. **`TARGET_REPO` is a *different* repo than the one this session launched in** (e.g. a
+   `LUCY-*` epic running in a session whose launch repo is `AestheticcNext`, a child whose
+   affected files live in yet a third repo, or the reverse direction): `EnterWorktree` is
+   hard-pinned to the launch repo — calling it here silently isolates the *wrong* repo, it
+   does not fail loudly. Isolate manually instead, before any commit-affecting command:
+   ```bash
+   SCRATCH="${CLAUDE_JOB_DIR:+$CLAUDE_JOB_DIR/tmp}"; SCRATCH="${SCRATCH:-$(mktemp -d)}"
+   git -C "$TARGET_REPO" fetch origin main --quiet   # or the repo's actual default branch
+   git -C "$TARGET_REPO" worktree add "$SCRATCH/long-goal-<epic-id-lowercase>" \
+     -b long-goal/<epic-id-lowercase> origin/main
+   cd "$SCRATCH/long-goal-<epic-id-lowercase>"
+   ```
+   Every subsequent git command in this run happens inside that path. **Never
+   `cd "$TARGET_REPO"` and run `git checkout -b` there** — that mutates the shared trunk
+   checkout a human or another session may be sitting in right now. Remember this repo for
+   Phase 6.5 cleanup.
+3. **Verify before the first git-mutating command, every time, regardless of which case
+   above applied:** confirm `pwd` is a path under `.claude/worktrees/` (case 1) or under
+   your scratch worktree dir (case 2) — never `$TARGET_REPO` itself. If `pwd` still equals
+   `$TARGET_REPO` exactly, STOP. You have not isolated yet; fix that before any
+   `git checkout`, `git commit`, or `git push`.
+4. Branch name: `long-goal/<epic-id-lowercase>`.
+5. For each eligible child:
    ```bash
    bd update <ID> --claim --status=in_progress
    bd comment <ID> "started /long-goal $(date -Iseconds)"
