@@ -580,11 +580,20 @@ if [ "$NEXT" != "NONE" ]; then
   EPIC_FLAG=""
   bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
   python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+  RC=$?
+  if [ $RC -ne 0 ] && [ $RC -ne 3 ]; then
+    # dequeue-next already claimed a slot for $NEXT and popped it off the queue; the gate
+    # then refused (e.g. missing headless-eligible label). Undo both so nothing leaks: give
+    # the slot back, and put the bead back in the queue instead of silently dropping it.
+    python3 ~/.claude/scripts/fleet-slots.py release-agent-view "$NEXT"
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$([ -n "$EPIC_FLAG" ] && echo long-goal || echo goal)"
+  fi
 fi
 ```
 
-Note in the Phase 7 report if you advanced the queue (which bead, if any). This is now
-genuinely the LAST mutating step — only the Phase 7 report follows.
+Note in the Phase 7 report if you advanced the queue (which bead, if any), or if an advance
+was attempted but the gate refused it: `attempted <bead>, refused by gate (<reason>), re-queued`.
+This is now genuinely the LAST mutating step — only the Phase 7 report follows.
 
 ### Phase 7 — Report
 

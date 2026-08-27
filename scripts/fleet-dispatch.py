@@ -27,7 +27,7 @@ Usage:
   fleet-dispatch.py <bead-id> --dry-run    # run the gate, dispatch nothing
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
 """
-import json, os, re, subprocess, sys, time, datetime
+import io, json, os, re, subprocess, sys, time, datetime
 
 SLOTS = os.path.expanduser("~/.claude/scripts/fleet-slots.py")
 
@@ -178,7 +178,7 @@ def check_epic_has_children(bead):
 FILE_PATH_RE = re.compile(r"[\w./-]+\.\w{1,5}(:\d+)?")
 
 
-def check_headless_eligible(bead):
+def check_headless_eligible(bead, diagnostic_output=None):
     """Check 4 (added 2026-08-27): refuse a single-bead /goal dispatch unless the bead is
     explicitly tagged `headless-eligible`. Mirrors the existing `auto-eligible` label
     convention (a DIFFERENT label with a different meaning — auto-eligible gates the
@@ -208,20 +208,25 @@ def check_headless_eligible(bead):
 
     acceptance = record.get("acceptance_criteria") or ""
     scope_text = "\n".join((record.get("description") or "", acceptance))
+    diagnostics = [
+        f"acceptance_criteria is empty: {'YES' if not acceptance.strip() else 'NO'}",
+        f"description + acceptance_criteria cites a file path: "
+        f"{'YES' if FILE_PATH_RE.search(scope_text) else 'NO'}",
+    ]
+    diagnostic_output = sys.stdout if diagnostic_output is None else diagnostic_output
+    for diagnostic in diagnostics:
+        print(f"   ↳ diagnostic (not blocking): {diagnostic}", file=diagnostic_output)
     return [
         f"bead is not tagged 'headless-eligible' — /goal cannot run this headless. Either: "
         f"(a) if it's genuinely a small, pre-scoped, no-open-design-decisions task, tag it: "
         f"bd tag {bead} headless-eligible, then re-run; or (b) open a Manager tab and run "
         f"/take instead — see Aestheticc/CLAUDE.md 'Orchestrator vs sub-Claude'.",
-        f"diagnostic, not blocking: acceptance_criteria is empty: "
-        f"{'YES' if not acceptance.strip() else 'NO'}",
-        f"diagnostic, not blocking: description + acceptance_criteria cites a file path: "
-        f"{'YES' if FILE_PATH_RE.search(scope_text) else 'NO'}",
     ]
 
 
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
+    headless_diagnostics = None
     results = {
         "0 bead is dispatchable": check_bead_is_dispatchable(bead),
         "1 no in-flight work": check_no_inflight_work(bead),
@@ -230,12 +235,15 @@ def run_gate(bead, is_epic):
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
     else:
-        results["4 headless eligible"] = check_headless_eligible(bead)
+        headless_diagnostics = io.StringIO()
+        results["4 headless eligible"] = check_headless_eligible(bead, headless_diagnostics)
     failed = False
     for name, problems in results.items():
         if problems:
             failed = True
             print(f"   ✗ {name}")
+            if name == "4 headless eligible" and headless_diagnostics is not None:
+                print(headless_diagnostics.getvalue(), end="")
             for p in problems:
                 print(f"       {p}")
         else:

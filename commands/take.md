@@ -15,6 +15,10 @@ The path may be absolute or relative to the vault's `Aestheticc/` root at `/User
 
 Resolve a relative argument against `/Users/shane/Documents/Obsidian/Aestheticc/` and use that absolute path as `HANDOFF_DOC`. Derive `WORK_ID` mechanically from the resolved document's filename stem: take the basename and remove the final `.md`. Do not infer, abbreviate, or negotiate another ID; the filename stem is the shared ID the orchestrator and this tab use.
 
+Before continuing, verify that the resolved path is a real file (for example,
+`test -f "$HANDOFF_DOC"`). If it does not exist, **STOP** before claiming anything and report
+the bad path to whoever ran `/take`. Never create a live MANAGER claim for a missing brief.
+
 ## 2. Reuse this session's ID
 
 Use the session ID already surfaced by `~/.claude/hooks/fleet-role-sessionstart.sh` in this session's SessionStart `additionalContext`. It appears inside the suggested `fleet-role.py <session-id> ...` command in that context. Reuse that exact ID; do not re-derive it.
