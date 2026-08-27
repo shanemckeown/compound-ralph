@@ -4,9 +4,11 @@
 Does two jobs that were previously left to discipline and kept getting skipped:
 
 1. THE PRE-DISPATCH VALIDATOR, AS A GATE THAT REFUSES.
-   `Aestheticc/CLAUDE.md` lists three mandatory pre-dispatch checks and notes
-   they are "prose enforced by discipline, which is why they get skipped" —
-   twice in one session, at real cost. They are enforced here instead.
+   `Aestheticc/CLAUDE.md` lists mandatory pre-dispatch checks and notes they are
+   "prose enforced by discipline, which is why they get skipped" — twice in one
+   session, at real cost. They are enforced here instead. A single-bead /goal
+   also requires the explicit `headless-eligible` label; epic /long-goal runs
+   its own per-child scoping-quality gate instead.
 
 2. THE DISPATCH MANIFEST.
    `claude --bg` returns no session id, `ListAgents` under-reports, and session
@@ -173,6 +175,51 @@ def check_epic_has_children(bead):
     return []
 
 
+FILE_PATH_RE = re.compile(r"[\w./-]+\.\w{1,5}(:\d+)?")
+
+
+def check_headless_eligible(bead):
+    """Check 4 (added 2026-08-27): refuse a single-bead /goal dispatch unless the bead is
+    explicitly tagged `headless-eligible`. Mirrors the existing `auto-eligible` label
+    convention (a DIFFERENT label with a different meaning — auto-eligible gates the
+    unsupervised Sentry/night-batch pipeline; headless-eligible gates whether THIS bead is
+    scoped enough for a Worker /goal session at all, per CLAUDE.md's Manager/Worker split).
+    Explicit opt-in only — never auto-inferred, so a heuristic misfire can't silently let an
+    open-ended bead through. See AestheticcNext-fgxkg (2026-08-27): a genuinely novel,
+    multi-day, open-question-bearing bead got headless-dispatched 3x anyway."""
+    code, out, err = sh(f"bd show {bead} --json", cwd=REPO, bead=bead)
+    if code != 0 or not out:
+        detail = err or out or "no output"
+        return [f"`bd show {bead} --json` failed — cannot verify the required "
+                f"'headless-eligible' label: {detail}"]
+    try:
+        records = json.loads(out)
+        record = records[0] if isinstance(records, list) and records else None
+    except Exception as exc:
+        return [f"`bd show {bead} --json` returned invalid JSON — cannot verify the required "
+                f"'headless-eligible' label: {exc}"]
+    if not isinstance(record, dict):
+        return [f"`bd show {bead} --json` did not return a one-object array — cannot verify "
+                f"the required 'headless-eligible' label"]
+
+    labels = record.get("labels") or []
+    if "headless-eligible" in labels:
+        return []
+
+    acceptance = record.get("acceptance_criteria") or ""
+    scope_text = "\n".join((record.get("description") or "", acceptance))
+    return [
+        f"bead is not tagged 'headless-eligible' — /goal cannot run this headless. Either: "
+        f"(a) if it's genuinely a small, pre-scoped, no-open-design-decisions task, tag it: "
+        f"bd tag {bead} headless-eligible, then re-run; or (b) open a Manager tab and run "
+        f"/take instead — see Aestheticc/CLAUDE.md 'Orchestrator vs sub-Claude'.",
+        f"diagnostic, not blocking: acceptance_criteria is empty: "
+        f"{'YES' if not acceptance.strip() else 'NO'}",
+        f"diagnostic, not blocking: description + acceptance_criteria cites a file path: "
+        f"{'YES' if FILE_PATH_RE.search(scope_text) else 'NO'}",
+    ]
+
+
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
     results = {
@@ -182,6 +229,8 @@ def run_gate(bead, is_epic):
     }
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
+    else:
+        results["4 headless eligible"] = check_headless_eligible(bead)
     failed = False
     for name, problems in results.items():
         if problems:
@@ -300,8 +349,8 @@ def main():
 
     if failed and not force:
         print(f"\n🔴 REFUSED. {bead} is not dispatchable.")
-        print("   These are the three checks CLAUDE.md already requires; skipping them has")
-        print("   burned real time twice in one session. Fix the cause, or re-run with --force")
+        print("   These are the dispatch checks CLAUDE.md requires, including explicit")
+        print("   headless eligibility for single beads. Fix the cause, or re-run with --force")
         print("   (which dispatches anyway and records the override in the manifest).")
         sys.exit(1)
     if failed and force:
