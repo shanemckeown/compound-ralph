@@ -470,6 +470,19 @@ feature is reachable from, before and after. Diff the two lists. Then apply:
 
 A FAIL here does not get written up as a caveat. Fix it, or stop and surface it.
 
+🔴 **THRESHOLD-SCOPE check (added 2026-08-28, `AestheticcNext-nd9ro`).** Fires on ANY diff —
+backend-only included — that changes a conditional or comparison as a bug fix (`>`, `>=`,
+`===`, `.length`, a guard clause, a filter predicate). Before the note is done, write two
+predicates side by side: (a) the **root-cause condition** from the bead — the state under
+which the bug occurs, not the instance that was reported — and (b) the **fix predicate** as
+actually written in the diff. Confirm (b) covers (a). If the fix predicate is narrower than
+the root condition, that is a hard FAIL: the bug was narrowed, not fixed, and the un-fixed
+remainder is often the *default* state. Worked example: `AestheticcNext-brzhi` — day-view
+calendar gutter invisible in dark mode. The reported case was Rooms (more than one resource
+column), so the fix was written as `resources > 1`; the actual condition was *any* resource
+view (`resources > 0`), which left the single-visible-staff default of a solo clinic still
+broken. Source: `Product/QA/PROACTIVE_BUG_CLASSES_2026-08-28.md` class 3.
+
 > **Why this phase exists (2026-07-25, Shane).** Documented recurring failure: code
 > technically works — a button does *something* — but not the thing it promised, or a whole
 > feature ships with no path to it in the UI. Live case: the Growth-engine/Marketing-Studio
