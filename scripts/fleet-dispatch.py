@@ -26,6 +26,7 @@ Usage:
   fleet-dispatch.py <epic-id> --epic       # /long-goal <epic-id>
   fleet-dispatch.py <bead-id> --dry-run    # run the gate, dispatch nothing
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
+  fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
 """
 import io, json, os, re, subprocess, sys, time, datetime
 
@@ -93,14 +94,25 @@ def check_no_inflight_work(bead):
 BEAD_RE = re.compile(r"\b((?:AestheticcNext|LUCY)-[a-z0-9.]+)\b", re.I)
 
 
+STATUS_BRACKET_RE = re.compile(r"\[[^\[\]]*\]\s*$")
+
+
 def bead_status(bead):
-    """`bd show`'s first line carries the status: `... [● P1 · CLOSED]`."""
+    """`bd show`'s first line carries the status in a trailing bracket:
+    `... [● P1 · CLOSED]`. Match only inside that bracket — the title text
+    itself (e.g. a bead whose title literally says "bead closed but X is
+    missing") can otherwise false-positive a substring search over the whole
+    line. Found 2026-08-29 dispatching fleet-backlog-cleanup beads titled
+    with findings like that; every one of them false-triggered "already
+    CLOSED" even though bd show's own status marker said OPEN."""
     code, out, _ = sh(f"bd show {bead}", cwd=REPO, bead=bead)
     if code != 0 or not out:
         return None, out
     first = out.splitlines()[0]
+    match = STATUS_BRACKET_RE.search(first)
+    bracket = match.group(0) if match else first
     for state in ("CLOSED", "IN_PROGRESS", "OPEN", "BLOCKED"):
-        if state in first.upper():
+        if state in bracket.upper():
             return state, out
     return "UNKNOWN", out
 
@@ -278,7 +290,7 @@ def dispatch(bead, is_epic, dispatched_by):
         print("     Without it the worker would silently fall back to the FULL global")
         print("     MCP set — 6 servers + 2 SSH tunnels it does not use. Restore the")
         print("     file (see ~/.claude/mcp-tiers/README.md) and re-run.")
-        sys.exit(1)
+        return None
 
     cmd = (f'claude --bg --name "{bead}" '
            f'--mcp-config "{TIER_A_MCP}" --strict-mcp-config '
@@ -351,6 +363,7 @@ def main():
     is_epic = "--epic" in flags
     force = "--force" in flags
     dry = "--dry-run" in flags
+    pre_claimed = "--pre-claimed" in flags
     dispatched_by = os.environ.get("CLAUDE_SESSION_NAME", "unknown")
 
     failed, failures = run_gate(bead, is_epic)
@@ -360,11 +373,17 @@ def main():
         print("   These are the dispatch checks CLAUDE.md requires, including explicit")
         print("   headless eligibility for single beads. Fix the cause, or re-run with --force")
         print("   (which dispatches anyway and records the override in the manifest).")
+        if pre_claimed:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print("   ✓ released pre-claimed Agent View slot after gate refusal.")
         sys.exit(1)
     if failed and force:
         print("\n⚠ gate failed but --force given — dispatching and recording the override.")
     if dry:
         print("\n--dry-run: gate only, nothing dispatched.")
+        if pre_claimed:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print("   ✓ released pre-claimed Agent View slot; dry-run started no session.")
         sys.exit(0)
 
     # 🔴 Concurrency gate (added 2026-08-23). Total fleet load — Agent View sessions
@@ -375,15 +394,16 @@ def main():
     # the Agent View half of that budget (5 of 11 total) a real refusal instead of
     # prose. See ~/.claude/scripts/fleet-slots.py for the full design and the other
     # half (Codex/GLM claiming, Jest maxWorkers) that shares this budget.
-    claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
-    if claim[0] != 0:
-        sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
-        print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
-        print(f"   Run `python3 {SLOTS} status` to see current load.")
-        print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
-        print(f"   closing phase releases its own slot and dispatches the next queued")
-        print(f"   bead automatically — no polling needed).")
-        sys.exit(3)
+    if not pre_claimed:
+        claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
+        if claim[0] != 0:
+            sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
+            print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
+            print(f"   Run `python3 {SLOTS} status` to see current load.")
+            print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
+            print(f"   closing phase releases its own slot and dispatches the next queued")
+            print(f"   bead automatically — no polling needed).")
+            sys.exit(3)
 
     session = dispatch(bead, is_epic, dispatched_by)
     if session:

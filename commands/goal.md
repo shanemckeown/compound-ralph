@@ -592,13 +592,11 @@ NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
 if [ "$NEXT" != "NONE" ]; then
   EPIC_FLAG=""
   bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
-  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG --pre-claimed
   RC=$?
-  if [ $RC -ne 0 ] && [ $RC -ne 3 ]; then
-    # dequeue-next already claimed a slot for $NEXT and popped it off the queue; the gate
-    # then refused (e.g. missing headless-eligible label). Undo both so nothing leaks: give
-    # the slot back, and put the bead back in the queue instead of silently dropping it.
-    python3 ~/.claude/scripts/fleet-slots.py release-agent-view "$NEXT"
+  if [ $RC -ne 0 ]; then
+    # fleet-dispatch.py already released the pre-claimed slot on any failure path now
+    # (see the --pre-claimed contract) -- just re-enqueue, nothing to release here.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$([ -n "$EPIC_FLAG" ] && echo long-goal || echo goal)"
   fi
 fi
