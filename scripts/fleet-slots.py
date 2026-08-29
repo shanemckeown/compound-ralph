@@ -33,7 +33,7 @@ CLI:
   fleet-slots.py release-agent-view <bead-id>
   fleet-slots.py claim-codex-glm <kind> <label>    # kind: codex|glm. prints a token on stdout
   fleet-slots.py release-codex-glm <token>
-  fleet-slots.py dequeue-next                      # pop+return oldest queued bead if a slot now fits
+  fleet-slots.py dequeue-next [--with-kind]        # atomically pop+claim oldest queued bead if it fits
   fleet-slots.py status                            # human-readable dump, for `bd`-style checking
 """
 import json, os, re, subprocess, sys, time, uuid, datetime
@@ -50,6 +50,7 @@ LOCK_TIMEOUT_S = 15
 LOCK_POLL_S = 0.2
 STALE_AGENT_VIEW_S = 60 * 60 * 12  # 12h: a /long-goal run can legitimately run for hours
 STALE_CODEX_GLM_S = 60 * 30        # 30m: no single codex/glm call should run longer
+QUEUE_KINDS = {"goal", "long-goal", "codex"}
 
 
 def _now():
@@ -205,6 +206,12 @@ def release_agent_view(bead):
         _release_lock()
 
 
+def _new_codex_glm_entry(kind, label, pid):
+    token = uuid.uuid4().hex[:12]
+    return token, {"token": token, "kind": kind, "label": label,
+                   "pid": pid, "claimed_at": _now(), "_ts": time.time()}
+
+
 def claim_codex_glm(kind, label):
     _ensure_root()
     if not _acquire_lock():
@@ -214,9 +221,10 @@ def claim_codex_glm(kind, label):
         state = _reap(_read_state())
         av, cg, total = _counts(state)
         if total < TOTAL_CAP:
-            token = uuid.uuid4().hex[:12]
-            state["codex_glm"].append({"token": token, "kind": kind, "label": label,
-                                        "pid": os.getpid(), "claimed_at": _now(), "_ts": time.time()})
+            # The CLI process exits as soon as it prints the token. Its parent is the
+            # long-running fleet-guarded/run.sh owner that should determine liveness.
+            token, entry = _new_codex_glm_entry(kind, label, os.getppid())
+            state["codex_glm"].append(entry)
             _write_state(state)
             return token
         return None
@@ -236,7 +244,26 @@ def release_codex_glm(token):
         _release_lock()
 
 
+def attach_codex_glm_pid(token, pid):
+    """Transfer a pre-claimed Codex slot to the detached worker wrapper."""
+    _ensure_root()
+    if not _acquire_lock():
+        return False
+    try:
+        state = _read_state()
+        for entry in state.get("codex_glm", []):
+            if entry.get("token") == token:
+                entry["pid"] = int(pid)
+                _write_state(state)
+                return True
+        return False
+    finally:
+        _release_lock()
+
+
 def enqueue(bead, kind):
+    if kind not in QUEUE_KINDS:
+        raise ValueError(f"unsupported queue kind: {kind}")
     _ensure_root()
     if not _acquire_lock():
         return
@@ -248,10 +275,11 @@ def enqueue(bead, kind):
         _release_lock()
 
 
-def dequeue_next_if_fits():
+def dequeue_next_if_fits(with_kind=False):
     """Pop the oldest queued bead ONLY if a slot genuinely fits right now (peek+claim
     atomically under one lock, so a racing claim can't steal the slot between check and
-    pop)."""
+    pop). Legacy bead-only callers cannot safely route Codex items, so they leave a
+    Codex-headed queue untouched; resource-aware drainers opt in with with_kind=True."""
     _ensure_root()
     if not _acquire_lock():
         return None
@@ -260,12 +288,26 @@ def dequeue_next_if_fits():
         if not state.get("queue"):
             return None
         av, cg, total = _counts(state)
-        if av < AGENT_VIEW_CAP and total < TOTAL_CAP:
+        item = state["queue"][0]
+        kind = item.get("kind")
+        if kind == "codex" and not with_kind:
+            return None
+        if total >= TOTAL_CAP:
+            return None
+        if kind in {"goal", "long-goal"} and av < AGENT_VIEW_CAP:
             item = state["queue"].pop(0)
             state["agent_view"].append({"bead": item["bead"], "claimed_at": _now(),
                                          "_ts": time.time(), "session_id": None})
             _write_state(state)
-            return item["bead"]
+            return item
+        if kind == "codex":
+            item = state["queue"].pop(0)
+            # No worker PID exists yet. The pre-claimed Codex dispatcher transfers
+            # this token to its detached wrapper with attach-codex-glm-pid.
+            token, entry = _new_codex_glm_entry("codex", item["bead"], None)
+            state["codex_glm"].append(entry)
+            _write_state(state)
+            return {**item, "token": token}
         return None
     finally:
         _release_lock()
@@ -319,12 +361,25 @@ if __name__ == "__main__":
     elif cmd == "release-codex-glm":
         release_codex_glm(sys.argv[2])
         print("RELEASED")
+    elif cmd == "attach-codex-glm-pid":
+        attached = attach_codex_glm_pid(sys.argv[2], sys.argv[3])
+        print("ATTACHED" if attached else "TOKEN_NOT_FOUND")
+        sys.exit(0 if attached else 1)
     elif cmd == "enqueue":
         enqueue(sys.argv[2], sys.argv[3])
         print("QUEUED")
     elif cmd == "dequeue-next":
-        bead = dequeue_next_if_fits()
-        print(bead or "NONE")
+        with_kind = "--with-kind" in sys.argv[2:]
+        item = dequeue_next_if_fits(with_kind=with_kind)
+        if not item:
+            print("NONE")
+        elif with_kind:
+            fields = [item["bead"], item["kind"]]
+            if item.get("token"):
+                fields.append(item["token"])
+            print(" ".join(fields))
+        else:
+            print(item["bead"])
     elif cmd == "status":
         status()
     else:

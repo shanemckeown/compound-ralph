@@ -584,20 +584,29 @@ session that exits without releasing leaks a slot until the next stale-holder re
 python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_BEAD_ID>
 ```
 
-Then check whether a queued bead can now take the freed slot, and if so, dispatch it —
-this is what makes the queue self-driving instead of requiring the orchestrator to poll:
+Then check whether the next queued bead can now take a slot, and dispatch it through the
+path recorded by its queue kind (`codex`, `goal`, or `long-goal`). This shared, resource-aware
+drain is what makes the queue self-driving instead of requiring the orchestrator to poll:
 
 ```bash
-NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
-if [ "$NEXT" != "NONE" ]; then
-  EPIC_FLAG=""
-  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
-  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG --pre-claimed
+NEXT_INFO=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next --with-kind)
+if [ "$NEXT_INFO" != "NONE" ]; then
+  read -r NEXT NEXT_KIND NEXT_TOKEN <<< "$NEXT_INFO"
+  case "$NEXT_KIND" in
+    codex)
+      python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
+      ;;
+    goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ;;
+    long-goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ;;
+  esac
   RC=$?
   if [ $RC -ne 0 ]; then
-    # fleet-dispatch.py already released the pre-claimed slot on any failure path now
-    # (see the --pre-claimed contract) -- just re-enqueue, nothing to release here.
-    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$([ -n "$EPIC_FLAG" ] && echo long-goal || echo goal)"
+    # Both dispatchers release their pre-claimed slot on any failure path.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
   fi
 fi
 ```

@@ -287,22 +287,30 @@ check in the report. See `/goal` Phase 6.5 for the full reasoning.
 
 ### Phase 6.6 — Release fleet slot + advance the queue — same as `/goal`
 
-🔴 **Added 2026-08-23.** Identical to `/goal` Phase 6.6 — this epic run claimed one of 5
-Agent View slots at dispatch time. Release it unconditionally (even on a partial-success
-report with some children left open), then attempt to advance the queue:
+🔴 **Added 2026-08-23.** This epic run claimed one of 5 Agent View slots at dispatch time.
+Release it unconditionally (even on a partial-success report with some children left open),
+then advance the shared queue through the recorded `codex`, `goal`, or `long-goal` path:
 
 ```bash
 python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_EPIC_ID>
-NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
-if [ "$NEXT" != "NONE" ]; then
-  EPIC_FLAG=""
-  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
-  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG --pre-claimed
+NEXT_INFO=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next --with-kind)
+if [ "$NEXT_INFO" != "NONE" ]; then
+  read -r NEXT NEXT_KIND NEXT_TOKEN <<< "$NEXT_INFO"
+  case "$NEXT_KIND" in
+    codex)
+      python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
+      ;;
+    goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ;;
+    long-goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ;;
+  esac
   RC=$?
   if [ $RC -ne 0 ]; then
-    # fleet-dispatch.py already released the pre-claimed slot on any failure path now
-    # (see the --pre-claimed contract) -- just re-enqueue, nothing to release here.
-    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$([ -n "$EPIC_FLAG" ] && echo long-goal || echo goal)"
+    # Both dispatchers release their pre-claimed slot on any failure path.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
   fi
 fi
 ```
