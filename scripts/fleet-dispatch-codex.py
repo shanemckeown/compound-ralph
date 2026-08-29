@@ -307,7 +307,17 @@ python3 "$SLOTS" attach-codex-glm-pid "$slot_token" "$$" >/dev/null || exit 1
 (
   while true; do
     sleep 5
-    pids=$(pgrep -f "next (build|start)" 2>/dev/null || true)
+    # Match the actual `next` CLI binary invocation only (argv[0] ends in
+    # node_modules/.bin/next, or the resolved next/dist/bin/next entry point),
+    # never a bare substring match on "next build"/"next start" -- those words
+    # also appear inside the CODEX WORKER'S OWN PROMPT TEXT (this file's
+    # build_prompt() literally tells it "NEVER run next build"), which is
+    # passed as a command-line argument to `codex exec` itself. An earlier,
+    # naive `pgrep -f "next (build|start)"` matched that prompt text against
+    # codex exec's own argv and killed the worker process itself -- confirmed
+    # live, every dispatch failed instantly. This pattern anchors on the real
+    # executable path so it can never match an unrelated process's arguments.
+    pids=$(pgrep -f "node_modules/\\.bin/next (build|start)|next/dist/bin/next (build|start)" 2>/dev/null || true)
     for pid in $pids; do
       pwdx_path=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)
       if [[ "$pwdx_path" == "$WORKTREE"* ]]; then
