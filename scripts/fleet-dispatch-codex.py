@@ -179,6 +179,13 @@ git push origin HEAD:{branch}
 
 Do not merge to main. Do not deploy anything.
 
+NEVER run `next build` (or `npm run build` / any production build step). It is not required
+for verification here, and a production build under Next 15 can use several GB of RAM per
+worker — with several workers running at once this has genuinely brought the host machine down.
+Typecheck + lint + targeted/relevant Jest is the complete gate; nothing here needs a build. This
+is enforced technically (a watchdog kills any `next build` process it finds), so attempting it
+just wastes your own time.
+
 If you are truly blocked, or the task needs a judgment call that only a human or Claude
 session can make, do not guess. Write a clear explanation to {worktree}/BLOCKED.md that
 states exactly what is blocking the task, then stop without pushing.
@@ -215,6 +222,10 @@ started_epoch=$(date +%s)
 finish_worker() {{
   worker_exit=$?
   trap - EXIT INT TERM
+
+  if [[ -n "${{watchdog_pid:-}}" ]]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
 
   if [[ -n "$slot_token" ]]; then
     python3 "$SLOTS" release-codex-glm "$slot_token" || true
@@ -286,6 +297,27 @@ trap 'exit 143' TERM
 
 cd "$WORKTREE" || exit 1
 python3 "$SLOTS" attach-codex-glm-pid "$slot_token" "$$" >/dev/null || exit 1
+
+# `next build` (production build) has repeatedly brought the host down when several
+# workers run it concurrently -- each one can pull several GB of RAM under Next 15,
+# and nothing in this worker's actual job (typecheck/lint/targeted-jest) needs it.
+# The prompt above tells Codex not to; this watchdog makes it genuinely can't: poll
+# for any `next build`/`next start` process rooted in THIS worktree and kill it the
+# moment it appears, before it gets far enough to matter.
+(
+  while true; do
+    sleep 5
+    pids=$(pgrep -f "next (build|start)" 2>/dev/null || true)
+    for pid in $pids; do
+      pwdx_path=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)
+      if [[ "$pwdx_path" == "$WORKTREE"* ]]; then
+        echo "watchdog: killing forbidden next build/start (pid $pid) in $WORKTREE" >> {q(output_path)}
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    done
+  done
+) &
+watchdog_pid=$!
 
 echo "starting Codex worker for $BEAD_ID on $BRANCH"
 # A linked git worktree shares almost everything with the main repo's .git/ --
