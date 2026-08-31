@@ -234,6 +234,20 @@ def main() -> int:
             print_output_tail(add.args, add.stdout)
             return 1
 
+        # A fresh worktree has no node_modules -- npm run typecheck fails with
+        # MODULE_NOT_FOUND on tsc otherwise (confirmed live: this is exactly
+        # what happened the first time this script ran against a real bead).
+        # Symlink the main checkout's install rather than reinstalling --
+        # matches the deps already used to build/test everything else tonight.
+        main_node_modules = REPO / "node_modules"
+        if main_node_modules.is_dir():
+            try:
+                (scratch / "node_modules").symlink_to(
+                    main_node_modules, target_is_directory=True
+                )
+            except OSError as exc:
+                print(f"warning: could not symlink node_modules: {exc}")
+
         merge = run_command(
             ["git", "merge", "--no-ff", "--no-verify", remote_sha], cwd=scratch
         )
