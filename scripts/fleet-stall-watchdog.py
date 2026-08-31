@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,37 @@ def fire(message: str, alerts: list[str]) -> None:
     notify(message)
 
 
+def bead_is_closed(bead_id: str) -> bool:
+    """bd show <id> --json returns a JSON ARRAY of matches, not a bare object --
+    confirmed live: [{"id": ..., "status": "closed", ...}]. Any lookup failure
+    (bd unreachable, bead not found, unparseable output) returns False, i.e.
+    "don't suppress the alert" -- never let an ambiguous bd result silently
+    swallow a real stall.
+    """
+    try:
+        result = subprocess.run(
+            ["bd", "show", bead_id, "--json"],
+            cwd=AESTHETCC_NEXT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return False
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not isinstance(data, dict):
+        return False
+    return str(data.get("status", "")).lower() == "closed"
+
+
 def check_unlanded_done(threshold_hours: float, alerts: list[str]) -> None:
     now = datetime.now(timezone.utc)
     threshold_seconds = threshold_hours * 3600
@@ -138,13 +170,25 @@ def check_unlanded_done(threshold_hours: float, alerts: list[str]) -> None:
             )
         except subprocess.TimeoutExpired:
             return f"Timed out checking whether {branch} is landed"
-        if landed.returncode != 0:
-            age_hours = age_seconds / 3600
-            return (
-                f"DONE worker {bead_id} has been unlanded for {age_hours:.1f}h "
-                f"({branch} at {sha[:12]}, finished {finished_at_text})"
-            )
-        return None
+        if landed.returncode == 0:
+            return None
+
+        # Ancestor check can say False for a genuinely-landed bead: the actual
+        # landing pattern used tonight is cherry-pick into a scratch worktree
+        # (dodges a background dolt-export race on .beads/issues.jsonl), not a
+        # direct merge of the worker's own branch -- a NEW commit with
+        # different content-identical-but-different-sha reaches origin/main,
+        # so this branch's own tip will never be its ancestor even though the
+        # work is genuinely on main. Fall back to the bead's own bd close
+        # status as independent evidence before alerting.
+        if bead_is_closed(bead_id):
+            return None
+
+        age_hours = age_seconds / 3600
+        return (
+            f"DONE worker {bead_id} has been unlanded for {age_hours:.1f}h "
+            f"({branch} at {sha[:12]}, finished {finished_at_text})"
+        )
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         for message in executor.map(inspect_candidate, candidates):
