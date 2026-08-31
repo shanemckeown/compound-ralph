@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.aestheticc.fleet-stall-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/shane/.claude/scripts/fleet-stall-watchdog.py</string>
+    </array>
+    <key>StartInterval</key><integer>900</integer>
+    <key>RunAtLoad</key><false/>
+    <key>StandardOutPath</key><string>/Users/shane/.claude/fleet/stall-watchdog.out.log</string>
+    <key>StandardErrorPath</key><string>/Users/shane/.claude/fleet/stall-watchdog.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/shane/.local/bin</string>
+    </dict>
+</dict>
+</plist>
