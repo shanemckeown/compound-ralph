@@ -190,6 +190,23 @@ def main() -> int:
         print(f"worker status is {status or '(empty)'}, not DONE")
         return 1
 
+    review_path = worker_dir / "review.txt"
+    # Warn, don't refuse: scripts/glm-review-branch.sh is a standalone quick-win
+    # (quick-win 4), not yet wired into the dispatch queue -- most beads landed
+    # today have no review.txt at all, and that must stay landable. This is
+    # visibility for when a review WAS run, not a new gate.
+    if not review_path.exists():
+        print(f"note: no review.txt for {bead_id} (run scripts/glm-review-branch.sh {bead_id} first if you want one) -- proceeding without it")
+    else:
+        try:
+            review_first_line = review_path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            review_first_line = ""
+        if review_first_line == "FAIL":
+            print(f"WARNING: {review_path} says FAIL -- read it before landing. Proceeding anyway (this is a warning, not a gate).")
+        elif review_first_line != "PASS":
+            print(f"note: {review_path} exists but its first line is not PASS or FAIL ({review_first_line!r}) -- proceeding without treating it as a verdict")
+
     if blocked_path.exists():
         print(f"BLOCKED.md exists: {blocked_path}")
         try:
