@@ -184,6 +184,25 @@ def check_unlanded_done(threshold_hours: float, alerts: list[str]) -> None:
         if bead_is_closed(bead_id):
             return None
 
+        # Same acknowledgement discipline as check_unacknowledged_blocked():
+        # a known, already-surfaced stall must not re-notify every 15 min
+        # forever (confirmed live -- Shane got spammed with one alert per
+        # known conflicted bead, every run, until this was added). Dedup key
+        # is the branch tip sha, not just the bead-id: if the branch is
+        # redispatched to a new sha (a genuine state change -- someone tried
+        # again), that's worth a fresh notification.
+        seen_path = WORKERS_DIR / bead_id / "unlanded.seen"
+        try:
+            previous_sha = seen_path.read_text(encoding="utf-8").strip() if seen_path.exists() else ""
+        except OSError:
+            previous_sha = ""
+        if previous_sha == sha:
+            return None
+        try:
+            seen_path.write_text(sha + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"ACKNOWLEDGEMENT ERROR: cannot write {seen_path}: {exc}")
+
         age_hours = age_seconds / 3600
         return (
             f"DONE worker {bead_id} has been unlanded for {age_hours:.1f}h "
