@@ -192,6 +192,38 @@ def branch_is_landed(tip_sha: str | None) -> bool:
     return result.returncode == 0
 
 
+def bead_is_closed(bead_id: str) -> bool | None:
+    """Fallback signal when the branch is already gone (goal/* deleted).
+
+    The night's actual landing pattern is cherry-pick into a scratch worktree
+    (to dodge a background dolt-export race on .beads/issues.jsonl), then delete
+    the original branch -- a NEW commit reaches origin/main with different
+    content-identical-but-different-sha, so branch_is_landed()'s ancestor check
+    can never find it even when the bead genuinely landed. A missing branch with
+    a CLOSED bead is exactly that case: treat as landed, not unlanded. A missing
+    branch with a bead that is still OPEN is a genuinely different, more worrying
+    state (cleaned up without landing) -- surfaced separately, not conflated.
+    Returns None if bd itself can't be queried (never guess).
+    """
+    result = run(["bd", "show", bead_id, "--json"], cwd=AESTHETICC_REPO)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    import json
+
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return None
+    # `bd show <id> --json` returns a JSON array of matching issues, not a bare
+    # object -- confirmed live: [{"id": ..., "status": "closed", ...}].
+    if isinstance(data, list):
+        data = data[0] if data else None
+    status = data.get("status") if isinstance(data, dict) else None
+    if status is None:
+        return None
+    return str(status).lower() == "closed"
+
+
 def render_table(rows: list[WorkerRow]) -> str:
     headers = ("bead-id", "state", "branch", "age", "detail")
     values = [
@@ -249,10 +281,33 @@ def main() -> None:
             position = queue_positions.get(bead_id.casefold())
             detail = f"queued #{position}" if position is not None else ""
         elif status.state == "DONE":
-            landed = branch_is_landed(branch_tips.get(bead_id.casefold()))
-            state = "DONE-landed" if landed else "DONE-unlanded"
-            age = "" if landed else human_age(status.finished_at, now)
+            tip_sha = branch_tips.get(bead_id.casefold())
+            landed = branch_is_landed(tip_sha)
             detail = ""
+            if landed:
+                state = "DONE-landed"
+            else:
+                # Ancestor check can say False for a genuinely-landed bead: the
+                # night's actual landing pattern is cherry-pick into a scratch
+                # worktree (dodges a background dolt-export race on
+                # .beads/issues.jsonl), not a direct merge of the worker's own
+                # branch -- a NEW commit with different content-identical-but-
+                # different-sha reaches origin/main, so the original branch tip
+                # (even if it still exists on origin, as branches often do --
+                # only the LOCAL branch gets deleted post-land) will never be
+                # its ancestor. Fall back to the bead's own close status, which
+                # is independent evidence.
+                closed = bead_is_closed(bead_id)
+                if closed is True:
+                    state = "DONE-landed"
+                elif closed is False and tip_sha is None:
+                    state = "DONE-cleaned-not-closed"
+                    detail = "branch gone, bead still open -- verify manually"
+                else:
+                    state = "DONE-unlanded"
+                    if closed is None:
+                        detail = "bd status unknown"
+            age = "" if state == "DONE-landed" else human_age(status.finished_at, now)
         elif status.state == "BLOCKED":
             state = "BLOCKED"
             age = human_age(status.finished_at, now)
@@ -265,11 +320,12 @@ def main() -> None:
         rows.append(WorkerRow(bead_id, state, branch, age, detail))
 
     state_priority = {
-        "DONE-unlanded": 0,
-        "BLOCKED": 1,
-        "RUNNING": 2,
-        "FAILED": 3,
-        "DONE-landed": 4,
+        "DONE-cleaned-not-closed": 0,
+        "DONE-unlanded": 1,
+        "BLOCKED": 2,
+        "RUNNING": 3,
+        "FAILED": 4,
+        "DONE-landed": 5,
     }
     rows.sort(key=lambda row: (state_priority[row.state], row.bead_id.casefold()))
     unlanded = [row.bead_id for row in rows if row.state == "DONE-unlanded"]
