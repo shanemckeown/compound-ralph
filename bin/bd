@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# bd-close-guard — B-1 (AI Fleet Grand Plan, 2026-09-01), v2
+#
+# v2 fixes 5 confirmed bypasses found by GLM adversarial review of v1:
+# flag-before-ID, bare/last-touched close, short-prefix IDs, `-sclosed`
+# attached form, and supersede/duplicate/todo-done also closing beads.
+#
+# Design (GLM's recommended fix): don't try to hand-parse cobra flag
+# grammar (that's what broke v1). Instead: any argv token that does NOT
+# start with '-' is a CANDIDATE bead ID — resolve every candidate through
+# the real bd's own `show --json` to get its canonical prefixed ID. Tokens
+# that aren't real bead IDs (reason text, "closed", etc.) just fail to
+# resolve and are silently skipped — harmless. A gated subcommand with
+# ZERO resolved candidates (bare `bd close`, last-touched) is refused
+# outright rather than guessed at.
+#
+# Gated actions (per GLM finding FN-5): close, done, update (only when it
+# sets status=closed in any flag form), supersede, duplicate, todo done.
+# Everything else is a byte-identical passthrough to the real binary.
+#
+# Fails CLOSED on any internal uncertainty (git unreachable, ambiguous
+# resolve, etc.) for the gated action only — never silently allows.
+
+set -uo pipefail  # NOT -e: a failing `git log`/`show` inside a loop must be handled, not abort the script
+
+# --- locate the real bd binary (first non-self bd on PATH) ---------------
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+REAL_BD=""
+IFS=':' read -ra PATH_DIRS <<< "$PATH"
+for dir in "${PATH_DIRS[@]}"; do
+  candidate="$dir/bd"
+  if [[ -x "$candidate" && -f "$candidate" ]]; then
+    resolved_dir="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd)"
+    [[ -z "$resolved_dir" ]] && continue
+    resolved="$resolved_dir/bd"
+    if [[ "$resolved" != "$SELF" ]]; then
+      REAL_BD="$candidate"
+      break
+    fi
+  fi
+done
+
+if [[ -z "$REAL_BD" ]]; then
+  echo "bd-close-guard: could not locate the real bd binary on PATH (only found myself) — refusing to guess. Fix PATH or reinstall beads." >&2
+  exit 127
+fi
+
+AESTHETICCNEXT_REPO="/Users/shane/Documents/GitReBase/AestheticcNext"
+ALLOWED_PREFIXES='^(NO-CODE:|SUPERSEDED:|FALSE-ALARM:)'
+
+is_aestheticcnext_id() {
+  [[ "$1" == AestheticcNext-* ]]
+}
+
+# 0 = allow (ancestor found), 1 = block
+ancestry_holds() {
+  local id="$1"
+  if [[ ! -d "$AESTHETICCNEXT_REPO/.git" ]]; then
+    echo "bd-close-guard: canonical repo not found at $AESTHETICCNEXT_REPO — cannot verify ancestry." >&2
+    return 1
+  fi
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=10' \
+    git -C "$AESTHETICCNEXT_REPO" fetch origin main --quiet 2>/dev/null
+  if [[ $? -ne 0 ]]; then
+    echo "bd-close-guard: 'git fetch origin main' failed — cannot verify ancestry right now (network/auth/lock contention with a concurrent land-batch?). Refusing rather than guessing; retry shortly." >&2
+    return 1
+  fi
+  local sha
+  # -i: land-batch merge commits use lowercase 'aestheticcnext-<id>' branch
+  # naming; the ID itself may also appear uppercase in fix/feat commits.
+  # Both must match (found empirically: nuxzo only had a lowercase 'land:'
+  # commit referencing it).
+  while IFS= read -r sha; do
+    [[ -z "$sha" ]] && continue
+    if git -C "$AESTHETICCNEXT_REPO" merge-base --is-ancestor "$sha" origin/main 2>/dev/null; then
+      return 0
+    fi
+  done < <(git -C "$AESTHETICCNEXT_REPO" log --all --regexp-ignore-case --grep="$id" --format='%H' 2>/dev/null)
+  return 1
+}
+
+reason_allows_bypass() {
+  [[ "$1" =~ $ALLOWED_PREFIXES ]]
+}
+
+refuse() {
+  local id="$1"
+  echo "" >&2
+  echo "🔴 bd-close-guard: refusing — $id would be closed but is not verified landed" >&2
+  echo "   No commit referencing $id is reachable from origin/main in $AESTHETICCNEXT_REPO," >&2
+  echo "   and no --reason/-r starting with NO-CODE: / SUPERSEDED: / FALSE-ALARM: was given." >&2
+  echo "   Per AI_FLEET_GRAND_PLAN_2026-09-01 (B-1): Workers don't close code beads." >&2
+  echo "   Use instead:  bd update $id --status pushed" >&2
+  echo "   /land-batch closes it once the fix is verified on main." >&2
+  echo "" >&2
+  exit 1
+}
+
+refuse_no_explicit_id() {
+  local cmd="$1"
+  echo "" >&2
+  echo "🔴 bd-close-guard: refusing '$cmd' with no explicit bead ID given" >&2
+  echo "   bd's own 'closes the last-touched issue' fallback is exactly the ungated path" >&2
+  echo "   this guard exists to close. Pass the ID explicitly." >&2
+  echo "" >&2
+  exit 1
+}
+
+args=("$@")
+subcmd="${args[0]:-}"
+
+extract_reason() {
+  local reason=""
+  local i=0
+  local n=${#args[@]}
+  while [[ $i -lt $n ]]; do
+    local a="${args[$i]}"
+    case "$a" in
+      --reason=*) reason="${a#--reason=}" ;;
+      --reason|-r) i=$((i+1)); reason="${args[$i]:-}" ;;
+      -r=*) reason="${a#-r=}" ;;
+      -r?*) reason="${a#-r}" ;;  # attached short form, e.g. -rSomeReason
+    esac
+    i=$((i+1))
+  done
+  printf '%s' "$reason"
+}
+
+# Would this invocation set status to 'closed'? Checks every flag shape
+# cobra/pflag actually accepts: --status closed, --status=closed, -s closed,
+# -s=closed, -sclosed (attached short form).
+sets_status_closed() {
+  local i=0
+  local n=${#args[@]}
+  while [[ $i -lt $n ]]; do
+    local a="${args[$i]}"
+    case "$a" in
+      --status=closed) return 0 ;;
+      --status) [[ "${args[$((i+1))]:-}" == "closed" ]] && return 0 ;;
+      -s=closed|-sclosed) return 0 ;;
+      -s) [[ "${args[$((i+1))]:-}" == "closed" ]] && return 0 ;;
+    esac
+    i=$((i+1))
+  done
+  return 1
+}
+
+# Every argv token from index $1 onward that does NOT look like a flag —
+# i.e. every CANDIDATE bead ID, wherever it sits among the flags.
+candidate_tokens_from() {
+  local start="$1"
+  local i="$start"
+  local n=${#args[@]}
+  while [[ $i -lt $n ]]; do
+    local a="${args[$i]}"
+    [[ "$a" != -* ]] && printf '%s\n' "$a"
+    i=$((i+1))
+  done
+}
+
+# Resolve a raw token (short prefix, full ID, whatever) to its canonical
+# AestheticcNext-<id> form via the real bd's own resolver. Empty output if
+# it isn't a real, resolvable bead (reason text, "closed", flag values, …).
+resolve_canonical_id() {
+  local token="$1"
+  "$REAL_BD" show "$token" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if isinstance(d, list):
+        d = d[0] if d else {}
+    print(d.get("id",""))
+except Exception:
+    pass
+' 2>/dev/null
+}
+
+GATE_RESOLVED_ANY=0
+
+gate_ids() {
+  # $@ = candidate tokens. Refuses (exits the whole script) on the first
+  # AestheticcNext- one that fails the ancestry/reason check. Must run in
+  # the CURRENT shell, not a subshell/command-substitution — `exit` inside
+  # a $(...) only kills the subshell and execution would silently continue.
+  # Sets the global GATE_RESOLVED_ANY instead of printing, for that reason.
+  local reason
+  reason="$(extract_reason)"
+  GATE_RESOLVED_ANY=0
+  for token in "$@"; do
+    local canon
+    canon="$(resolve_canonical_id "$token")"
+    [[ -z "$canon" ]] && continue
+    GATE_RESOLVED_ANY=1
+    if is_aestheticcnext_id "$canon"; then
+      reason_allows_bypass "$reason" && continue
+      ancestry_holds "$canon" || refuse "$canon"
+    fi
+  done
+}
+
+case "$subcmd" in
+  close|done)
+    gate_ids $(candidate_tokens_from 1)
+    [[ "$GATE_RESOLVED_ANY" != "1" ]] && refuse_no_explicit_id "bd $subcmd"
+    ;;
+  update)
+    if sets_status_closed; then
+      gate_ids $(candidate_tokens_from 1)
+      [[ "$GATE_RESOLVED_ANY" != "1" ]] && refuse_no_explicit_id "bd update --status closed"
+    fi
+    ;;
+  supersede|duplicate)
+    # Only the FIRST positional is the one that gets closed (--with/--of
+    # targets a different, unaffected bead) — gate that one only.
+    first="$(candidate_tokens_from 1 | head -1)"
+    if [[ -n "$first" ]]; then
+      canon="$(resolve_canonical_id "$first")"
+      if [[ -n "$canon" ]] && is_aestheticcnext_id "$canon"; then
+        reason="$(extract_reason)"
+        if ! reason_allows_bypass "$reason"; then
+          ancestry_holds "$canon" || refuse "$canon"
+        fi
+      fi
+    else
+      refuse_no_explicit_id "bd $subcmd"
+    fi
+    ;;
+  todo)
+    if [[ "${args[1]:-}" == "done" ]]; then
+      first="$(candidate_tokens_from 2 | head -1)"
+      if [[ -n "$first" ]]; then
+        canon="$(resolve_canonical_id "$first")"
+        if [[ -n "$canon" ]] && is_aestheticcnext_id "$canon"; then
+          reason="$(extract_reason)"
+          if ! reason_allows_bypass "$reason"; then
+            ancestry_holds "$canon" || refuse "$canon"
+          fi
+        fi
+      else
+        refuse_no_explicit_id "bd todo done"
+      fi
+    fi
+    ;;
+  *)
+    : # every other subcommand (including reopen, delete — see B-1 scope note): pure passthrough
+    ;;
+esac
+
+exec "$REAL_BD" "$@"

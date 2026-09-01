@@ -2,15 +2,17 @@
 
 Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
 
-Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER `/land-batch` lands the branch to main and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
+Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, mark the bead(s) `pushed` (AestheticcNext- code beads) or close them (LUCY- vault/tooling beads — see Phase 6). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER `/land-batch` lands the branch to main and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
+
+🔴 **B-1 (AI Fleet Grand Plan, 2026-09-01): Workers do not close AestheticcNext- code beads — ever, for any reason, including "verified myself" or "QA clean."** A closed bead is a claim; only a landed one (verified by `/land-batch` against `origin/main`) is a fact — see `Aestheticc/Product/AI_FLEET_GRAND_PLAN_2026-09-01.md` Part 1/Part 3 Q1 for why (`AestheticcNext-n708r`: seven review rounds, bead closed, prod unfixed in 2 of 3 files, five weeks). A `bd-close-guard` wrapper (`~/.claude/bin/bd`, wired via `~/.zshrc` — reaches every session started after 2026-09-01, not sessions already running before then) refuses `bd close`/`update --status closed` on an AestheticcNext- bead with no commit reachable from `origin/main`, but treat this instruction as the primary mechanism, not the guard — the guard is a backstop, not a substitute for typing the right command.
 
 🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached via `/land-batch`, then the normal staging deploy. /goal stops at "branch pushed + bead closed + worktree left intact for discovery."
 
-## 🔴 HARD RULE: No `result:` until every in-scope bead is verified CLOSED
+## 🔴 HARD RULE: No `result:` until every in-scope bead is verified PUSHED (or CLOSED for LUCY-)
 
-The recurring failure mode of /goal runs is: work ships, branch pushes, but the bead stays OPEN because Phase 6 got skipped or `bd close` silently failed. Future Shane then can't tell what's done.
+The recurring failure mode of /goal runs is: work ships, branch pushes, but the bead stays OPEN because Phase 6 got skipped or the status update silently failed. Future Shane then can't tell what's done. A second, more dangerous failure mode (B-1, `AestheticcNext-n708r`): the bead gets CLOSED, and everyone downstream — Shane, a Manager, a future session — trusts that word instead of checking `main`. `pushed` is the honest word for "branch is done and QA-clean, ancestry not yet verified"; `closed` means `/land-batch` has already confirmed it's an ancestor of `origin/main`. Workers don't get to skip that distinction by picking whichever status is more convenient.
 
-You are NOT allowed to write the `result:` line in Phase 7 until you have run `bd show <ID>` for every bead in scope (singleton OR every child of an epic) and verified the output shows `closed` / `CLOSED`. If the verification fails for any bead, write `needs input:` and list the beads that wouldn't close. See Phase 6 for the exact verification command.
+You are NOT allowed to write the `result:` line in Phase 7 until you have run `bd show <ID>` for every bead in scope (singleton OR every child of an epic) and verified the output shows `pushed`/`PUSHED` (AestheticcNext-) or `closed`/`CLOSED` (LUCY-). If the verification fails for any bead, write `needs input:` and list the beads that wouldn't update. See Phase 6 for the exact verification command.
 
 Observed 2026-05-13 on `AestheticcNext-sdait` — fix shipped via Plan-Build-QA but bead stayed open. This rule is the fix.
 
@@ -513,24 +515,28 @@ Steps:
 
 If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `needs input:` not `result:` in Phase 7 — the bead stays open.
 
-### Phase 6 — Close beads (HARD GATE — see top-of-skill rule)
+### Phase 6 — Mark beads done (HARD GATE — see top-of-skill rule)
 
-**Single bead:** `bd close <ID>` with summary + branch name.
+**AestheticcNext- code beads: `pushed`, never `closed`.** Per B-1: this is not optional and not a judgement call, regardless of how many QA rounds ran or how confident you are. `/land-batch` is the only thing that closes these, after it verifies `git merge-base --is-ancestor <landed-sha> origin/main` for real.
 
-**Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + branch name + list of closed children.
+**LUCY- vault/tooling beads still close normally** (different repo, not in B-1's scope) — use `bd close <ID>` as before.
 
-```bash
-bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Worktree left intact for /land-batch. No autonomous deploy."
-```
-
-**Then verify every close stuck.** Per-bead:
+**Single AestheticcNext- bead:**
 
 ```bash
-bd show "$ID" 2>&1 | grep -qiE "^Status:.*closed|\[CLOSED\]|· CLOSED" \
-  || { echo "FAILED to close $ID — aborting Phase 7"; exit 1; }
+bd update <ID> --status pushed --append-notes "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Worktree left intact for /land-batch. No autonomous deploy."
 ```
 
-If even one verification fails, do NOT proceed to Phase 7's `result:` line. Write `needs input:` instead, listing the bead IDs that wouldn't close and the `bd close` stderr. Common failure: `bd` couldn't find the bead because `BEADS_DIR` drifted between phases (re-check Phase 0a routing).
+**Bundle:** mark every child `pushed` individually with its specific summary, then mark the parent epic `pushed` too with the overall summary + branch name + list of children.
+
+**Then verify every update stuck.** Per-bead:
+
+```bash
+bd show "$ID" 2>&1 | grep -qiE "^Status:.*pushed|\[PUSHED\]|· PUSHED" \
+  || { echo "FAILED to mark $ID pushed — aborting Phase 7"; exit 1; }
+```
+
+If even one verification fails, do NOT proceed to Phase 7's `result:` line. Write `needs input:` instead, listing the bead IDs that wouldn't update and the `bd` stderr. Common failure: `bd` couldn't find the bead because `BEADS_DIR` drifted between phases (re-check Phase 0a routing). If `status.custom` doesn't yet have `pushed` registered in this repo's beads DB, run `bd config set status.custom "pushed:wip"` once — don't fall back to `closed` instead.
 
 If QA failed at the 3-round cap: leave beads open with notes documenting state, don't close, and write `needs input:` not `result:`.
 
