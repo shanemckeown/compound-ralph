@@ -386,12 +386,48 @@ git -C "$SCRATCH" push origin HEAD:main
 git -C "$SCRATCH" fetch origin main --quiet
 if git -C "$SCRATCH" merge-base --is-ancestor "$MERGE_SHA" origin/main; then
   bd close "$BEAD_ID" --reason "landed via /land-batch $RUN_ID @ $MERGE_SHA (verified ancestor of origin/main)."
+  CLOSE_RESULT="closed"
 else
   echo "HELD: $BEAD_ID pushed to main but $MERGE_SHA is not (yet) an ancestor — do not close, investigate before the next run." >&2
+  CLOSE_RESULT="held"
 fi
 ~~~
 
 This ancestry check is intentionally redundant with `bd-close-guard` (`~/.claude/bin/bd`) — land-batch's own close is expected to always pass it, since the push just happened; if it ever doesn't, that is itself a signal something is wrong (a rejected/rebased push, a stale `$MERGE_SHA`) and the bead correctly stays `pushed`, not closed. A bead already sitting `closed` from before B-1 shipped (or a LUCY- vault bead) is left alone here.
+
+🔴 **B-2 (AI Fleet Grand Plan, 2026-09-01): post-land goal-state review, a different model family asking a different question than Phase 4 already did.** `/goal` Phase 4 (Codex, or GLM per B-10) already reviewed the DIFF — is this change sound. This is the SECOND, independent check, run only after a real close above, asking the GOAL-STATE question instead: does this bug-shape exist anywhere ELSE in the repo, fixed or not. This is exactly the check that would have caught `AestheticcNext-n708r`'s third unfixed copy at land time instead of three days later as a separately-filed `zrexy`. Only runs for a bead that was actually closed just now (skip entirely on HELD):
+
+~~~bash
+if [[ "$CLOSE_RESULT" == "closed" ]]; then
+  GLM_GOALSTATE_PROMPT="This fix landed at $MERGE_SHA (bead $BEAD_ID). Diff below. Enumerate every OTHER site in the repo that implements the same operation/state as this fix, and state for each whether the fix applies there too — i.e. does the same bug-shape still exist somewhere unfixed. Do NOT review the diff itself for correctness; a different reviewer already did that in /goal Phase 4. Answer ONLY the goal-state question: other sites, fixed or not, one line each. If there are none, say so plainly.
+
+DIFF:
+$(git -C "$SCRATCH" show "$MERGE_SHA")"
+
+  set +e
+  echo "$GLM_GOALSTATE_PROMPT" | glm review --cd "$SCRATCH" \
+    > "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>&1
+  GLM_GS_EXIT=$?
+  set -e
+
+  if [[ "$GLM_GS_EXIT" -ne 0 ]]; then
+    echo "GLM unreachable for post-land goal-state review of $BEAD_ID (exit $GLM_GS_EXIT) — falling back to Opus in-session: read $MERGE_SHA's diff yourself right now and answer the same goal-state question directly, don't skip this silently." >&2
+    # (Opus fallback is you, the orchestrating session, doing the read+answer inline —
+    # there is no separate CLI call for this leg, same as every other GLM-outage path.)
+  fi
+
+  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || echo 'opus, GLM unreachable')): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
+
+  # Any line naming a real, still-unfixed other site: auto-file a child bead rather
+  # than requiring a human to notice it in the comment. Same prefix as $BEAD_ID,
+  # type=bug, --parent "$BEAD_ID", priority inherited from $BEAD_ID. Read the
+  # goal-state review's own text to decide whether it actually found a real
+  # unfixed site (not "no other sites found") before filing — don't file a bead
+  # for a clean review.
+fi
+~~~
+
+Latency/budget note: this is one GLM call per CLOSED bead, not per candidate — a 20-branch LAND run with 15 closes is 15 calls. If that proves too slow/expensive in practice, batch multiple closed beads' diffs into one GLM call per land-batch run instead of one-per-bead, and say so plainly rather than silently skipping the check.
 
 If push is rejected because main moved, `git -C "$SCRATCH" fetch origin main` and
 `git -C "$SCRATCH" rebase --rebase-merges origin/main`, re-gate, retry. Abort/hold
