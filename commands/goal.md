@@ -330,9 +330,9 @@ If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed
 
 If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first (per `feedback_husky_tsc_cold_cache.md`).
 
-### Phase 4 — QA (Codex 5.5, read-only, adversarial)
+### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
 
-**One QA pass against the combined diff at the end**, not one per child. Saves Codex quota and lets the reviewer see cross-child interactions.
+**One QA pass against the combined diff at the end**, not one per child. Saves reviewer quota and lets it see cross-child interactions.
 
 Create one evidence directory for the /goal run. In every QA round, run the
 project's real test/QA gate first and capture its exact command, combined output,
@@ -386,15 +386,52 @@ set +e
   echo "$EVIDENCE_DIR/qa-command-round-N.txt"
   echo "$EVIDENCE_DIR/qa-output-round-N.log"
   echo "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
-} | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
-  --cd "$(pwd)" \
-  --ephemeral \
-  --sandbox read-only \
-  - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
-  2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
-CODEX_EXIT=$?
+} > "$EVIDENCE_DIR/qa-prompt-round-N.txt"
+```
+
+🔴 **B-10 (AI Fleet Grand Plan, 2026-09-01): GLM is the primary Phase 4 reviewer, Codex is the fallback.** Shane's decision — GLM (`glm review`) is the cheap-first resource (~£80/mo flat-rate vs ~£200/mo Codex+Claude combined), not the fallback. Codex only runs when `glm review` itself exits non-zero (a genuine call failure — auth/network against z.ai — same GLM-outage doctrine as everywhere else in `CLAUDE.md`). A clean GLM run that found nothing wrong still exits 0 with a PASS verdict; that is NOT a fallback trigger.
+
+```bash
+set +e
+glm review --cd "$(pwd)" < "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+  > "$EVIDENCE_DIR/glm-verdict-round-N.log" \
+  2> "$EVIDENCE_DIR/glm-stderr-round-N.log"
+GLM_EXIT=$?
 set -e
-printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
+printf '%s\n' "$GLM_EXIT" > "$EVIDENCE_DIR/glm-exit-code-round-N.txt"
+
+if [[ "$GLM_EXIT" -eq 0 ]]; then
+  VERDICT_LOG="$EVIDENCE_DIR/glm-verdict-round-N.log"
+  REVIEWER="glm"
+else
+  echo "GLM unreachable (exit $GLM_EXIT) — falling back to Codex for this round. Note this in Phase 7's report: GLM unreachable, Codex fallback used." >&2
+  set +e
+  cat "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+    | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
+      --cd "$(pwd)" \
+      --ephemeral \
+      --sandbox read-only \
+      - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
+      2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
+  CODEX_EXIT=$?
+  set -e
+  printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
+  VERDICT_LOG="$EVIDENCE_DIR/codex-verdict-round-N.log"
+  REVIEWER="codex (GLM fallback)"
+fi
+# NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
+# (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
+# (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt (same qa.md prompt
+# for both reviewers); parse it from the output between the `^codex$`/model-name
+# marker and `^tokens used$`.
+#
+# 🔴 Added 2026-08-23: the Codex fallback path routes through fleet-guarded.sh, which
+# claims a slot against the same 11-total fleet budget Agent View dispatch uses (see
+# fleet-slots.py) before running Codex, and releases it on exit regardless of outcome.
+# Fails open after 90s at capacity rather than blocking a QA gate indefinitely — never
+# remove this wrapper to "simplify" the command; that's exactly how this budget leaks
+# back to uncounted. GLM does NOT need this — it's a separate flat-rate z.ai account,
+# not competing for the same Codex/Claude budget.
 # NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
 # (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
 # (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt; parse it from
@@ -407,7 +444,7 @@ printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
 # to "simplify" the command; that's exactly how this budget leaks back to uncounted.
 ```
 
-**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust Codex's severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — Codex still sometimes over-flags even when told not to.
+**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust the reviewer's ($REVIEWER — GLM or Codex) severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — both reviewers still sometimes over-flag even when told not to.
 
 Parse the (calibrated) verdict:
 - **PASS + zero surviving S1/S2 + valid evidence:** go to Phase 5.
