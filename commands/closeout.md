@@ -59,6 +59,7 @@ commits: []                      # short SHAs
 deployed: false
 threads_resolved: []             # names/ids of Active Threads this session finished
 questions_answered: []           # Open Questions from the state file this session resolved
+still_working: false             # true = there is live unfinished work IN THIS TERMINAL — don't close it
 ---
 
 ## Did
@@ -102,6 +103,16 @@ If the work serves none, write `initiative: none — <reason>`. That's a real si
 You cannot edit the canonical state file. Instead **declare the intent** in frontmatter —
 `threads_resolved: [receptionist-prototype]`, `questions_answered: ["whether to pin prod traffic"]` —
 and `/rollup` applies it. Name them closely enough that rollup can match them.
+
+### 🔴 `still_working` — say so if closing THIS terminal would lose something real
+
+Closeout never ends a session, but Shane reads the rollup report and may manually close a
+terminal it makes look finished. Set `still_working: true` when there's live unfinished work
+specifically tied to *this* conversation continuing — mid-investigation, waiting on a reply you
+need to act on, holding context a fresh session would have to re-derive. Add one line under `##
+Did` or `## Threads` saying what, briefly. Default is `false` — most closeouts really are a clean
+stopping point, don't inflate this to seem busy. `/rollup` surfaces every `true` by name in its
+final report so Shane sees exactly which terminals not to close, not the whole list.
 
 ## Step 2 — Commit
 

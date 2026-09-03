@@ -75,8 +75,10 @@ across every session in the fan-out if you get it wrong, so copy the `name [ref]
 `ListAgents` printed it. (Verified the hard way, 2026-08-11.)
 
 Include in the message: re-read `~/.claude/commands/closeout.md` (sessions started before the
-rearchitecture may still hold the old 4-6 minute version in context), and an explicit
-"non-interactive, do not ask questions" — one session stopping to ask stalls the whole rollup.
+rearchitecture may still hold the old 4-6 minute version in context), an explicit
+"non-interactive, do not ask questions" — one session stopping to ask stalls the whole rollup —
+and an explicit reminder to set `still_working: true` in frontmatter if there's live unfinished
+work tied to that specific terminal, so Shane doesn't close it by mistake.
 
 - **Skip `busy` sessions and background `bg` workers** — a session mid-`/goal` is doing real work
   and an inbound message starts a new turn on receipt, which would interrupt it. Note which ones
@@ -186,6 +188,7 @@ Coverage: 7 interactive sessions exist (claude agents --json)
   closed out 5 · self 1 · skipped 1 busy (AestheticcNext-541gn mid-/goal)
   🔴 UNCOVERED 1: aestheticc-8f — live 11.1h, absent from ListAgents, could not be messaged
   ⚠️ name collision: aestheticc-92 resolves to two ids (e4e1a0 / e2ed1f64)
+🔴 DO NOT CLOSE — still_working:true: aestheticc-f6 (mid-Codex scoping pass), aestheticc-76 (waiting on a client reply before continuing)
 Recovered: 2 commits with no closeout [recovered]
 Threads: +2 new, 3 resolved · Questions: 1 answered, 2 new
 Initiatives: LUCY-r2zp ×4, LUCY-osi9 ×2, none ×1
@@ -193,6 +196,11 @@ Initiatives: LUCY-r2zp ×4, LUCY-osi9 ×2, none ×1
 
 🔴 **State the coverage denominator, always.** "Closed out 5" without "of how many" is the failure
 mode — it reads as complete when it isn't. Report uncovered sessions by name.
+
+🔴 **Always print the `DO NOT CLOSE` line, even when empty** ("DO NOT CLOSE — none flagged
+still_working"). This is the one line of the whole report Shane reads to decide whether it's safe
+to close terminals — an absent line reads as "nothing to worry about," which is indistinguishable
+from a session that simply forgot to flag itself. Never let silence stand in for a real check.
 
 Flag every `initiative: none` — unfocused work is worth Shane seeing. Flag contradicting decisions.
 
