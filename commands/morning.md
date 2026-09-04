@@ -10,6 +10,28 @@ Generate a structured morning briefing for Shane. Pulls live data from all syste
 
 ## When Invoked
 
+### Step 0: Claim Orchestrator Role — 🔴 MANDATORY, NEVER SKIP (added 2026-08-25)
+
+> **Shane, 2026-08-25:** *"does /morning include taking on the role of orchestrator. I think it should."*
+
+`/morning` is the one recurring trigger Shane runs in his own terminal for himself — same
+reasoning that keeps Fleet Check unscheduled applies here: this is where "am I the orchestrator"
+gets settled, not left to a separate manual step someone has to remember to do first.
+
+```bash
+python3 ~/.claude/scripts/fleet-role.py <this-session-id> --check 2>&1
+```
+
+- **No live claim exists, or the claim is stale** → claim it:
+  `python3 ~/.claude/scripts/fleet-role.py <this-session-id> --claim`. Report "Orchestrator role
+  claimed" in one line at the top of the briefing.
+- **A DIFFERENT session already holds a live claim** → do NOT steal it. Surface it plainly
+  instead: "Orchestrator is already held by `<session>` — this session stays SUB." Default-deny
+  holds; a session that isn't sure is not the orchestrator (CLAUDE.md "Orchestrator vs
+  sub-Claude").
+- Never silently skip this step, and never claim over a live, contested holder without telling
+  Shane.
+
 Run these data-gathering steps IN PARALLEL, then synthesize into the briefing format below.
 
 ### Step 1: Gather State (All Parallel)
@@ -236,6 +258,7 @@ Run `python3 ~/.claude/scripts/fleet-supervisor.py` and report it here. **If it 
 - 🔴 **Finished but NOT landed:** [bead + branch + commits, or "none"]
 - 🔴 **Awaiting Shane:** [sessions genuinely stopped on a decision, with how long]
 - **Interrupted:** [sessions cut off mid-response — untrustworthy until re-verified]
+- 🔴 **Stale Manager claims:** [work-id + how long dead + handoff doc, or "none"] — a Manager-tab job (`fleet-role.py manager`) whose driving session died. Distinct from the headless fleet above: a dead claim doesn't show up as "blocked," the session is just gone, so this is the only thing that catches it. Reclaim per the command the report prints, or hand it to Shane to route via `/take`.
 - **Watchers alive?** capture-watcher last run, bd-reap, night-batch — say when each last fired, and **say so loudly if any has not run in over 24h**
 
 > **Why this lives here and not in a timer** (decided 2026-08-11, after Codex and Fable split on it): a launchd job would join `bd-reap`, `capture-watcher` and `ops-daemon` — all of which run unwatched, and not one has ever reported itself down. `capture-watcher` was dead for 30 hours with an empty error log and five unprocessed client captures piling up, and nothing said a word. `/morning` is the one recurring trigger attached to something Shane wants **for himself**, so it will not quietly stop being run the way bedtime did. The who-watches-the-watcher regress terminates at a human's own recurring want — that is the only place it can terminate. Blocked work rots over days, so there is no latency argument for a timer.
@@ -352,6 +375,36 @@ Shane is the promoter. These non-negotiable daily activities take <30 mins total
 Only if Shane says "save it" or the `/morning` argument is not "quick":
 - Create `MORNING_BRIEFINGS/[YYYY-MM-DD].md` with the output
 - This creates a historical record that future sessions can reference
+
+## Handoff Protocol — after Shane picks priorities (added 2026-08-25)
+
+> **Shane, 2026-08-25:** *"I run morning, then I say 'what are our priorities' you say x y z.
+> I say cool let's work on z and y. You should then say 'open up two terminal tabs with lucy
+> in them' and once I confirm you communicate with them and send the context and directions.
+> rather than your chat getting bogged down in dispatches and updates."*
+
+Once Shane names which priorities to work now, this session's job is dispatch, not execution —
+the standing orchestrator rule (CLAUDE.md "The orchestrator dispatches; it does not do the work
+itself"), made concrete for the /morning → work handoff specifically:
+
+1. **Count the work, ask for tabs, don't spawn them yourself.** Opening a terminal tab is a UI
+   action only Shane can do — say plainly "open N Agent View tabs" (one per genuinely
+   independent priority; don't over-split work that's really one thread). Wait for his
+   confirmation before sending anything.
+2. **Once tabs exist, `ListAgents` to find them, then `SendMessage` each one full context** —
+   the specific priority, the relevant facts already gathered in this briefing (don't make the
+   new session re-derive what `/morning` already found), and what "done" looks like. Don't
+   summarize down to a one-liner — a session with thin context re-investigates from scratch,
+   the exact waste this protocol exists to avoid.
+3. **This session becomes a relay, not a worker.** Investigation, DB scripts, drafting, browser
+   automation — all of that belongs in the dispatched tabs, visible to Shane in their own
+   windows, not run inline here. Report their findings back when they land; don't do the
+   digging in this chat.
+4. **A background `/goal <bead>` dispatch (`fleet-dispatch.py`) is still the right tool** for a
+   single, already-scoped, code-only bead with clear acceptance criteria — that doesn't need an
+   interactive tab. This protocol is for open-ended work (a rescue plan, a client cleanup, an
+   investigation with judgment calls along the way) that benefits from Shane watching it happen
+   and being able to jump in.
 
 ## Tone
 
