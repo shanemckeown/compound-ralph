@@ -99,6 +99,50 @@ def agents():
         return []
 
 
+MANAGERS_DIR = os.path.expanduser("~/.claude/fleet/managers")
+
+
+def stale_manager_claims(fleet):
+    """Manager-tab work claims (fleet-role.py's per-work-id markers, distinct
+    from the headless agent_view fleet this file otherwise triages) whose
+    claiming session is no longer live.
+
+    🔴 Added 2026-09-04, after H-6 — the single largest remaining piece of the
+    whole master plan — sat with a void claim for ~11 hours undetected. The
+    claim mechanism itself already self-heals correctly (fleet-role.py catches
+    a dead session's claim instantly on liveness check); the gap was that
+    nothing polled for it. This is that poll, folded into the same triage pass
+    Shane already runs via /morning rather than a new thing to remember."""
+    live_ids = {a.get("sessionId") for a in fleet if a.get("sessionId")}
+    now = time.time()
+    stale = []
+    for path in glob.glob(os.path.join(MANAGERS_DIR, "*.json")):
+        try:
+            with open(path) as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+        sid = rec.get("session_id")
+        if not sid or sid in live_ids:
+            continue
+        claimed_at = rec.get("claimed_at")
+        age_days = None
+        if claimed_at:
+            try:
+                ts = time.mktime(time.strptime(claimed_at, "%Y-%m-%dT%H:%M:%SZ"))
+                age_days = round((now - ts) / 86400, 1)
+            except Exception:
+                pass
+        stale.append({
+            "work_id": rec.get("work_id") or os.path.splitext(os.path.basename(path))[0],
+            "held_by_name": rec.get("name"), "held_by_session": sid,
+            "claimed_at": claimed_at, "age_days": age_days,
+            "handoff_doc_path": rec.get("handoff_doc_path"),
+        })
+    stale.sort(key=lambda r: -(r["age_days"] or 0))
+    return stale
+
+
 def transcript(session_id):
     hits = glob.glob(f"{PROJECTS}/*/{session_id}.jsonl")
     return hits[0] if hits else None
@@ -184,9 +228,10 @@ def main():
         })
 
     findings.sort(key=lambda f: -f["age_days"])
+    stale_managers = stale_manager_claims(fleet)
 
     if as_json:
-        print(json.dumps(findings, indent=2))
+        print(json.dumps({"findings": findings, "stale_manager_claims": stale_managers}, indent=2))
         return
 
     interactive = [a for a in fleet if a.get("kind") == "interactive"]
@@ -210,6 +255,19 @@ def main():
             if f.get("landed"):
                 print(f"          ├ branch {f['branch']}: {f['landed']}")
             print(f"          └ {f['last_turn'][:140]}")
+        print()
+
+    if stale_managers:
+        print(f"── STALE MANAGER CLAIMS ({len(stale_managers)}) — claiming session is dead; "
+              "work may be silently stalled\n"
+              "   Reclaim: fleet-role.py manager <work-id> <new-session-id> --claim --steal "
+              "[--handoff-doc PATH]")
+        for m in stale_managers:
+            age = f"{m['age_days']:.1f}d" if m["age_days"] is not None else "age unknown"
+            print(f"   {age:>8s}  {m['work_id']:44s} held by {m['held_by_name'] or '(unnamed)'} "
+                  f"({m['held_by_session'][:8] if m['held_by_session'] else '?'})")
+            if m.get("handoff_doc_path"):
+                print(f"          └ {m['handoff_doc_path']}")
         print()
 
     orphans = sum(1 for f in findings if not f["in_manifest"])
