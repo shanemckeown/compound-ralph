@@ -143,6 +143,53 @@ def stale_manager_claims(fleet):
     return stale
 
 
+MECHANISM_LIVENESS_SCRIPT = os.path.join(REPO, "scripts", "ops", "mechanism-liveness.mjs")
+
+
+def mechanism_liveness():
+    """Read-only nightly check for a configured automation/scheduler/loyalty
+    mechanism that is enabled, has an eligible population, but produced ZERO
+    observed effects in the last 30 days (AestheticcNext-ndyla).
+
+    Best-effort and degrading: this must never break the fleet triage this
+    file exists for. Any failure (script missing, DB proxy down, gcloud not
+    authed) collapses to a single skipped/errored line, never an exception
+    that takes the rest of the report down with it — the same posture as
+    every other section here (stale_manager_claims, landed()) already takes.
+    """
+    if not os.path.exists(MECHANISM_LIVENESS_SCRIPT):
+        return {"error": f"script not found: {MECHANISM_LIVENESS_SCRIPT}", "alerts": []}
+    try:
+        r = subprocess.run(
+            ["node", MECHANISM_LIVENESS_SCRIPT, "--json"],
+            capture_output=True, text=True, timeout=120, cwd=REPO,
+        )
+    except Exception as e:
+        return {"error": f"could not run: {e}", "alerts": []}
+
+    if not r.stdout.strip():
+        detail = (r.stderr or "").strip().splitlines()
+        return {"error": detail[-1] if detail else f"no output (exit {r.returncode})", "alerts": []}
+
+    try:
+        payload = json.loads(r.stdout)
+    except Exception as e:
+        return {"error": f"could not parse output: {e}", "alerts": []}
+
+    alerts = []
+    for result in payload.get("results", []):
+        if result.get("skipped"):
+            alerts.append({"skipped": True, "mechanism": result.get("id"), "detail": result["skipped"]})
+            continue
+        for v in result.get("violations", []):
+            alerts.append({
+                "skipped": False, "mechanism": result.get("id"), "code": v.get("code"),
+                "business_name": v.get("business_name"), "business_id": v.get("business_id"),
+                "detail": v.get("detail"),
+            })
+    return {"error": None, "alerts": alerts}
+
+
 def transcript(session_id):
     hits = glob.glob(f"{PROJECTS}/*/{session_id}.jsonl")
     return hits[0] if hits else None
@@ -229,9 +276,14 @@ def main():
 
     findings.sort(key=lambda f: -f["age_days"])
     stale_managers = stale_manager_claims(fleet)
+    mech_liveness = mechanism_liveness()
 
     if as_json:
-        print(json.dumps({"findings": findings, "stale_manager_claims": stale_managers}, indent=2))
+        print(json.dumps({
+            "findings": findings, "stale_manager_claims": stale_managers,
+            "mechanism_liveness_alerts": mech_liveness["alerts"],
+            "mechanism_liveness_error": mech_liveness["error"],
+        }, indent=2))
         return
 
     interactive = [a for a in fleet if a.get("kind") == "interactive"]
@@ -269,6 +321,29 @@ def main():
             if m.get("handoff_doc_path"):
                 print(f"          └ {m['handoff_doc_path']}")
         print()
+
+    real_alerts = [a for a in mech_liveness["alerts"] if not a.get("skipped")]
+    skipped_checks = [a for a in mech_liveness["alerts"] if a.get("skipped")]
+    if mech_liveness["error"]:
+        print(f"MECHANISM LIVENESS CHECK DID NOT RUN: {mech_liveness['error']}\n")
+    elif real_alerts:
+        print(f"── MECHANISM LIVENESS ALERTS ({len(real_alerts)}) — enabled mechanism, "
+              "eligible population, zero effects in 30d (AestheticcNext-ndyla)")
+        for a in real_alerts:
+            name = a.get("business_name") or "(n/a)"
+            bid = f" ({a['business_id']})" if a.get("business_id") else ""
+            print(f"   [{a['mechanism']}] {name}{bid} - {a['detail']}")
+        if skipped_checks:
+            for s in skipped_checks:
+                print(f"   [{s['mechanism']}] SKIPPED — {s['detail']}")
+        print()
+    elif skipped_checks:
+        print("── MECHANISM LIVENESS: no alerts, but some checks were skipped")
+        for s in skipped_checks:
+            print(f"   [{s['mechanism']}] SKIPPED — {s['detail']}")
+        print()
+    else:
+        print("── MECHANISM LIVENESS: clean — no enabled+eligible mechanism found with zero effects\n")
 
     orphans = sum(1 for f in findings if not f["in_manifest"])
     if orphans:
