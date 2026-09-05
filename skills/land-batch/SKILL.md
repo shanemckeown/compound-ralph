@@ -77,6 +77,42 @@ reversal.
    artifact must be cited. Build SUCCESS alone does not prove Cloud Run traffic.
 9. **Production is pinned.** Since 2026-06-15, never use --to-latest on prod.
    Only explicit --to-revisions <new-revision>=100 plus exact status verification.
+10. **A reported-clean merge is not proof the file merged correctly** — this is
+    stronger than guardrail 8's "cite evidence" and deserves its own line
+    because it defeats the instinct that "no CONFLICT marker" means safe.
+    Confirmed live 2026-09-05 (`AestheticcNext-gzpj0` landing, `AestheticcNext-cozxa`):
+    git reported `Auto-merging package.json` with zero conflict markers, but
+    the actual merge RESULT silently reverted two real security fixes back to
+    the vulnerable state (next-auth downgraded 4.24.15→4.24.13, a removed dead
+    dependency came back) — an intervening commit had touched the same file
+    between the branch's fork point and the merge, so git's line-based diff3
+    resolved the ambiguity wrong with no warning at all. Caught only by
+    diffing `git show HEAD^1:<file>` and `HEAD^2:<file>` against the merge
+    result by hand, not by trusting the merge output. This is the *same root
+    cause* (git's 3-way merge has no semantic understanding of the file) as
+    the CHANGELOG.md/VERSION drops several `feedback_*` fixes already restored
+    (`feedback_git_merge_silently_drops_changelog_entry`,
+    `feedback_stale_branch_merge_silently_deletes`) — those were caught
+    *after the fact*, sometimes days later, by a human or a later session
+    noticing content missing; none were caught by an automated check at
+    land time, across at least 7 separate historical incidents on
+    CHANGELOG.md/VERSION/package.json/config-array files. That history is
+    itself the evidence that "remember to diff by hand" does not reliably
+    happen — hence the mechanical check below is wired into Step 2, not left
+    as a reminder.
+    **Practice:** for `package.json`, `VERSION`, or `CHANGELOG.md` — any file
+    more than one recent branch has plausibly touched — explicitly diff both
+    merge parents against the merge result for the specific lines the source
+    branch was supposed to change. Do not accept "Auto-merging `<file>`" with
+    no `CONFLICT` line as proof of a correct result.
+    **Mechanical check (Step 2 wires this in automatically — see below):** for
+    this fixed sensitive-file list, after every merge, verify that (a) every
+    line the source branch's own diff *added* relative to the merge-base is
+    present somewhere in the merge result, and (b) every line the source
+    branch's own diff *removed* is absent from the merge result. Either
+    violation is content loss and HOLDs the candidate for Shane's eyes — it is
+    not auto-resolved, matching guardrail 5's "never auto-resolve" spirit even
+    though git itself reported no conflict.
 
 ## Shared mutex, queue, and ledger
 
@@ -320,7 +356,31 @@ git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
 MERGE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 ~~~
 
-A merge conflict means abort and hold it. For each merge, run typecheck, lint,
+A merge conflict means abort and hold it. Even a clean (no-conflict) merge is
+not yet trusted — per Hard guardrail 10, run the sensitive-file check before
+the scoped gate:
+
+~~~bash
+SENSITIVE_MERGE_LOG="$EVIDENCE_DIR/sensitive-merge-check-$BR.log"
+if ! ~/.claude/skills/land-batch/bin/verify-sensitive-file-merge.sh \
+  "$SCRATCH" "$MERGE_SHA" > "$SENSITIVE_MERGE_LOG" 2>&1; then
+  cat "$SENSITIVE_MERGE_LOG"
+  git -C "$SCRATCH" reset --hard "$MERGE_SHA^1"
+  printf 'HELD %s — clean merge silently dropped/reverted content in package.json/VERSION/CHANGELOG.md (see %s). Not auto-resolved.\n' \
+    "$BR" "$SENSITIVE_MERGE_LOG"
+  continue
+fi
+~~~
+
+This is a narrow, mechanical presence/absence check (fixed file list:
+`package.json`, `VERSION`, `CHANGELOG.md`) — a hit means "a human needs to
+look," not "this merge is definitely wrong": a later, deliberate edit to the
+same line by an already-landed candidate in this same batch can trip it too.
+Treat it exactly like guardrail 5's other HOLD categories: preserve the log,
+do not touch the file to "fix" it yourself, surface it in the final
+HELD/BLOCKED report.
+
+For each merge that passes both checks, run typecheck, lint,
 and Jest scoped to **that feature's changed files**. Derive files from the merge
 and use package-supported scoped typecheck/lint plus Jest --findRelatedTests
 <files>, or Jest --changedSince=origin/main where that is the narrower accurate
