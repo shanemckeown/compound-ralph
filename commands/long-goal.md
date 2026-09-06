@@ -276,32 +276,52 @@ bd show "$ID" 2>&1 | grep -qiE "^Status:.*closed|\[CLOSED\]|· CLOSED" \
 
 Collect failures; report them in Phase 7 rather than silently proceeding.
 
-### Phase 6.5 — Reclaim the worktree — unchanged from `/goal`
+### Phase 6.5 — Leave the worktree for `/land-batch` — unchanged from `/goal`
 
-Same preconditions, same `ExitWorktree`/`git worktree remove` steps, only after the branch is pushed and every closeable child is verified closed.
+🔴 **Reversed 2026-08-26, same as `/goal`.** Do NOT remove the worktree. A worktree-less
+("remote-only") branch is hard-quarantined by `/land-batch` discovery no matter how
+complete its evidence — it forces a human `git merge`, which is exactly the workflow
+Shane does not want. Leave the worktree intact once the branch is pushed and every
+closeable child is verified closed; only note the `git status --porcelain` cleanliness
+check in the report. See `/goal` Phase 6.5 for the full reasoning.
 
 ### Phase 6.6 — Release fleet slot + advance the queue — same as `/goal`
 
-🔴 **Added 2026-08-23.** Identical to `/goal` Phase 6.6 — this epic run claimed one of 5
-Agent View slots at dispatch time. Release it unconditionally (even on a partial-success
-report with some children left open), then attempt to advance the queue:
+🔴 **Added 2026-08-23.** This epic run claimed one of 5 Agent View slots at dispatch time.
+Release it unconditionally (even on a partial-success report with some children left open),
+then advance the shared queue through the recorded `codex`, `goal`, or `long-goal` path:
 
 ```bash
 python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_EPIC_ID>
-NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
-if [ "$NEXT" != "NONE" ]; then
-  EPIC_FLAG=""
-  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
-  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+NEXT_INFO=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next --with-kind)
+if [ "$NEXT_INFO" != "NONE" ]; then
+  read -r NEXT NEXT_KIND NEXT_TOKEN <<< "$NEXT_INFO"
+  case "$NEXT_KIND" in
+    codex)
+      python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
+      ;;
+    goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ;;
+    long-goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ;;
+  esac
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    # Both dispatchers release their pre-claimed slot on any failure path.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
+  fi
 fi
 ```
 
-Note in the Phase 7 report if you advanced the queue.
+Note in the Phase 7 report if you advanced the queue (which bead, if any), or if an advance
+was attempted but the gate refused it: `attempted <bead>, refused by gate (<reason>), re-queued`.
 
 ### Phase 7 — Report
 
 ```
-result: epic <EPIC_ID> — <N> of <TOTAL> children closed, <M> excluded (scoping/budget, see notes), <K> QA-capped (follow-up beads filed). Branch long-goal/<id> pushed. Evidence: <artifact paths, one set per child>. Ready for Shane to merge, then staging QA.
+result: epic <EPIC_ID> — <N> of <TOTAL> children closed, <M> excluded (scoping/budget, see notes), <K> QA-capped (follow-up beads filed). Branch long-goal/<id> pushed. Evidence: <artifact paths, one set per child>. Worktree left intact for /land-batch to discover and land.
 ```
 
 If everything closed cleanly, `<M>` and `<K>` are 0 — say so plainly, don't pad the report.

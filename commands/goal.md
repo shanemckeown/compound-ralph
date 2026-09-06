@@ -2,15 +2,17 @@
 
 Before reporting progress, audit each claim against a tool result from this session. Only report work you can point to evidence for; if something is not yet verified, say so explicitly.
 
-Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, close the bead(s). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
+Take a bead ID (single or epic), run the full Lucy+Codex partnership flow end-to-end: plan, build, adversarial QA, iterate until clean, push the feature branch, mark the bead(s) `pushed` (AestheticcNext- code beads) or close them (LUCY- vault/tooling beads — see Phase 6). **Never merges to main. Never deploys anywhere — not staging, not production.** QA happens on the main staging service AFTER `/land-batch` lands the branch to main and the normal staging deploy runs. Production deploys require Shane's explicit sayso in a foreground chat.
 
-🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached by Shane merging to main, then the normal staging deploy. /goal stops at "branch pushed + bead closed."
+🔴 **B-1 (AI Fleet Grand Plan, 2026-09-01): Workers do not close AestheticcNext- code beads — ever, for any reason, including "verified myself" or "QA clean."** A closed bead is a claim; only a landed one (verified by `/land-batch` against `origin/main`) is a fact — see `Aestheticc/Product/AI_FLEET_GRAND_PLAN_2026-09-01.md` Part 1/Part 3 Q1 for why (`AestheticcNext-n708r`: seven review rounds, bead closed, prod unfixed in 2 of 3 files, five weeks). A `bd-close-guard` wrapper (`~/.claude/bin/bd`, wired via `~/.zshrc` — reaches every session started after 2026-09-01, not sessions already running before then) refuses `bd close`/`update --status closed` on an AestheticcNext- bead with no commit reachable from `origin/main`, but treat this instruction as the primary mechanism, not the guard — the guard is a backstop, not a substitute for typing the right command.
 
-## 🔴 HARD RULE: No `result:` until every in-scope bead is verified CLOSED
+🔴 **NO PER-WORKTREE STAGING/QA DEPLOYS.** /goal must NOT run `gcloud builds submit` for any staging build, must NOT create a `--no-traffic` worktree revision, and must NOT add a Cloud Run `--tag`. Those spin up billable always-on revisions — the exact cost leak that nearly sank the runway (see `feedback_cloud_run_warm_instance_cost_model.md`). The only deploy surface is the main staging service, reached via `/land-batch`, then the normal staging deploy. /goal stops at "branch pushed + bead closed + worktree left intact for discovery."
 
-The recurring failure mode of /goal runs is: work ships, branch pushes, but the bead stays OPEN because Phase 6 got skipped or `bd close` silently failed. Future Shane then can't tell what's done.
+## 🔴 HARD RULE: No `result:` until every in-scope bead is verified PUSHED (or CLOSED for LUCY-)
 
-You are NOT allowed to write the `result:` line in Phase 7 until you have run `bd show <ID>` for every bead in scope (singleton OR every child of an epic) and verified the output shows `closed` / `CLOSED`. If the verification fails for any bead, write `needs input:` and list the beads that wouldn't close. See Phase 6 for the exact verification command.
+The recurring failure mode of /goal runs is: work ships, branch pushes, but the bead stays OPEN because Phase 6 got skipped or the status update silently failed. Future Shane then can't tell what's done. A second, more dangerous failure mode (B-1, `AestheticcNext-n708r`): the bead gets CLOSED, and everyone downstream — Shane, a Manager, a future session — trusts that word instead of checking `main`. `pushed` is the honest word for "branch is done and QA-clean, ancestry not yet verified"; `closed` means `/land-batch` has already confirmed it's an ancestor of `origin/main`. Workers don't get to skip that distinction by picking whichever status is more convenient.
+
+You are NOT allowed to write the `result:` line in Phase 7 until you have run `bd show <ID>` for every bead in scope (singleton OR every child of an epic) and verified the output shows `pushed`/`PUSHED` (AestheticcNext-) or `closed`/`CLOSED` (LUCY-). If the verification fails for any bead, write `needs input:` and list the beads that wouldn't update. See Phase 6 for the exact verification command.
 
 Observed 2026-05-13 on `AestheticcNext-sdait` — fix shipped via Plan-Build-QA but bead stayed open. This rule is the fix.
 
@@ -328,9 +330,9 @@ If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed
 
 If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first (per `feedback_husky_tsc_cold_cache.md`).
 
-### Phase 4 — QA (Codex 5.5, read-only, adversarial)
+### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
 
-**One QA pass against the combined diff at the end**, not one per child. Saves Codex quota and lets the reviewer see cross-child interactions.
+**One QA pass against the combined diff at the end**, not one per child. Saves reviewer quota and lets it see cross-child interactions.
 
 Create one evidence directory for the /goal run. In every QA round, run the
 project's real test/QA gate first and capture its exact command, combined output,
@@ -384,15 +386,52 @@ set +e
   echo "$EVIDENCE_DIR/qa-command-round-N.txt"
   echo "$EVIDENCE_DIR/qa-output-round-N.log"
   echo "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
-} | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
-  --cd "$(pwd)" \
-  --ephemeral \
-  --sandbox read-only \
-  - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
-  2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
-CODEX_EXIT=$?
+} > "$EVIDENCE_DIR/qa-prompt-round-N.txt"
+```
+
+🔴 **B-10 (AI Fleet Grand Plan, 2026-09-01): GLM is the primary Phase 4 reviewer, Codex is the fallback.** Shane's decision — GLM (`glm review`) is the cheap-first resource (~£80/mo flat-rate vs ~£200/mo Codex+Claude combined), not the fallback. Codex only runs when `glm review` itself exits non-zero (a genuine call failure — auth/network against z.ai — same GLM-outage doctrine as everywhere else in `CLAUDE.md`). A clean GLM run that found nothing wrong still exits 0 with a PASS verdict; that is NOT a fallback trigger.
+
+```bash
+set +e
+glm review --cd "$(pwd)" < "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+  > "$EVIDENCE_DIR/glm-verdict-round-N.log" \
+  2> "$EVIDENCE_DIR/glm-stderr-round-N.log"
+GLM_EXIT=$?
 set -e
-printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
+printf '%s\n' "$GLM_EXIT" > "$EVIDENCE_DIR/glm-exit-code-round-N.txt"
+
+if [[ "$GLM_EXIT" -eq 0 ]]; then
+  VERDICT_LOG="$EVIDENCE_DIR/glm-verdict-round-N.log"
+  REVIEWER="glm"
+else
+  echo "GLM unreachable (exit $GLM_EXIT) — falling back to Codex for this round. Note this in Phase 7's report: GLM unreachable, Codex fallback used." >&2
+  set +e
+  cat "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+    | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
+      --cd "$(pwd)" \
+      --ephemeral \
+      --sandbox read-only \
+      - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
+      2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
+  CODEX_EXIT=$?
+  set -e
+  printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
+  VERDICT_LOG="$EVIDENCE_DIR/codex-verdict-round-N.log"
+  REVIEWER="codex (GLM fallback)"
+fi
+# NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
+# (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
+# (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt (same qa.md prompt
+# for both reviewers); parse it from the output between the `^codex$`/model-name
+# marker and `^tokens used$`.
+#
+# 🔴 Added 2026-08-23: the Codex fallback path routes through fleet-guarded.sh, which
+# claims a slot against the same 11-total fleet budget Agent View dispatch uses (see
+# fleet-slots.py) before running Codex, and releases it on exit regardless of outcome.
+# Fails open after 90s at capacity rather than blocking a QA gate indefinitely — never
+# remove this wrapper to "simplify" the command; that's exactly how this budget leaks
+# back to uncounted. GLM does NOT need this — it's a separate flat-rate z.ai account,
+# not competing for the same Codex/Claude budget.
 # NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
 # (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
 # (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt; parse it from
@@ -405,7 +444,7 @@ printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
 # to "simplify" the command; that's exactly how this budget leaks back to uncounted.
 ```
 
-**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust Codex's severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — Codex still sometimes over-flags even when told not to.
+**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust the reviewer's ($REVIEWER — GLM or Codex) severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — both reviewers still sometimes over-flag even when told not to.
 
 Parse the (calibrated) verdict:
 - **PASS + zero surviving S1/S2 + valid evidence:** go to Phase 5.
@@ -470,6 +509,19 @@ feature is reachable from, before and after. Diff the two lists. Then apply:
 
 A FAIL here does not get written up as a caveat. Fix it, or stop and surface it.
 
+🔴 **THRESHOLD-SCOPE check (added 2026-08-28, `AestheticcNext-nd9ro`).** Fires on ANY diff —
+backend-only included — that changes a conditional or comparison as a bug fix (`>`, `>=`,
+`===`, `.length`, a guard clause, a filter predicate). Before the note is done, write two
+predicates side by side: (a) the **root-cause condition** from the bead — the state under
+which the bug occurs, not the instance that was reported — and (b) the **fix predicate** as
+actually written in the diff. Confirm (b) covers (a). If the fix predicate is narrower than
+the root condition, that is a hard FAIL: the bug was narrowed, not fixed, and the un-fixed
+remainder is often the *default* state. Worked example: `AestheticcNext-brzhi` — day-view
+calendar gutter invisible in dark mode. The reported case was Rooms (more than one resource
+column), so the fix was written as `resources > 1`; the actual condition was *any* resource
+view (`resources > 0`), which left the single-visible-staff default of a solo clinic still
+broken. Source: `Product/QA/PROACTIVE_BUG_CLASSES_2026-08-28.md` class 3.
+
 > **Why this phase exists (2026-07-25, Shane).** Documented recurring failure: code
 > technically works — a button does *something* — but not the thing it promised, or a whole
 > feature ships with no path to it in the UI. Live case: the Growth-engine/Marketing-Studio
@@ -496,50 +548,73 @@ Steps:
    back to 4b. *(This precondition is what stops 4b becoming another orphaned gate — the
    exact failure mode that silently killed the plan-review gate for six weeks.)*
 1. `/ship` to push the feature branch (runs tsc + lint + tests). Do NOT pass any flag that would merge to main.
-2. That's it. **No deploy step.** The branch is now ready for Shane to merge, then staging QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
+2. That's it. **No deploy step.** The branch is now ready for `/land-batch` to discover and land (worktree stays intact — see Phase 6.5), then staging QA on the **main staging service** (the only QA surface). Vault-repo beads also just push (no deploy was ever relevant there).
 
 If `/ship` (tests/lint/tsc) fails and can't be fixed within the QA loop, write `needs input:` not `result:` in Phase 7 — the bead stays open.
 
-### Phase 6 — Close beads (HARD GATE — see top-of-skill rule)
+### Phase 6 — Mark beads done (HARD GATE — see top-of-skill rule)
 
-**Single bead:** `bd close <ID>` with summary + branch name.
+**AestheticcNext- code beads: `pushed`, never `closed`.** Per B-1: this is not optional and not a judgement call, regardless of how many QA rounds ran or how confident you are. `/land-batch` is the only thing that closes these, after it verifies `git merge-base --is-ancestor <landed-sha> origin/main` for real.
 
-**Bundle:** close every child individually with its specific summary, then close the parent epic with the overall summary + branch name + list of closed children.
+**LUCY- vault/tooling beads still close normally** (different repo, not in B-1's scope) — use `bd close <ID>` as before.
 
-```bash
-bd close <ID> --reason "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Ready for Shane to merge, then staging QA. No autonomous deploy."
-```
-
-**Then verify every close stuck.** Per-bead:
+**Single AestheticcNext- bead:**
 
 ```bash
-bd show "$ID" 2>&1 | grep -qiE "^Status:.*closed|\[CLOSED\]|· CLOSED" \
-  || { echo "FAILED to close $ID — aborting Phase 7"; exit 1; }
+bd update <ID> --status pushed --append-notes "completed via /goal $(date -Iseconds). Branch: goal/<id> pushed (QA rounds: <N>). Worktree left intact for /land-batch. No autonomous deploy."
 ```
 
-If even one verification fails, do NOT proceed to Phase 7's `result:` line. Write `needs input:` instead, listing the bead IDs that wouldn't close and the `bd close` stderr. Common failure: `bd` couldn't find the bead because `BEADS_DIR` drifted between phases (re-check Phase 0a routing).
+**Bundle:** mark every child `pushed` individually with its specific summary, then mark the parent epic `pushed` too with the overall summary + branch name + list of children.
+
+**Then verify every update stuck.** Per-bead:
+
+```bash
+bd show "$ID" 2>&1 | grep -qiE "^Status:.*pushed|\[PUSHED\]|· PUSHED" \
+  || { echo "FAILED to mark $ID pushed — aborting Phase 7"; exit 1; }
+```
+
+If even one verification fails, do NOT proceed to Phase 7's `result:` line. Write `needs input:` instead, listing the bead IDs that wouldn't update and the `bd` stderr. Common failure: `bd` couldn't find the bead because `BEADS_DIR` drifted between phases (re-check Phase 0a routing). If `status.custom` doesn't yet have `pushed` registered in this repo's beads DB, run `bd config set status.custom "pushed:wip"` once — don't fall back to `closed` instead.
 
 If QA failed at the 3-round cap: leave beads open with notes documenting state, don't close, and write `needs input:` not `result:`.
 
-### Phase 6.5 — Reclaim the worktree (disk hygiene)
+### Phase 6.5 — Leave the worktree for `/land-batch` (do NOT remove it)
 
-The branch is pushed (Phase 5) and every bead is verified CLOSED (Phase 6), so all work is captured on the remote branch + branch ref. The worktree itself (a full checkout, often 100MB–2GB with node_modules) is now dead weight — remove it so /goal runs don't accumulate disk. **Removing a worktree does NOT delete the branch ref or the pushed remote branch**, so Shane can still merge.
+🔴 **Reversed 2026-08-26.** This phase used to remove the worktree here as disk hygiene,
+reasoning "the branch ref is enough, Shane can still merge from that." That was true but
+wrong: `/land-batch` discovery treats a worktree-backed branch and a worktree-*less*
+("remote-only") branch very differently. A worktree-backed candidate can become
+`auto_land=true` and land itself through the normal multiSelect gate. A remote-only
+candidate is **hard-quarantined — `held-branch-only-*`, never offered, no matter how
+complete the evidence** (exact bead CLOSED + pinned patch-unique tip is not enough) —
+because discovery can no longer independently confirm the tree was clean when the
+session finished; it would have to trust the session's own self-report, which is exactly
+what `/land-batch`'s own first principle refuses to do ("narration is input, never
+evidence"). Deleting the worktree here was quietly forcing every single `/goal` run onto
+the dead-end path that needs a human to run raw `git merge` — the thing Shane has never
+had to do in 18 months of running this system, and does not want to start doing now.
+Landing is `/land-batch`'s job; `/goal` handing it a live worktree is what lets it do that
+job without a human touching git.
 
-Preconditions (ALL must hold — else SKIP and note why in the report):
-- Branch was pushed to origin in Phase 5.
-- `git -C <worktree> status --porcelain --untracked-files=no` is empty (no uncommitted tracked changes — never discard unsynced work).
+So: **do not remove the worktree.** Its only remaining purpose here is proving the
+precondition below, for the report — not for deletion.
 
-Steps:
-1. `cd` to the trunk first — you cannot remove the worktree you are standing in:
-   `cd /Users/shane/Documents/GitReBase/AestheticcNext`
-2. Remove it:
-   - Worktree created via the **EnterWorktree** tool → call **ExitWorktree** with `action: "remove"` (harness-native cleanup).
-   - Worktree created manually (`git worktree add`) → `git worktree remove --force <worktree-path> && git worktree prune`.
-3. Run from the trunk (see Phase 6.6 below for what actually now follows).
+Precondition to note in the report (informational only — do NOT act on a failure by
+removing the worktree; a dirty tree is `/land-batch` discovery's problem to flag, not this
+phase's problem to clean up):
+- `git -C <worktree> status --porcelain --untracked-files=no` — empty means clean, which is
+  exactly the signal that lets `/land-batch` classify this as auto-landable later.
 
-If a precondition fails, leave the worktree in place and say so in the report.
+Nothing else in this phase mutates anything. Proceed straight to Phase 6.6.
 
-**Backlog backstop:** stale worktrees from older runs accumulate (they're what fill the disk — branch refs are 41 bytes, worktrees are GBs). Periodically run `scripts/cleanup-merged-worktrees.sh` from the trunk (dry-run, then `--apply`). It reclaims only worktrees whose work already landed on main, preserves branch refs, never touches DIRTY (uncommitted) worktrees, and flags STALE ones for manual review.
+**Disk hygiene still exists — it just happens AFTER landing, not before.** Once
+`/land-batch` has actually merged a worktree's branch to main, `scripts/cleanup-merged-worktrees.sh`
+(dry-run, then `--apply`, run periodically from the trunk) reclaims it — it only removes
+worktrees whose work already landed on main, preserves branch refs, never touches DIRTY
+(uncommitted) worktrees, and flags STALE ones for manual review. `/land-batch`'s own
+discovery also offers safe pruning for exactly this shape (`source_kind=worktree`,
+clean, `ahead=0` after landing) through the same multiSelect gate. A worktree living from
+"branch pushed" to "branch landed" is the cost of `/land-batch` being able to act without
+a human — a few hundred MB for a few hours/days, not indefinitely.
 
 ### Phase 6.6 — Release fleet slot + advance the queue
 
@@ -552,27 +627,43 @@ session that exits without releasing leaks a slot until the next stale-holder re
 python3 ~/.claude/scripts/fleet-slots.py release-agent-view <THIS_BEAD_ID>
 ```
 
-Then check whether a queued bead can now take the freed slot, and if so, dispatch it —
-this is what makes the queue self-driving instead of requiring the orchestrator to poll:
+Then check whether the next queued bead can now take a slot, and dispatch it through the
+path recorded by its queue kind (`codex`, `goal`, or `long-goal`). This shared, resource-aware
+drain is what makes the queue self-driving instead of requiring the orchestrator to poll:
 
 ```bash
-NEXT=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next)
-if [ "$NEXT" != "NONE" ]; then
-  EPIC_FLAG=""
-  bd show "$NEXT" 2>/dev/null | head -1 | grep -qi "\[EPIC\]" && EPIC_FLAG="--epic"
-  python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" $EPIC_FLAG
+NEXT_INFO=$(python3 ~/.claude/scripts/fleet-slots.py dequeue-next --with-kind)
+if [ "$NEXT_INFO" != "NONE" ]; then
+  read -r NEXT NEXT_KIND NEXT_TOKEN <<< "$NEXT_INFO"
+  case "$NEXT_KIND" in
+    codex)
+      python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
+      ;;
+    goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ;;
+    long-goal)
+      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ;;
+  esac
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    # Both dispatchers release their pre-claimed slot on any failure path.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
+  fi
 fi
 ```
 
-Note in the Phase 7 report if you advanced the queue (which bead, if any). This is now
-genuinely the LAST mutating step — only the Phase 7 report follows.
+Note in the Phase 7 report if you advanced the queue (which bead, if any), or if an advance
+was attempted but the gate refused it: `attempted <bead>, refused by gate (<reason>), re-queued`.
+This is now genuinely the LAST mutating step — only the Phase 7 report follows.
 
 ### Phase 7 — Report
 
 Final line:
 
 ```
-result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Ready for Shane to merge, then staging QA. Warnings: <list or none>.
+result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Worktree left intact for /land-batch to discover and land. Warnings: <list or none>.
 
 USER-FACING CHANGES (Phase 4b):
 <paste CHANGE-NOTE.md in full, or "none — backend only">
@@ -582,7 +673,7 @@ USER-FACING CHANGES (Phase 4b):
 file in a worktree he will never open is the same as not writing it. If any user surface was touched and
 this section is missing, the run is not reportable.
 
-QA happens after Shane merges the branch to main and the normal staging deploy runs (the main staging service is the only QA surface). **Never fire `@deploy-staging`** — that subagent is banned per CLAUDE.md (deploy subagents hallucinate "queued/monitoring/completed" without submitting). /goal does not deploy.
+QA happens after `/land-batch` lands the branch to main and the normal staging deploy runs (the main staging service is the only QA surface). **Never fire `@deploy-staging`** — that subagent is banned per CLAUDE.md (deploy subagents hallucinate "queued/monitoring/completed" without submitting). /goal does not deploy.
 
 For partial/failed runs:
 
@@ -619,7 +710,7 @@ Full `lib/stripe/` rewrite alone: **refused**. Sensitive-path budget blown.
 
 - Does not merge to main. Ever.
 - **Does not deploy anywhere.** No production, no staging, no worktree revision. No `gcloud builds submit`, no `gcloud run deploy`, no `--tag`, no `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on revisions (`feedback_cloud_run_warm_instance_cost_model.md`) — banned.
-- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER Shane merges the branch and the normal staging deploy runs.
+- Does not fire `@deploy-staging`. QA happens on the main staging service AFTER `/land-batch` lands the branch and the normal staging deploy runs.
 - Does not refuse-vs-allow on staging deploys — it simply never deploys. (Still refuses with `failed:` if the bead body says "deploy to prod"/"production deploy" — mis-scoped.)
 - Does not bypass `/review` or `/ship` gates. They run inside Phase 5.
 - Does not pick its own bead. Shane (or a future supervisor cron) chooses what to fire on.

@@ -82,6 +82,42 @@ reversal.
    artifact must be cited. Build SUCCESS alone does not prove Cloud Run traffic.
 9. **Production is pinned.** Since 2026-06-15, never use --to-latest on prod.
    Only explicit --to-revisions <new-revision>=100 plus exact status verification.
+10. **A reported-clean merge is not proof the file merged correctly** — this is
+    stronger than guardrail 8's "cite evidence" and deserves its own line
+    because it defeats the instinct that "no CONFLICT marker" means safe.
+    Confirmed live 2026-09-05 (`AestheticcNext-gzpj0` landing, `AestheticcNext-cozxa`):
+    git reported `Auto-merging package.json` with zero conflict markers, but
+    the actual merge RESULT silently reverted two real security fixes back to
+    the vulnerable state (next-auth downgraded 4.24.15→4.24.13, a removed dead
+    dependency came back) — an intervening commit had touched the same file
+    between the branch's fork point and the merge, so git's line-based diff3
+    resolved the ambiguity wrong with no warning at all. Caught only by
+    diffing `git show HEAD^1:<file>` and `HEAD^2:<file>` against the merge
+    result by hand, not by trusting the merge output. This is the *same root
+    cause* (git's 3-way merge has no semantic understanding of the file) as
+    the CHANGELOG.md/VERSION drops several `feedback_*` fixes already restored
+    (`feedback_git_merge_silently_drops_changelog_entry`,
+    `feedback_stale_branch_merge_silently_deletes`) — those were caught
+    *after the fact*, sometimes days later, by a human or a later session
+    noticing content missing; none were caught by an automated check at
+    land time, across at least 7 separate historical incidents on
+    CHANGELOG.md/VERSION/package.json/config-array files. That history is
+    itself the evidence that "remember to diff by hand" does not reliably
+    happen — hence the mechanical check below is wired into Step 2, not left
+    as a reminder.
+    **Practice:** for `package.json`, `VERSION`, or `CHANGELOG.md` — any file
+    more than one recent branch has plausibly touched — explicitly diff both
+    merge parents against the merge result for the specific lines the source
+    branch was supposed to change. Do not accept "Auto-merging `<file>`" with
+    no `CONFLICT` line as proof of a correct result.
+    **Mechanical check (Step 2 wires this in automatically — see below):** for
+    this fixed sensitive-file list, after every merge, verify that (a) every
+    line the source branch's own diff *added* relative to the merge-base is
+    present somewhere in the merge result, and (b) every line the source
+    branch's own diff *removed* is absent from the merge result. Either
+    violation is content loss and HOLDs the candidate for Shane's eyes — it is
+    not auto-resolved, matching guardrail 5's "never auto-resolve" spirit even
+    though git itself reported no conflict.
 
 ## Shared mutex, queue, and ledger
 
@@ -110,6 +146,11 @@ metadata; never use an ephemeral shell PID that dies after one tool command.
 ~~~bash
 REPO=/Users/shane/Documents/GitReBase/AestheticcNext
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-<current-claude-pid>"
+# land-batch-<RUN_ID> is a REQUIRED prefix: bin/land-state.py's orphan cleanup
+# (_cleanup_orphan_worktree) only ever `git worktree remove`s a path whose
+# basename starts with "land-batch-", and only ever `git branch -D`s a branch
+# under "land-batch/". Renaming either convention silently defeats cleanup.
+SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID"
 EVIDENCE_DIR="$HOME/.claude/evidence/land-batch/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
 ADMISSION_RESULT="$EVIDENCE_DIR/admission.json"
@@ -320,8 +361,22 @@ Dry-run stops after that plan without admission/mutation.
 
 ### Step 2 — Per-feature merge, cheap scoped gate, direct main push
 
-Create fresh scratch off origin/main on local branch land-batch/RUN_ID. Configure
-the existing .beads merge=ours driver in common git info attributes. For every
+🔴 **Hard guardrail 2 is enforced here, structurally, not just stated.** Every git
+command below runs inside `$SCRATCH` — an isolated worktree — and NEVER bare
+against `$REPO`. `$REPO` is the shared trunk checkout: other sessions run
+`codex exec`/interactive work directly inside it, so a bare `git merge`, `git
+reset --hard`, or `git checkout` there can destroy another session's uncommitted
+work (confirmed harm, `LUCY-3sb80`, 2026-08-12). Create `$SCRATCH` as its own
+worktree first — do not reuse or `cd` into `$REPO`'s own working tree for any
+part of Step 2:
+
+~~~bash
+git -C "$REPO" worktree add "$SCRATCH" -b "land-batch/$RUN_ID" origin/main
+~~~
+
+Configure the existing .beads merge=ours driver in common git info attributes
+(inside `$SCRATCH`, not `$REPO`'s own `.git/info/attributes`, since a worktree
+shares the parent's git dir — this is written once and covers both). For every
 selected branch, use the candidate's pinned `source_ref` and `tip_sha`. Verify
 the ref again immediately before its merge; if it is missing or moved, HOLD it
 as **source-moved — rediscovery required** and do not merge any other ref or a
@@ -338,12 +393,36 @@ if ! CURRENT_SOURCE_SHA="$(
   printf 'HELD source missing/moved; rediscover: %s\n' "$SOURCE_REF"
   continue
 fi
-git merge --no-ff --no-verify "$SOURCE_SHA" \
+git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
   -m "land: $BR @ $SOURCE_SHA (batch $RUN_ID via /land-batch)"
-MERGE_SHA="$(git rev-parse HEAD)"
+MERGE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 ~~~
 
-A merge conflict means abort and hold it. For each merge, run typecheck, lint,
+A merge conflict means abort and hold it. Even a clean (no-conflict) merge is
+not yet trusted — per Hard guardrail 10, run the sensitive-file check before
+the scoped gate:
+
+~~~bash
+SENSITIVE_MERGE_LOG="$EVIDENCE_DIR/sensitive-merge-check-$BR.log"
+if ! ~/.claude/skills/land-batch/bin/verify-sensitive-file-merge.sh \
+  "$SCRATCH" "$MERGE_SHA" > "$SENSITIVE_MERGE_LOG" 2>&1; then
+  cat "$SENSITIVE_MERGE_LOG"
+  git -C "$SCRATCH" reset --hard "$MERGE_SHA^1"
+  printf 'HELD %s — clean merge silently dropped/reverted content in package.json/VERSION/CHANGELOG.md (see %s). Not auto-resolved.\n' \
+    "$BR" "$SENSITIVE_MERGE_LOG"
+  continue
+fi
+~~~
+
+This is a narrow, mechanical presence/absence check (fixed file list:
+`package.json`, `VERSION`, `CHANGELOG.md`) — a hit means "a human needs to
+look," not "this merge is definitely wrong": a later, deliberate edit to the
+same line by an already-landed candidate in this same batch can trip it too.
+Treat it exactly like guardrail 5's other HOLD categories: preserve the log,
+do not touch the file to "fix" it yourself, surface it in the final
+HELD/BLOCKED report.
+
+For each merge that passes both checks, run typecheck, lint,
 and Jest scoped to **that feature's changed files**. Derive files from the merge
 and use package-supported scoped typecheck/lint plus Jest --findRelatedTests
 <files>, or Jest --changedSince=origin/main where that is the narrower accurate
@@ -353,7 +432,7 @@ exit-code artifacts under scoped-gate-<branch>-*.
 Any red/missing/malformed artifact means:
 
 ~~~bash
-git reset --hard "$MERGE_SHA^"
+git -C "$SCRATCH" reset --hard "$MERGE_SHA^"
 ~~~
 
 This reset is LAND-only. At this moment the scratch's bad merge has not been
@@ -400,12 +479,63 @@ HELD/BLOCKED report for Shane's judgment.
 For a green feature:
 
 ~~~bash
-git push origin HEAD:main
+git -C "$SCRATCH" push origin HEAD:main
 ~~~
 
-If push is rejected because main moved, fetch, rebase --rebase-merges origin/main,
-re-gate, retry. Abort/hold rebase conflicts. Never force-push. The no-ff merge
-message ties every land to RUN_ID.
+🔴 **B-1 (AI Fleet Grand Plan, 2026-09-01): this push is the moment a bead's status changes from `pushed` to `closed` — land-batch is now the ONLY place that happens for AestheticcNext- code beads.** Workers stop closing their own beads in `/goal` Phase 6; they leave them `pushed`. Immediately after the push above succeeds, for every AestheticcNext- bead ID this candidate's branch corresponds to (derive from the branch name, e.g. `goal/aestheticcnext-<id>` → `AestheticcNext-<id>`; a bundle/epic closes every child then the parent):
+
+~~~bash
+git -C "$SCRATCH" fetch origin main --quiet
+if git -C "$SCRATCH" merge-base --is-ancestor "$MERGE_SHA" origin/main; then
+  bd close "$BEAD_ID" --reason "landed via /land-batch $RUN_ID @ $MERGE_SHA (verified ancestor of origin/main)."
+  CLOSE_RESULT="closed"
+else
+  echo "HELD: $BEAD_ID pushed to main but $MERGE_SHA is not (yet) an ancestor — do not close, investigate before the next run." >&2
+  CLOSE_RESULT="held"
+fi
+~~~
+
+This ancestry check is intentionally redundant with `bd-close-guard` (`~/.claude/bin/bd`) — land-batch's own close is expected to always pass it, since the push just happened; if it ever doesn't, that is itself a signal something is wrong (a rejected/rebased push, a stale `$MERGE_SHA`) and the bead correctly stays `pushed`, not closed. A bead already sitting `closed` from before B-1 shipped (or a LUCY- vault bead) is left alone here.
+
+🔴 **B-2 (AI Fleet Grand Plan, 2026-09-01): post-land goal-state review, a different model family asking a different question than Phase 4 already did.** `/goal` Phase 4 (Codex, or GLM per B-10) already reviewed the DIFF — is this change sound. This is the SECOND, independent check, run only after a real close above, asking the GOAL-STATE question instead: does this bug-shape exist anywhere ELSE in the repo, fixed or not. This is exactly the check that would have caught `AestheticcNext-n708r`'s third unfixed copy at land time instead of three days later as a separately-filed `zrexy`. Only runs for a bead that was actually closed just now (skip entirely on HELD):
+
+~~~bash
+if [[ "$CLOSE_RESULT" == "closed" ]]; then
+  GLM_GOALSTATE_PROMPT="This fix landed at $MERGE_SHA (bead $BEAD_ID). Diff below. Enumerate every OTHER site in the repo that implements the same operation/state as this fix, and state for each whether the fix applies there too — i.e. does the same bug-shape still exist somewhere unfixed. Do NOT review the diff itself for correctness; a different reviewer already did that in /goal Phase 4. Answer ONLY the goal-state question: other sites, fixed or not, one line each. If there are none, say so plainly.
+
+DIFF:
+$(git -C "$SCRATCH" show "$MERGE_SHA")"
+
+  set +e
+  echo "$GLM_GOALSTATE_PROMPT" | glm review --cd "$SCRATCH" \
+    > "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>&1
+  GLM_GS_EXIT=$?
+  set -e
+
+  if [[ "$GLM_GS_EXIT" -ne 0 ]]; then
+    echo "GLM unreachable for post-land goal-state review of $BEAD_ID (exit $GLM_GS_EXIT) — falling back to Opus in-session: read $MERGE_SHA's diff yourself right now and answer the same goal-state question directly, don't skip this silently." >&2
+    # (Opus fallback is you, the orchestrating session, doing the read+answer inline —
+    # there is no separate CLI call for this leg, same as every other GLM-outage path.)
+  fi
+
+  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || echo 'opus, GLM unreachable')): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
+
+  # Any line naming a real, still-unfixed other site: auto-file a child bead rather
+  # than requiring a human to notice it in the comment. Same prefix as $BEAD_ID,
+  # type=bug, --parent "$BEAD_ID", priority inherited from $BEAD_ID. Read the
+  # goal-state review's own text to decide whether it actually found a real
+  # unfixed site (not "no other sites found") before filing — don't file a bead
+  # for a clean review.
+fi
+~~~
+
+Latency/budget note: this is one GLM call per CLOSED bead, not per candidate — a 20-branch LAND run with 15 closes is 15 calls. If that proves too slow/expensive in practice, batch multiple closed beads' diffs into one GLM call per land-batch run instead of one-per-bead, and say so plainly rather than silently skipping the check.
+
+If push is rejected because main moved, `git -C "$SCRATCH" fetch origin main` and
+`git -C "$SCRATCH" rebase --rebase-merges origin/main`, re-gate, retry. Abort/hold
+rebase conflicts. Never force-push. The no-ff merge message ties every land to
+RUN_ID. Every command in this retry stays scoped to `$SCRATCH` — same guardrail
+as Step 2's merge loop, for the same reason.
 
 #### Mandatory migration-batch transaction
 
@@ -622,7 +752,17 @@ python3 ~/.claude/skills/land-batch/bin/land-state.py ledger-append \
 ~~~
 
 This atomically updates ledger.json and pending-qa.md before tails can be pruned.
-LAND never touches staging. Clean scratch/branch after ledger writes, then release.
+LAND never touches staging. Clean scratch/branch after ledger writes, then release:
+
+~~~bash
+git -C "$REPO" worktree remove "$SCRATCH" --force
+git -C "$REPO" branch -D "land-batch/$RUN_ID"
+~~~
+
+This is the normal-completion path — the same convention (`land-batch-` worktree
+prefix, `land-batch/` branch prefix) that `land-state.py`'s orphan cleanup relies
+on for a *crashed* run, so a run that dies mid-Step-2/3 is still recoverable by
+that mechanism even though this explicit cleanup didn't get to run.
 
 ## SHIP mode
 
@@ -683,20 +823,31 @@ Severity remains locked:
 
 ### Step 6 — Codex fix loop and revert
 
-Keep three iterations; stop immediately on p0. For p1/p2 run Codex directly in a
-**fresh scratch off current origin/main**, scoped to offending files; surface any
-sensitive path. Commit atomically, then direct ff-push to main with the same
-fetch/rebase/re-gate/retry, never-force mechanics as LAND. Redeploy staging with
-both gates and re-run affected QA.
-
-If a feature cannot be clean, verify MERGE_SHA^2 exists (real --no-ff merge),
-then on fresh current-origin/main scratch:
+Keep three iterations; stop immediately on p0. Same guardrail as LAND Step 2:
+every command below runs inside an isolated worktree, never bare against
+`$REPO`. Each iteration gets its own:
 
 ~~~bash
-git revert -m 1 "$MERGE_SHA" --no-edit
-git push origin HEAD:main
+FIX_SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-fix$ITERATION"
+git -C "$REPO" worktree add "$FIX_SCRATCH" origin/main
+~~~
+
+For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files;
+surface any sensitive path. Commit atomically, then direct ff-push to main with
+the same fetch/rebase/re-gate/retry, never-force mechanics as LAND (all
+`-C "$FIX_SCRATCH"`). Redeploy staging with both gates and re-run affected QA.
+
+If a feature cannot be clean, verify MERGE_SHA^2 exists (real --no-ff merge),
+then inside a fresh `$FIX_SCRATCH` off current origin/main:
+
+~~~bash
+git -C "$FIX_SCRATCH" revert -m 1 "$MERGE_SHA" --no-edit
+git -C "$FIX_SCRATCH" push origin HEAD:main
 python3 ~/.claude/skills/land-batch/bin/land-state.py ledger-remove --merge-sha "$MERGE_SHA"
 ~~~
+
+Remove `$FIX_SCRATCH` (`git -C "$REPO" worktree remove "$FIX_SCRATCH" --force`)
+once its iteration is done, same as LAND's scratch cleanup.
 
 Apply the same rejected-push/rebase/re-gate rules. Ledger removal excludes the
 reverted feature from later SHIP runs. If p0 or residual p0–p2 after three loops,

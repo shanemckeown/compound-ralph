@@ -99,6 +99,97 @@ def agents():
         return []
 
 
+MANAGERS_DIR = os.path.expanduser("~/.claude/fleet/managers")
+
+
+def stale_manager_claims(fleet):
+    """Manager-tab work claims (fleet-role.py's per-work-id markers, distinct
+    from the headless agent_view fleet this file otherwise triages) whose
+    claiming session is no longer live.
+
+    🔴 Added 2026-09-04, after H-6 — the single largest remaining piece of the
+    whole master plan — sat with a void claim for ~11 hours undetected. The
+    claim mechanism itself already self-heals correctly (fleet-role.py catches
+    a dead session's claim instantly on liveness check); the gap was that
+    nothing polled for it. This is that poll, folded into the same triage pass
+    Shane already runs via /morning rather than a new thing to remember."""
+    live_ids = {a.get("sessionId") for a in fleet if a.get("sessionId")}
+    now = time.time()
+    stale = []
+    for path in glob.glob(os.path.join(MANAGERS_DIR, "*.json")):
+        try:
+            with open(path) as fh:
+                rec = json.load(fh)
+        except Exception:
+            continue
+        sid = rec.get("session_id")
+        if not sid or sid in live_ids:
+            continue
+        claimed_at = rec.get("claimed_at")
+        age_days = None
+        if claimed_at:
+            try:
+                ts = time.mktime(time.strptime(claimed_at, "%Y-%m-%dT%H:%M:%SZ"))
+                age_days = round((now - ts) / 86400, 1)
+            except Exception:
+                pass
+        stale.append({
+            "work_id": rec.get("work_id") or os.path.splitext(os.path.basename(path))[0],
+            "held_by_name": rec.get("name"), "held_by_session": sid,
+            "claimed_at": claimed_at, "age_days": age_days,
+            "handoff_doc_path": rec.get("handoff_doc_path"),
+        })
+    stale.sort(key=lambda r: -(r["age_days"] or 0))
+    return stale
+
+
+MECHANISM_LIVENESS_SCRIPT = os.path.join(REPO, "scripts", "ops", "mechanism-liveness.mjs")
+
+
+def mechanism_liveness():
+    """Read-only nightly check for a configured automation/scheduler/loyalty
+    mechanism that is enabled, has an eligible population, but produced ZERO
+    observed effects in the last 30 days (AestheticcNext-ndyla).
+
+    Best-effort and degrading: this must never break the fleet triage this
+    file exists for. Any failure (script missing, DB proxy down, gcloud not
+    authed) collapses to a single skipped/errored line, never an exception
+    that takes the rest of the report down with it — the same posture as
+    every other section here (stale_manager_claims, landed()) already takes.
+    """
+    if not os.path.exists(MECHANISM_LIVENESS_SCRIPT):
+        return {"error": f"script not found: {MECHANISM_LIVENESS_SCRIPT}", "alerts": []}
+    try:
+        r = subprocess.run(
+            ["node", MECHANISM_LIVENESS_SCRIPT, "--json"],
+            capture_output=True, text=True, timeout=120, cwd=REPO,
+        )
+    except Exception as e:
+        return {"error": f"could not run: {e}", "alerts": []}
+
+    if not r.stdout.strip():
+        detail = (r.stderr or "").strip().splitlines()
+        return {"error": detail[-1] if detail else f"no output (exit {r.returncode})", "alerts": []}
+
+    try:
+        payload = json.loads(r.stdout)
+    except Exception as e:
+        return {"error": f"could not parse output: {e}", "alerts": []}
+
+    alerts = []
+    for result in payload.get("results", []):
+        if result.get("skipped"):
+            alerts.append({"skipped": True, "mechanism": result.get("id"), "detail": result["skipped"]})
+            continue
+        for v in result.get("violations", []):
+            alerts.append({
+                "skipped": False, "mechanism": result.get("id"), "code": v.get("code"),
+                "business_name": v.get("business_name"), "business_id": v.get("business_id"),
+                "detail": v.get("detail"),
+            })
+    return {"error": None, "alerts": alerts}
+
+
 def transcript(session_id):
     hits = glob.glob(f"{PROJECTS}/*/{session_id}.jsonl")
     return hits[0] if hits else None
@@ -184,9 +275,15 @@ def main():
         })
 
     findings.sort(key=lambda f: -f["age_days"])
+    stale_managers = stale_manager_claims(fleet)
+    mech_liveness = mechanism_liveness()
 
     if as_json:
-        print(json.dumps(findings, indent=2))
+        print(json.dumps({
+            "findings": findings, "stale_manager_claims": stale_managers,
+            "mechanism_liveness_alerts": mech_liveness["alerts"],
+            "mechanism_liveness_error": mech_liveness["error"],
+        }, indent=2))
         return
 
     interactive = [a for a in fleet if a.get("kind") == "interactive"]
@@ -211,6 +308,42 @@ def main():
                 print(f"          ├ branch {f['branch']}: {f['landed']}")
             print(f"          └ {f['last_turn'][:140]}")
         print()
+
+    if stale_managers:
+        print(f"── STALE MANAGER CLAIMS ({len(stale_managers)}) — claiming session is dead; "
+              "work may be silently stalled\n"
+              "   Reclaim: fleet-role.py manager <work-id> <new-session-id> --claim --steal "
+              "[--handoff-doc PATH]")
+        for m in stale_managers:
+            age = f"{m['age_days']:.1f}d" if m["age_days"] is not None else "age unknown"
+            print(f"   {age:>8s}  {m['work_id']:44s} held by {m['held_by_name'] or '(unnamed)'} "
+                  f"({m['held_by_session'][:8] if m['held_by_session'] else '?'})")
+            if m.get("handoff_doc_path"):
+                print(f"          └ {m['handoff_doc_path']}")
+        print()
+
+    real_alerts = [a for a in mech_liveness["alerts"] if not a.get("skipped")]
+    skipped_checks = [a for a in mech_liveness["alerts"] if a.get("skipped")]
+    if mech_liveness["error"]:
+        print(f"MECHANISM LIVENESS CHECK DID NOT RUN: {mech_liveness['error']}\n")
+    elif real_alerts:
+        print(f"── MECHANISM LIVENESS ALERTS ({len(real_alerts)}) — enabled mechanism, "
+              "eligible population, zero effects in 30d (AestheticcNext-ndyla)")
+        for a in real_alerts:
+            name = a.get("business_name") or "(n/a)"
+            bid = f" ({a['business_id']})" if a.get("business_id") else ""
+            print(f"   [{a['mechanism']}] {name}{bid} - {a['detail']}")
+        if skipped_checks:
+            for s in skipped_checks:
+                print(f"   [{s['mechanism']}] SKIPPED — {s['detail']}")
+        print()
+    elif skipped_checks:
+        print("── MECHANISM LIVENESS: no alerts, but some checks were skipped")
+        for s in skipped_checks:
+            print(f"   [{s['mechanism']}] SKIPPED — {s['detail']}")
+        print()
+    else:
+        print("── MECHANISM LIVENESS: clean — no enabled+eligible mechanism found with zero effects\n")
 
     orphans = sum(1 for f in findings if not f["in_manifest"])
     if orphans:

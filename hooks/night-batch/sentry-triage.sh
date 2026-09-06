@@ -103,7 +103,7 @@ fi
 if [[ -n "$slack_text" ]]; then
   if [[ -f "$SLACK_BOT_ENV" ]]; then
     SLACK_BOT_TOKEN=$(grep -E '^SLACK_BOT_TOKEN=' "$SLACK_BOT_ENV" 2>/dev/null \
-      | head -1 | cut -d= -f2- | sed -E 's/^["'\'']?(.*)["'\'']?$/\1/' || true)
+      | head -1 | cut -d= -f2- | sed -E 's/^["'\'']//; s/["'\'']$//' || true)
     if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
       PAYLOAD=$(printf '%s\n%s\n' "$SLACK_USER" "$slack_text" \
         | python3 -c '

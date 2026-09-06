@@ -4,9 +4,11 @@
 Does two jobs that were previously left to discipline and kept getting skipped:
 
 1. THE PRE-DISPATCH VALIDATOR, AS A GATE THAT REFUSES.
-   `Aestheticc/CLAUDE.md` lists three mandatory pre-dispatch checks and notes
-   they are "prose enforced by discipline, which is why they get skipped" —
-   twice in one session, at real cost. They are enforced here instead.
+   `Aestheticc/CLAUDE.md` lists mandatory pre-dispatch checks and notes they are
+   "prose enforced by discipline, which is why they get skipped" — twice in one
+   session, at real cost. They are enforced here instead. A single-bead /goal
+   also requires the explicit `headless-eligible` label; epic /long-goal runs
+   its own per-child scoping-quality gate instead.
 
 2. THE DISPATCH MANIFEST.
    `claude --bg` returns no session id, `ListAgents` under-reports, and session
@@ -24,8 +26,9 @@ Usage:
   fleet-dispatch.py <epic-id> --epic       # /long-goal <epic-id>
   fleet-dispatch.py <bead-id> --dry-run    # run the gate, dispatch nothing
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
+  fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
 """
-import json, os, re, subprocess, sys, time, datetime
+import io, json, os, re, subprocess, sys, time, datetime
 
 SLOTS = os.path.expanduser("~/.claude/scripts/fleet-slots.py")
 
@@ -91,14 +94,25 @@ def check_no_inflight_work(bead):
 BEAD_RE = re.compile(r"\b((?:AestheticcNext|LUCY)-[a-z0-9.]+)\b", re.I)
 
 
+STATUS_BRACKET_RE = re.compile(r"\[[^\[\]]*\]\s*$")
+
+
 def bead_status(bead):
-    """`bd show`'s first line carries the status: `... [● P1 · CLOSED]`."""
+    """`bd show`'s first line carries the status in a trailing bracket:
+    `... [● P1 · CLOSED]`. Match only inside that bracket — the title text
+    itself (e.g. a bead whose title literally says "bead closed but X is
+    missing") can otherwise false-positive a substring search over the whole
+    line. Found 2026-08-29 dispatching fleet-backlog-cleanup beads titled
+    with findings like that; every one of them false-triggered "already
+    CLOSED" even though bd show's own status marker said OPEN."""
     code, out, _ = sh(f"bd show {bead}", cwd=REPO, bead=bead)
     if code != 0 or not out:
         return None, out
     first = out.splitlines()[0]
+    match = STATUS_BRACKET_RE.search(first)
+    bracket = match.group(0) if match else first
     for state in ("CLOSED", "IN_PROGRESS", "OPEN", "BLOCKED"):
-        if state in first.upper():
+        if state in bracket.upper():
             return state, out
     return "UNKNOWN", out
 
@@ -173,8 +187,58 @@ def check_epic_has_children(bead):
     return []
 
 
+FILE_PATH_RE = re.compile(r"[\w./-]+\.\w{1,5}(:\d+)?")
+
+
+def check_headless_eligible(bead, diagnostic_output=None):
+    """Check 4 (added 2026-08-27): refuse a single-bead /goal dispatch unless the bead is
+    explicitly tagged `headless-eligible`. Mirrors the existing `auto-eligible` label
+    convention (a DIFFERENT label with a different meaning — auto-eligible gates the
+    unsupervised Sentry/night-batch pipeline; headless-eligible gates whether THIS bead is
+    scoped enough for a Worker /goal session at all, per CLAUDE.md's Manager/Worker split).
+    Explicit opt-in only — never auto-inferred, so a heuristic misfire can't silently let an
+    open-ended bead through. See AestheticcNext-fgxkg (2026-08-27): a genuinely novel,
+    multi-day, open-question-bearing bead got headless-dispatched 3x anyway."""
+    code, out, err = sh(f"bd show {bead} --json", cwd=REPO, bead=bead)
+    if code != 0 or not out:
+        detail = err or out or "no output"
+        return [f"`bd show {bead} --json` failed — cannot verify the required "
+                f"'headless-eligible' label: {detail}"]
+    try:
+        records = json.loads(out)
+        record = records[0] if isinstance(records, list) and records else None
+    except Exception as exc:
+        return [f"`bd show {bead} --json` returned invalid JSON — cannot verify the required "
+                f"'headless-eligible' label: {exc}"]
+    if not isinstance(record, dict):
+        return [f"`bd show {bead} --json` did not return a one-object array — cannot verify "
+                f"the required 'headless-eligible' label"]
+
+    labels = record.get("labels") or []
+    if "headless-eligible" in labels:
+        return []
+
+    acceptance = record.get("acceptance_criteria") or ""
+    scope_text = "\n".join((record.get("description") or "", acceptance))
+    diagnostics = [
+        f"acceptance_criteria is empty: {'YES' if not acceptance.strip() else 'NO'}",
+        f"description + acceptance_criteria cites a file path: "
+        f"{'YES' if FILE_PATH_RE.search(scope_text) else 'NO'}",
+    ]
+    diagnostic_output = sys.stdout if diagnostic_output is None else diagnostic_output
+    for diagnostic in diagnostics:
+        print(f"   ↳ diagnostic (not blocking): {diagnostic}", file=diagnostic_output)
+    return [
+        f"bead is not tagged 'headless-eligible' — /goal cannot run this headless. Either: "
+        f"(a) if it's genuinely a small, pre-scoped, no-open-design-decisions task, tag it: "
+        f"bd tag {bead} headless-eligible, then re-run; or (b) open a Manager tab and run "
+        f"/take instead — see Aestheticc/CLAUDE.md 'Orchestrator vs sub-Claude'.",
+    ]
+
+
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
+    headless_diagnostics = None
     results = {
         "0 bead is dispatchable": check_bead_is_dispatchable(bead),
         "1 no in-flight work": check_no_inflight_work(bead),
@@ -182,11 +246,16 @@ def run_gate(bead, is_epic):
     }
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
+    else:
+        headless_diagnostics = io.StringIO()
+        results["4 headless eligible"] = check_headless_eligible(bead, headless_diagnostics)
     failed = False
     for name, problems in results.items():
         if problems:
             failed = True
             print(f"   ✗ {name}")
+            if name == "4 headless eligible" and headless_diagnostics is not None:
+                print(headless_diagnostics.getvalue(), end="")
             for p in problems:
                 print(f"       {p}")
         else:
@@ -221,7 +290,7 @@ def dispatch(bead, is_epic, dispatched_by):
         print("     Without it the worker would silently fall back to the FULL global")
         print("     MCP set — 6 servers + 2 SSH tunnels it does not use. Restore the")
         print("     file (see ~/.claude/mcp-tiers/README.md) and re-run.")
-        sys.exit(1)
+        return None
 
     cmd = (f'claude --bg --name "{bead}" '
            f'--mcp-config "{TIER_A_MCP}" --strict-mcp-config '
@@ -294,20 +363,27 @@ def main():
     is_epic = "--epic" in flags
     force = "--force" in flags
     dry = "--dry-run" in flags
+    pre_claimed = "--pre-claimed" in flags
     dispatched_by = os.environ.get("CLAUDE_SESSION_NAME", "unknown")
 
     failed, failures = run_gate(bead, is_epic)
 
     if failed and not force:
         print(f"\n🔴 REFUSED. {bead} is not dispatchable.")
-        print("   These are the three checks CLAUDE.md already requires; skipping them has")
-        print("   burned real time twice in one session. Fix the cause, or re-run with --force")
+        print("   These are the dispatch checks CLAUDE.md requires, including explicit")
+        print("   headless eligibility for single beads. Fix the cause, or re-run with --force")
         print("   (which dispatches anyway and records the override in the manifest).")
+        if pre_claimed:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print("   ✓ released pre-claimed Agent View slot after gate refusal.")
         sys.exit(1)
     if failed and force:
         print("\n⚠ gate failed but --force given — dispatching and recording the override.")
     if dry:
         print("\n--dry-run: gate only, nothing dispatched.")
+        if pre_claimed:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print("   ✓ released pre-claimed Agent View slot; dry-run started no session.")
         sys.exit(0)
 
     # 🔴 Concurrency gate (added 2026-08-23). Total fleet load — Agent View sessions
@@ -318,15 +394,16 @@ def main():
     # the Agent View half of that budget (5 of 11 total) a real refusal instead of
     # prose. See ~/.claude/scripts/fleet-slots.py for the full design and the other
     # half (Codex/GLM claiming, Jest maxWorkers) that shares this budget.
-    claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
-    if claim[0] != 0:
-        sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
-        print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
-        print(f"   Run `python3 {SLOTS} status` to see current load.")
-        print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
-        print(f"   closing phase releases its own slot and dispatches the next queued")
-        print(f"   bead automatically — no polling needed).")
-        sys.exit(3)
+    if not pre_claimed:
+        claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
+        if claim[0] != 0:
+            sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
+            print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
+            print(f"   Run `python3 {SLOTS} status` to see current load.")
+            print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
+            print(f"   closing phase releases its own slot and dispatches the next queued")
+            print(f"   bead automatically — no polling needed).")
+            sys.exit(3)
 
     session = dispatch(bead, is_epic, dispatched_by)
     if session:
