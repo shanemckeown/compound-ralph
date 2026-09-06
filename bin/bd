@@ -161,9 +161,19 @@ candidate_tokens_from() {
 # Resolve a raw token (short prefix, full ID, whatever) to its canonical
 # AestheticcNext-<id> form via the real bd's own resolver. Empty output if
 # it isn't a real, resolvable bead (reason text, "closed", flag values, …).
+#
+# AestheticcNext-bqe8a: the real bd's own `show --json` does substring-
+# ANYWHERE fuzzy matching (e.g. `bd show via --json` resolves to
+# AestheticcNext-4uvia purely because "via" occurs inside the slug "4uvia").
+# Reason text routinely contains ordinary words like "via" ("confirmed via
+# CI", "landed via branch-tip check"), so a defense-in-depth check below
+# rejects any resolution where the token isn't the canonical id itself,
+# isn't the bare slug, and isn't a genuine PREFIX of the slug -- never a
+# substring found anywhere inside it.
 resolve_canonical_id() {
   local token="$1"
-  "$REAL_BD" show "$token" --json 2>/dev/null | python3 -c '
+  local canon
+  canon="$("$REAL_BD" show "$token" --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -172,7 +182,12 @@ try:
     print(d.get("id",""))
 except Exception:
     pass
-' 2>/dev/null
+' 2>/dev/null)"
+  [[ -z "$canon" ]] && return 0
+  local slug="${canon##*-}"
+  if [[ "$token" == "$canon" || "$token" == "$slug" || "$slug" == "$token"* ]]; then
+    printf '%s\n' "$canon"
+  fi
 }
 
 GATE_RESOLVED_ANY=0
@@ -200,12 +215,18 @@ gate_ids() {
 
 case "$subcmd" in
   close|done)
-    gate_ids $(candidate_tokens_from 1)
+    # AestheticcNext-bqe8a: mapfile preserves each candidate_tokens_from
+    # line (including a multi-word --reason value) as ONE array element --
+    # the prior unquoted `gate_ids $(...)` word-split every line on
+    # whitespace too, turning "verified via CI" into 3 separate candidates.
+    mapfile -t __gate_tokens < <(candidate_tokens_from 1)
+    gate_ids "${__gate_tokens[@]}"
     [[ "$GATE_RESOLVED_ANY" != "1" ]] && refuse_no_explicit_id "bd $subcmd"
     ;;
   update)
     if sets_status_closed; then
-      gate_ids $(candidate_tokens_from 1)
+      mapfile -t __gate_tokens < <(candidate_tokens_from 1)
+      gate_ids "${__gate_tokens[@]}"
       [[ "$GATE_RESOLVED_ANY" != "1" ]] && refuse_no_explicit_id "bd update --status closed"
     fi
     ;;
