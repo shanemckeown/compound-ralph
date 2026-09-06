@@ -342,6 +342,141 @@ def _cleanup_orphan_worktree(holder: dict[str, Any] | None, repo: str | None) ->
     return actions
 
 
+def _existing_worktree_branches(repo: str) -> dict[str, str]:
+    """Map local branch name -> attached worktree path, from ``worktree list``."""
+    code, stdout, _ = _run_git(repo, ["worktree", "list", "--porcelain"])
+    if code != 0:
+        return {}
+    branches: dict[str, str] = {}
+    current_path: str | None = None
+    for line in stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):].strip()
+        elif line.startswith("branch ") and current_path:
+            ref = line[len("branch "):].strip()
+            if ref.startswith("refs/heads/"):
+                branches[ref[len("refs/heads/"):]] = current_path
+    return branches
+
+
+def recreate_worktrees(repo: str, report: dict[str, Any]) -> dict[str, Any]:
+    """Mechanically satisfy Hard guardrail 7's worktree precondition.
+
+    For every candidate ``discover.sh`` already rendered as **HELD —
+    branch-only completion; premise review required**
+    (``finish_signal == "held-branch-only-premise-review"``), recreate the
+    worktree Shane would otherwise add by hand (AestheticcNext-blmku). That
+    finish_signal, by construction in ``discover.sh``'s ``finish_gate()``, is
+    only reachable once every other axis already passed: bead exact/alias
+    resolved + CLOSED, tip pinned, patch-unique, session inactive, not
+    conflicting, not stale, not sensitive, not retired — any of those would
+    have produced a *different* finish_signal instead. So filtering on this
+    one field already is "meets every other finish-evidence axis"; nothing
+    else needs re-checking here.
+
+    This changes nothing about WHAT gets landed. It only lets a following
+    ``discover.sh`` pass reclassify the candidate as ``source_kind=worktree``
+    so the existing, unmodified worktree finish gate evaluates it for real
+    (actual on-disk cleanliness, actual ahead/behind) instead of trusting
+    remote-only heuristics — the same reclassification Shane's manual
+    ``git worktree add`` + re-run already produced by hand. No guardrail is
+    bypassed: a candidate that the worktree gate still holds afterwards (say,
+    the base moved between passes) is held again, under its own correct
+    reason, exactly as before.
+
+    Never clobbers: skips (does not mutate) whenever a worktree already
+    exists for the branch, the target path exists but isn't a worktree, the
+    pinned source has moved or gone missing, or a stale same-named local
+    branch already points somewhere else.
+    """
+    candidates = report.get("candidates") if isinstance(report, dict) else None
+    candidates = candidates if isinstance(candidates, list) else []
+    qualifying = [
+        c
+        for c in candidates
+        if isinstance(c, dict)
+        and c.get("source_kind") == "remote-branch"
+        and c.get("finish_signal") == "held-branch-only-premise-review"
+    ]
+    result: dict[str, Any] = {"recreated": [], "skipped": [], "errors": []}
+    if not qualifying:
+        return result
+    if not repo:
+        result["errors"].append({"branch": None, "reason": "repo not supplied"})
+        return result
+
+    existing_by_branch = _existing_worktree_branches(repo)
+    # Deliberately NOT prefixed "land-batch-": that prefix is reserved for
+    # LAND's own scratch — _cleanup_orphan_worktree force-removes any path
+    # with it recorded as a dead run's scratch_path, which would make a
+    # healthy recreated worktree vulnerable to that cleanup.
+    worktrees_dir = Path(repo) / ".claude" / "worktrees"
+
+    for candidate in qualifying:
+        branch = candidate.get("branch")
+        source_ref = candidate.get("source_ref")
+        tip_sha = candidate.get("tip_sha")
+        if not branch or not source_ref or not tip_sha:
+            result["errors"].append(
+                {"branch": branch, "reason": "candidate missing branch/source_ref/tip_sha"}
+            )
+            continue
+
+        if branch in existing_by_branch:
+            result["skipped"].append(
+                {"branch": branch, "reason": "already-worktree", "path": existing_by_branch[branch]}
+            )
+            continue
+
+        # Re-verify the pinned source hasn't moved since discover.sh ran —
+        # the same check Step 2's merge loop makes immediately before merge,
+        # via verify-pinned-source.sh.
+        verify_code, current_sha, verify_err = _run_git(
+            repo, ["rev-parse", "--verify", "--quiet", f"{source_ref}^{{commit}}"]
+        )
+        if verify_code != 0 or not current_sha:
+            result["skipped"].append({"branch": branch, "reason": "source-missing", "detail": verify_err})
+            continue
+        if current_sha != tip_sha:
+            result["skipped"].append(
+                {"branch": branch, "reason": "source-moved", "expected": tip_sha, "actual": current_sha}
+            )
+            continue
+
+        path = worktrees_dir / branch.replace("/", "-")
+        if path.exists():
+            result["skipped"].append(
+                {"branch": branch, "reason": "path-exists-not-a-worktree", "path": str(path)}
+            )
+            continue
+
+        local_code, local_sha, _ = _run_git(
+            repo, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}"]
+        )
+        if local_code == 0 and local_sha:
+            if local_sha != tip_sha:
+                result["skipped"].append(
+                    {
+                        "branch": branch,
+                        "reason": "local-branch-diverged",
+                        "local_sha": local_sha,
+                        "tip_sha": tip_sha,
+                    }
+                )
+                continue
+            add_code, _, add_err = _run_git(repo, ["worktree", "add", str(path), branch])
+        else:
+            add_code, _, add_err = _run_git(repo, ["worktree", "add", str(path), "-b", branch, tip_sha])
+
+        if add_code != 0:
+            result["errors"].append({"branch": branch, "reason": "worktree-add-failed", "detail": add_err})
+            continue
+
+        result["recreated"].append({"branch": branch, "path": str(path), "tip_sha": tip_sha})
+
+    return result
+
+
 def read_ledger(state_dir: Path | None = None) -> dict[str, Any]:
     raw = read_json(paths(state_dir)["ledger"], default={})
     if not isinstance(raw, dict):
@@ -1017,6 +1152,13 @@ def build_parser() -> argparse.ArgumentParser:
     kickback_fix_branch = sub.add_parser("kickback-fix-branch")
     kickback_fix_branch.add_argument("--original-branch", required=True)
     kickback_fix_branch.add_argument("--fix-branch", required=True)
+    recreate = sub.add_parser("recreate-worktrees")
+    recreate.add_argument("--repo", required=True)
+    recreate.add_argument(
+        "--discover-json",
+        required=True,
+        help="Path to a discover.sh JSON report, or '-' to read stdin",
+    )
     return parser
 
 
@@ -1101,6 +1243,16 @@ def main(argv: list[str] | None = None) -> int:
         if result is None:
             print(f"unknown kickback lineage: {args.original_branch}", file=sys.stderr)
             return 1
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
+    if args.command == "recreate-worktrees":
+        raw = sys.stdin.read() if args.discover_json == "-" else Path(args.discover_json).read_text(encoding="utf-8")
+        try:
+            report = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"invalid discover.json: {exc}", file=sys.stderr)
+            return 1
+        result = recreate_worktrees(args.repo, report)
         print(json.dumps(result, separators=(",", ":")))
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
