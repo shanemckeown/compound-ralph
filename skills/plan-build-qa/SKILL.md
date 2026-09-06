@@ -67,7 +67,19 @@ Invoked via `codex` CLI v0.125.0+ (`codex --version` to confirm).
 run the concrete test/QA command(s) derived from PLAN.md and the project context;
 capture the exact command text, combined output, and exit code as separate files.
 If no runnable validation command exists, or any artifact is missing/empty, QA
-cannot PASS. "Suite did not run" is a failure, never a pass.
+cannot PASS. "Suite did not run" is incomplete QA, never a pass. Memory
+admission exit 75 is deferred capacity, not a failing test or code defect.
+
+**Memory admission (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts only after verifying they invoke `gated-test-run.py`. In older
+worktrees use `python3 ~/.claude/scripts/gated-test-run.py jest <args>` or
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
+root. Full-project tsc keeps its 6144 MiB heap. Never wrap an already guarded
+package command (double reservation). **Exit 75 means NOT RUN, not a test failure
+or pass: preserve command/output/exit evidence, defer QA and retry later; never
+fall back to raw Jest/tsc or bypass admission.** Watch is interactive only.
+When QA_EXIT is 75, do not launch the reviewer, consume a fix iteration,
+change code, or report a failing suite; keep the work pending for admission.
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -75,7 +87,7 @@ EVIDENCE_DIR="$HOME/.claude/evidence/plan-build-qa/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
 
 # Replace this with the project/PLAN.md validation commands for this run.
-QA_COMMAND='npm run typecheck && npm run lint && npm run test'
+QA_COMMAND='python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint && python3 ~/.claude/scripts/gated-test-run.py jest'
 printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command.txt"
 set +e
 {

@@ -323,12 +323,12 @@ Detail: `feedback_dont_over_gate_user_responsible_features`.
 **Bundle:** implement child plans in the order from BUNDLE.md. **One commit per child**, each commit message referencing its child bead ID. All commits on the same feature branch.
 
 After each child commits, run quick checks per repo:
-- Code repo (AestheticcNext): `npx tsc --noEmit && npx next lint` (scoped to changed files where possible)
+- Code repo (AestheticcNext): `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint` (full-project typecheck; scope lint where supported)
 - Vault: skip
 
 If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed to the next child until the current one is green.
 
-If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first (per `feedback_husky_tsc_cold_cache.md`).
+If Husky pre-push tsc hangs cold: warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` first (per `feedback_husky_tsc_cold_cache.md`).
 
 ### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
 
@@ -340,11 +340,22 @@ and exit code. For AestheticcNext the default is shown below; for another repo,
 derive runnable validation commands from its project instructions and PLAN.md.
 If there is no runnable command, the round cannot PASS.
 
+**Memory admission (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts only after verifying they invoke `gated-test-run.py`. In older
+worktrees use `python3 ~/.claude/scripts/gated-test-run.py jest <args>` or
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
+root. Full-project tsc keeps its 6144 MiB heap. Never wrap an already guarded
+package command (double reservation). **Exit 75 means NOT RUN, not a test failure
+or pass: preserve command/output/exit evidence, defer QA and retry later; never
+fall back to raw Jest/tsc or bypass admission.** Watch is interactive only.
+When QA_EXIT is 75, do not launch the reviewer, consume a fix iteration,
+change code, or report a failing suite; keep the work pending for admission.
+
 ```bash
 : "${RUN_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 EVIDENCE_DIR="$HOME/.claude/evidence/goal/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
-QA_COMMAND='npm run typecheck && npm run lint && npm run test'
+QA_COMMAND='python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint && python3 ~/.claude/scripts/gated-test-run.py jest'
 printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command-round-N.txt"
 set +e
 {
@@ -737,7 +748,7 @@ Not supported in /goal itself. /goal runs synchronously inside a fresh /agent ch
 
 1. **Codex output is dual-formatted.** Extract between `^codex$` and `^tokens used$` markers per `feedback_plan_build_qa.md`.
 2. **`bd` commands fail silently in worktrees.** Phase 0a handles the per-prefix BEADS_DIR routing. If `bd show` still returns empty, that's the cause.
-3. **Husky pre-push tsc hangs cold.** Per `feedback_husky_tsc_cold_cache.md`, warm via `bun run typecheck` before /ship.
+3. **Husky pre-push tsc hangs cold.** Per `feedback_husky_tsc_cold_cache.md`, warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` before /ship.
 4. **Plan disagrees with what bead actually wants.** Re-read the bead description before each phase. Don't drift onto a different problem.
 5. **Bundle Phase 4 finding maps to a single child.** When QA returns a finding, identify which child's commit introduced it (via `git log --diff-filter=M <file>`), fix in a fixup commit referencing that child's bead ID.
 6. **Estimated LOC missing from bead.** Trust the bead. Proceed. Phase 0f will catch it if reality is much bigger than implied.
