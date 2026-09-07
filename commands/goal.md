@@ -402,9 +402,27 @@ set +e
 
 🔴 **B-10 (AI Fleet Grand Plan, 2026-09-01): GLM is the primary Phase 4 reviewer, Codex is the fallback.** Shane's decision — GLM (`glm review`) is the cheap-first resource (~£80/mo flat-rate vs ~£200/mo Codex+Claude combined), not the fallback. Codex only runs when `glm review` itself exits non-zero (a genuine call failure — auth/network against z.ai — same GLM-outage doctrine as everywhere else in `CLAUDE.md`). A clean GLM run that found nothing wrong still exits 0 with a PASS verdict; that is NOT a fallback trigger.
 
+🔴 **Fixed 2026-09-07 (AestheticcNext-s88u9): `glm`'s arg parser never reads the prompt from
+stdin — it takes it as a POSITIONAL argument, so `glm review --cd DIR < file` hit `glm`'s own
+usage-error path (exit 1) and every dispatch silently fell through to the Codex fallback below,
+never actually invoking GLM. Pass the prompt file as a positional argument instead — `glm`
+detects an existing regular-file argument and reads its content (see `~/.local/bin/glm`'s
+file-detection block), so this works even though `qa-prompt-round-N.txt` routinely exceeds the
+~1MB `ARG_MAX` that inlining its content directly (`"$(cat file)"`) would blow past.
+🔴 **A second, independent bug hides behind the first — don't stop at the positional-arg fix.**
+`glm`'s default `-o` result path is `/tmp/glm-<mode>-<pid>.txt`, which the Bash tool's sandbox
+does NOT allow writing to (only `/tmp/claude`, `/private/tmp/claude`, `$TMPDIR` etc. are
+allowlisted — see the sandbox filesystem config). Under a sandboxed `/goal` dispatch this makes
+`glm`'s own `| tee "$OUT"` fail with `Operation not permitted`, which — because `tee` is the
+last stage of that pipeline — makes `$GLM_EXIT` non-zero even though the actual GLM review
+succeeded and is sitting correctly in `$EVIDENCE_DIR/glm-verdict-round-N.log` via the outer
+redirect. Left unfixed, this reproduces the exact silent-fallback symptom this bead exists to
+kill, just one layer deeper. Passing `-o` explicitly at a path already in the sandbox allowlist
+(`$EVIDENCE_DIR`, under `~/.claude/evidence`) avoids it entirely.**
+
 ```bash
 set +e
-glm review --cd "$(pwd)" < "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+glm review --cd "$(pwd)" -o "$EVIDENCE_DIR/glm-raw-round-N.txt" "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
   > "$EVIDENCE_DIR/glm-verdict-round-N.log" \
   2> "$EVIDENCE_DIR/glm-stderr-round-N.log"
 GLM_EXIT=$?
