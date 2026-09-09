@@ -380,12 +380,24 @@ Treat it exactly like guardrail 5's other HOLD categories: preserve the log,
 do not touch the file to "fix" it yourself, surface it in the final
 HELD/BLOCKED report.
 
-For each merge that passes both checks, run typecheck, lint,
-and Jest scoped to **that feature's changed files**. Derive files from the merge
-and use package-supported scoped typecheck/lint plus Jest --findRelatedTests
-<files>, or Jest --changedSince=origin/main where that is the narrower accurate
-form. Never run full Jest in LAND. Save separate command, raw output, and numeric
-exit-code artifacts under scoped-gate-<branch>-*.
+For each merge that passes both checks, run full-project typecheck via
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
+and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
+for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
+narrower and accurate). Never run full Jest in LAND. Save separate command,
+raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
+
+**Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
+root in older worktrees. The wrapper only sizes the V8 heap and worker count
+(full-project tsc keeps its 6144 MiB heap). **Memory admission is advisory and the
+command ALWAYS runs** — it never defers, never waits, never holds, and never
+returns exit 75 for capacity. Treat the wrapper's exit code as the underlying
+Jest/tsc exit code and nothing else; a nonzero exit is a real failure, so triage
+it rather than retrying later. Shane, 2026-09-09: "this needs fixed completely
+right now, for all memory guardrails we have, the experiment has failed" (fix
+landed on AestheticcNext main as 2ac04210c). Watch mode is interactive only.
 
 Any red/missing/malformed artifact means:
 
@@ -730,15 +742,16 @@ turn. Empty ledger means report/release; do not deploy.
 
 ### Step 4 — Fresh scratch and detached full Jest
 
-Create fresh scratch at current origin/main. Run typecheck/lint with full
-evidence. Run full Jest **once**, detached so V8 heap OOM kills the subprocess,
+Create fresh scratch at current origin/main. Run
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` and `npm run lint`
+with full evidence. Run full Jest **once**, detached so V8 heap OOM kills the subprocess,
 not Claude's Node process:
 
 ~~~bash
 FULL_LOG="$EVIDENCE_DIR/full-jest.log"
 FULL_EXIT="$EVIDENCE_DIR/full-jest.exit"
 nohup bash -o pipefail -c '
-  npm run test
+  python3 ~/.claude/scripts/gated-test-run.py jest
   code=$?
   printf "%s\n" "$code" > "$1"
   exit "$code"
@@ -747,8 +760,9 @@ printf '%s\n' "$!" > "$EVIDENCE_DIR/full-jest.pid"
 ~~~
 
 Poll log and exit file; do not foreground-wait. Save command, PID, poll evidence,
-full log, and parsed exit. Missing/malformed exit, dead child without zero, or
-nonzero is red. Do not deploy. This is the one full Jest run.
+full log, and parsed exit. Missing/malformed exit, a dead child without zero, or
+ANY nonzero exit is red.
+Do not deploy. This is the one full Jest run.
 
 ### Step 5 — One staging deploy, then full ledger QA
 

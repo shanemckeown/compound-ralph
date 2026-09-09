@@ -185,7 +185,46 @@ save/persist action, confirm PLAN.md names the new `promise_inventory.jsonl` row
    that history the instant this ran. `bd comment` is append-only; use it for anything
    that isn't meant to overwrite. See `reference_bd_update_notes_replaces_use_comment`.
 
-### Phase 2 — Plan (Opus, in-context)
+### Phase 2 — Plan (Opus, in-context) — or Astra, under the standing override
+
+🔴 **Check FIRST, before anything else in Phase 2: is the Astra-primary override active?**
+Read `Aestheticc/CLAUDE.md` and check whether the section header
+`🔴🔴 ACTIVE OVERRIDE (Shane, 2026-09-06): Astra-primary mode` is still present and not
+marked reverted. **This check has been missing since the override was declared — every
+`/goal` dispatch until now ran Phase 2/3 as plain Opus regardless, which is why the
+override existed in CLAUDE.md's prose but never actually happened.** Do not skip this
+check silently again.
+
+**If the override is active**, skip the rest of Phase 2 and all of Phase 3 as written below.
+Instead:
+1. Compose the same worker brief `fleet-dispatch.py` already assembles (bead title,
+   description, acceptance criteria, affected-files hints) and hand it directly to Codex —
+   do not plan or write any code yourself first:
+   ```
+   codex exec -s workspace-write -c model_reasoning_effort=xhigh <<'EOF'
+   You are the implementation worker for bead <BEAD_ID>, in this worktree.
+   <bead title/description/acceptance criteria, verbatim>
+   Write PLAN.md at the worktree root (same fields Phase 2 below documents), implement it
+   as one or more atomic commits, run the repo's typecheck/lint/relevant tests, push the
+   branch, then stop. Do not merge to main. Do not deploy. If genuinely blocked or the task
+   needs a judgment call only a human/Claude session can make, write BLOCKED.md instead of
+   guessing, then stop.
+   EOF
+   ```
+2. Still run Phase 0's own gates (bead validation, sensitive-path checks, invariant/promise
+   injection) yourself before invoking Codex — those don't change under the override, only
+   who plans+builds does.
+3. Phase 2b (plan review gate) still runs against whatever PLAN.md Codex produces.
+4. **Phase 4 (QA) becomes a single Opus 5 adversarial review of the resulting diff**, not
+   GLM/Codex — GLM is dropped for this window per the override. Skip straight to that
+   instead of Phase 4's GLM-primary/Codex-fallback logic below.
+5. Continue at Phase 5 onward exactly as documented (push, bead status, evidence).
+
+**If the override is not active (or has since been cancelled/reverted)**, Phase 2 and
+Phase 3 run exactly as written below, unchanged, and Phase 4's GLM-primary/Codex-fallback
+QA is the standing path.
+
+---
 
 **Single bead:** compose one PLAN.md at the worktree root.
 
@@ -323,14 +362,19 @@ Detail: `feedback_dont_over_gate_user_responsible_features`.
 **Bundle:** implement child plans in the order from BUNDLE.md. **One commit per child**, each commit message referencing its child bead ID. All commits on the same feature branch.
 
 After each child commits, run quick checks per repo:
-- Code repo (AestheticcNext): `npx tsc --noEmit && npx next lint` (scoped to changed files where possible)
+- Code repo (AestheticcNext): `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint` (full-project typecheck; scope lint where supported)
 - Vault: skip
 
 If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed to the next child until the current one is green.
 
-If Husky pre-push tsc hangs cold: warm via `bun run typecheck` first (per `feedback_husky_tsc_cold_cache.md`).
+If Husky pre-push tsc hangs cold: warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` first (per `feedback_husky_tsc_cold_cache.md`).
 
 ### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
+
+🔴 **If Phase 2 found the Astra-primary override active, skip this entire phase** — run a
+single Opus 5 adversarial review of the diff instead (in-session, same rigor as a normal
+review pass, reasoning through the diff directly rather than via a separate tool), then
+continue at Phase 5. Everything below is the standing (non-override) GLM/Codex path.
 
 **One QA pass against the combined diff at the end**, not one per child. Saves reviewer quota and lets it see cross-child interactions.
 
@@ -340,11 +384,23 @@ and exit code. For AestheticcNext the default is shown below; for another repo,
 derive runnable validation commands from its project instructions and PLAN.md.
 If there is no runnable command, the round cannot PASS.
 
+**Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
+`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
+root in older worktrees. The wrapper only sizes the V8 heap and worker count
+(full-project tsc keeps its 6144 MiB heap). **Memory admission is advisory and the
+command ALWAYS runs** — it never defers, never waits, never holds, and never
+returns exit 75 for capacity. Treat the wrapper's exit code as the underlying
+Jest/tsc exit code and nothing else; a nonzero exit is a real failure, so triage
+it rather than retrying later. Shane, 2026-09-09: "this needs fixed completely
+right now, for all memory guardrails we have, the experiment has failed" (fix
+landed on AestheticcNext main as 2ac04210c). Watch mode is interactive only.
+
 ```bash
 : "${RUN_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 EVIDENCE_DIR="$HOME/.claude/evidence/goal/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
-QA_COMMAND='npm run typecheck && npm run lint && npm run test'
+QA_COMMAND='python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint && python3 ~/.claude/scripts/gated-test-run.py jest'
 printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command-round-N.txt"
 set +e
 {
@@ -391,9 +447,27 @@ set +e
 
 🔴 **B-10 (AI Fleet Grand Plan, 2026-09-01): GLM is the primary Phase 4 reviewer, Codex is the fallback.** Shane's decision — GLM (`glm review`) is the cheap-first resource (~£80/mo flat-rate vs ~£200/mo Codex+Claude combined), not the fallback. Codex only runs when `glm review` itself exits non-zero (a genuine call failure — auth/network against z.ai — same GLM-outage doctrine as everywhere else in `CLAUDE.md`). A clean GLM run that found nothing wrong still exits 0 with a PASS verdict; that is NOT a fallback trigger.
 
+🔴 **Fixed 2026-09-07 (AestheticcNext-s88u9): `glm`'s arg parser never reads the prompt from
+stdin — it takes it as a POSITIONAL argument, so `glm review --cd DIR < file` hit `glm`'s own
+usage-error path (exit 1) and every dispatch silently fell through to the Codex fallback below,
+never actually invoking GLM. Pass the prompt file as a positional argument instead — `glm`
+detects an existing regular-file argument and reads its content (see `~/.local/bin/glm`'s
+file-detection block), so this works even though `qa-prompt-round-N.txt` routinely exceeds the
+~1MB `ARG_MAX` that inlining its content directly (`"$(cat file)"`) would blow past.
+🔴 **A second, independent bug hides behind the first — don't stop at the positional-arg fix.**
+`glm`'s default `-o` result path is `/tmp/glm-<mode>-<pid>.txt`, which the Bash tool's sandbox
+does NOT allow writing to (only `/tmp/claude`, `/private/tmp/claude`, `$TMPDIR` etc. are
+allowlisted — see the sandbox filesystem config). Under a sandboxed `/goal` dispatch this makes
+`glm`'s own `| tee "$OUT"` fail with `Operation not permitted`, which — because `tee` is the
+last stage of that pipeline — makes `$GLM_EXIT` non-zero even though the actual GLM review
+succeeded and is sitting correctly in `$EVIDENCE_DIR/glm-verdict-round-N.log` via the outer
+redirect. Left unfixed, this reproduces the exact silent-fallback symptom this bead exists to
+kill, just one layer deeper. Passing `-o` explicitly at a path already in the sandbox allowlist
+(`$EVIDENCE_DIR`, under `~/.claude/evidence`) avoids it entirely.**
+
 ```bash
 set +e
-glm review --cd "$(pwd)" < "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
+glm review --cd "$(pwd)" -o "$EVIDENCE_DIR/glm-raw-round-N.txt" "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
   > "$EVIDENCE_DIR/glm-verdict-round-N.log" \
   2> "$EVIDENCE_DIR/glm-stderr-round-N.log"
 GLM_EXIT=$?
@@ -737,7 +811,7 @@ Not supported in /goal itself. /goal runs synchronously inside a fresh /agent ch
 
 1. **Codex output is dual-formatted.** Extract between `^codex$` and `^tokens used$` markers per `feedback_plan_build_qa.md`.
 2. **`bd` commands fail silently in worktrees.** Phase 0a handles the per-prefix BEADS_DIR routing. If `bd show` still returns empty, that's the cause.
-3. **Husky pre-push tsc hangs cold.** Per `feedback_husky_tsc_cold_cache.md`, warm via `bun run typecheck` before /ship.
+3. **Husky pre-push tsc hangs cold.** Per `feedback_husky_tsc_cold_cache.md`, warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` before /ship.
 4. **Plan disagrees with what bead actually wants.** Re-read the bead description before each phase. Don't drift onto a different problem.
 5. **Bundle Phase 4 finding maps to a single child.** When QA returns a finding, identify which child's commit introduced it (via `git log --diff-filter=M <file>`), fix in a fixup commit referencing that child's bead ID.
 6. **Estimated LOC missing from bead.** Trust the bead. Proceed. Phase 0f will catch it if reality is much bigger than implied.
