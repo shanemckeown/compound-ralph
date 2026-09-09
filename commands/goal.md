@@ -119,7 +119,7 @@ promise-audit epic — already exists, do not rebuild it):
    injected — a plan that's about to touch code already known to break a promise needs that
    fact in its face, not buried in a severity field it wasn't told to check.
 
-Phase 2's PLAN.md must then include **"Invariant interactions"** and **"Promise
+Phase 2's .goal/PLAN.md must then include **"Invariant interactions"** and **"Promise
 interactions"** fields (see Phase 2 below) explicitly addressing every injected item from
 either source: does this change respect it unmodified, deliberately interact with it via a
 stated mechanism, or genuinely not apply and why. A plan that touches a matched
@@ -135,7 +135,7 @@ time; stop and fix the design before Build, don't ship it and let a future audit
 `status: VERIFIED`. Phase 0f's re-check enforces the row exists before Build proceeds. This
 is what keeps the file current without a separate periodic re-audit: every future save
 action that goes through `/goal` or `/long-goal` writes its own row as a condition of
-shipping, the same way Phase 4b already makes a CHANGE-NOTE.md a condition of shipping.
+shipping, the same way Phase 4b already makes a .goal/CHANGE-NOTE.md a condition of shipping.
 
 #### 0e. Sensitive-path budgets (the only hard caps)
 
@@ -161,15 +161,15 @@ Warnings are surfaced in the final result line, not blockers.
 
 #### 0f. Re-check after Phase 2 plan is written
 
-After Phase 2 produces PLAN.md (per child for bundles), re-extract affected paths from the plan. If the plan reveals sensitive paths or sizes the bead description didn't, run Phase 0e again. If it now trips, refuse there and surface — do not proceed to Build.
+After Phase 2 produces .goal/PLAN.md (or `.goal/plans/<child-id>.md` for bundles), re-extract affected paths from the plan. If the plan reveals sensitive paths or sizes the bead description didn't, run Phase 0e again. If it now trips, refuse there and surface — do not proceed to Build.
 
 Also re-run 0d.1's invariant AND promise-inventory match against the plan's own *Affected
 files* list, not just the original bead body — a design can reveal it touches an invariant's
 table, or a promise's persist/read path, that wasn't obvious from the bead description
 alone. Any new match must get its corresponding "Invariant interactions" / "Promise
-interactions" line added to PLAN.md before Build proceeds. If the plan adds a new
-save/persist action, confirm PLAN.md names the new `promise_inventory.jsonl` row (see 0d.1B)
-— missing row is treated the same as a missing CHANGE-NOTE.md: do not push.
+interactions" line added to .goal/PLAN.md before Build proceeds. If the plan adds a new
+save/persist action, confirm .goal/PLAN.md names the new `promise_inventory.jsonl` row (see 0d.1B)
+— missing row is treated the same as a missing .goal/CHANGE-NOTE.md: do not push.
 
 ### Phase 1 — Worktree + claim
 
@@ -204,17 +204,18 @@ Instead:
    codex exec -s workspace-write -c model_reasoning_effort=xhigh <<'EOF'
    You are the implementation worker for bead <BEAD_ID>, in this worktree.
    <bead title/description/acceptance criteria, verbatim>
-   Write PLAN.md at the worktree root (same fields Phase 2 below documents), implement it
+   Create .goal/ if needed. Write .goal/PLAN.md (same fields Phase 2 below documents), implement it
    as one or more atomic commits, run the repo's typecheck/lint/relevant tests, push the
    branch, then stop. Do not merge to main. Do not deploy. If genuinely blocked or the task
-   needs a judgment call only a human/Claude session can make, write BLOCKED.md instead of
+   needs a judgment call only a human/Claude session can make, write .goal/BLOCKED.md instead of
    guessing, then stop.
+   🔴 Never `git add -f` a gitignored path: .goal/ scratch is deliberately untracked; if git add refuses it with "hint: Use -f", leave it unstaged — a forced add will fail /ship (see Phase 5).
    EOF
    ```
 2. Still run Phase 0's own gates (bead validation, sensitive-path checks, invariant/promise
    injection) yourself before invoking Codex — those don't change under the override, only
    who plans+builds does.
-3. Phase 2b (plan review gate) still runs against whatever PLAN.md Codex produces.
+3. Phase 2b (plan review gate) still runs against whatever .goal/PLAN.md Codex produces.
 4. **Phase 4 (QA) becomes a single Opus 5 adversarial review of the resulting diff**, not
    GLM/Codex — GLM is dropped for this window per the override. Skip straight to that
    instead of Phase 4's GLM-primary/Codex-fallback logic below.
@@ -226,9 +227,9 @@ QA is the standing path.
 
 ---
 
-**Single bead:** compose one PLAN.md at the worktree root.
+**Single bead:** compose one `.goal/PLAN.md` (create `.goal/` if needed).
 
-**Bundle:** compose one PLAN.md per child under `.plans/goal/<child-id>.md`, plus a `BUNDLE.md` at the worktree root that links all child plans and states the execution order.
+**Bundle:** compose one plan per child at `.goal/plans/<child-id>.md` (create `.goal/plans/` if needed), plus a `.goal/BUNDLE.md` that links all child plans and states the execution order. For bundles, references to `.goal/PLAN.md` below mean the corresponding child plan.
 
 Each PLAN contains:
 - Goal — one sentence
@@ -256,7 +257,7 @@ CLAUDE.md declares the plan-review pipeline mandatory. This phase is what makes 
 true — before 2026-07-25 the gate existed only as prose and was silently skipped on
 every `/goal` dispatch. Do not proceed to Phase 3 without running this.
 
-**1. Classify the change.** From PLAN.md's *Affected files* plus the bead labels, derive:
+**1. Classify the change.** From .goal/PLAN.md's *Affected files* plus the bead labels, derive:
 
 | Signal | How to read it |
 |---|---|
@@ -334,9 +335,9 @@ alongside the QA evidence, so `/land-batch` and any later audit can see what was
 and what it said. A review that ran but left no artifact did not run.
 
 **5. Act on the verdict.**
-- **Blocking findings** → revise PLAN.md, re-run *that* review once. Still blocking →
+- **Blocking findings** → revise .goal/PLAN.md, re-run *that* review once. Still blocking →
   stop, surface to Shane, do not proceed to Build. A refusal here is the gate working.
-- **Non-blocking findings** → record them in PLAN.md under a *Review notes* heading and
+- **Non-blocking findings** → record them in .goal/PLAN.md under a *Review notes* heading and
   proceed.
 
 **Proportionality applies to review findings too.** A plan review that objects on
@@ -357,9 +358,9 @@ Detail: `feedback_dont_over_gate_user_responsible_features`.
 
 ### Phase 3 — Build (Opus)
 
-**Single bead:** implement PLAN.md as one or more atomic commits on the feature branch.
+**Single bead:** implement .goal/PLAN.md as one or more atomic commits on the feature branch.
 
-**Bundle:** implement child plans in the order from BUNDLE.md. **One commit per child**, each commit message referencing its child bead ID. All commits on the same feature branch.
+**Bundle:** implement child plans in the order from .goal/BUNDLE.md. **One commit per child**, each commit message referencing its child bead ID. All commits on the same feature branch.
 
 After each child commits, run quick checks per repo:
 - Code repo (AestheticcNext): `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint` (full-project typecheck; scope lint where supported)
@@ -381,7 +382,7 @@ continue at Phase 5. Everything below is the standing (non-override) GLM/Codex p
 Create one evidence directory for the /goal run. In every QA round, run the
 project's real test/QA gate first and capture its exact command, combined output,
 and exit code. For AestheticcNext the default is shown below; for another repo,
-derive runnable validation commands from its project instructions and PLAN.md.
+derive runnable validation commands from its project instructions and .goal/PLAN.md.
 If there is no runnable command, the round cannot PASS.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
@@ -423,7 +424,7 @@ set +e
   [ -f CLAUDE.md ] && cat CLAUDE.md
   echo "---"
   echo "PLANS:"
-  for f in PLAN.md .plans/goal/*.md; do
+  for f in .goal/PLAN.md .goal/plans/*.md; do
     [ -f "$f" ] && echo "## $f" && cat "$f" && echo
   done
   echo "---"
@@ -555,7 +556,7 @@ on a bead whose own ask implied a UI is not acceptable and the full reachability
 run instead. When genuinely uncertain, default to running the full check — the check is
 cheap; a shipped-and-reported "done" feature with a real frontend gap is not.
 
-Write `CHANGE-NOTE.md` at the worktree root, addressed to Shane, in plain language — not
+Write `.goal/CHANGE-NOTE.md`, addressed to Shane, in plain language — not
 engineer language, no file paths, no component names. If a sentence would mean nothing to
 a clinic owner, rewrite it.
 
@@ -611,13 +612,24 @@ broken. Source: `Product/QA/PROACTIVE_BUG_CLASSES_2026-08-28.md` class 3.
 
 ### Phase 5 — Ship to branch (NO deploy)
 
+🔴 **Never `git add -f` a gitignored path.** `/goal` scratch (`.goal/PLAN.md`,
+`.goal/CHANGE-NOTE.md`, `.goal/BUNDLE.md`) is gitignored deliberately — it is one-run
+scratch, not repo history. If `git add` refuses a path with "the following paths are
+ignored ... hint: Use -f", that hint is not for you: the correct response is to leave
+the file unstaged, never to re-run with `-f`. AestheticcNext enforces this
+independently — `tests/meta/no-root-scratch-artifacts.test.ts` fails the suite if root
+`PLAN.md`, `CHANGE-NOTE.md`, `BUNDLE.md` or `issues.jsonl` is tracked, and
+`.husky/pre-commit` rejects them at staging time. A forced add will fail `/ship`.
+(AestheticcNext-5t3dz, 2026-09-09: root `PLAN.md` leaked onto three branches in one day
+this way.)
+
 🔴 **/goal NEVER deploys anywhere.** Not production, not staging, not a worktree revision. No `gcloud builds submit`. No `gcloud run deploy`. No `--tag`. No `--no-traffic` revision. Per-worktree QA deploys spin up billable always-on Cloud Run revisions — the cost leak that nearly ended the runway (`feedback_cloud_run_warm_instance_cost_model.md`). If the bead body contains "deploy to prod" / "production deploy", refuse with `failed:` — mis-scoped for /goal.
 
 🔴 **NO MERGE TO MAIN.** Agents never merge to main and never fire `@deploy-staging` themselves. /goal's job ends at a pushed, QA-clean feature branch.
 
 Steps:
 
-0. **Precondition:** if the change touched any user surface, `CHANGE-NOTE.md` must exist at the worktree root
+0. **Precondition:** if the change touched any user surface, `.goal/CHANGE-NOTE.md` must exist
    and contain no unresolved Phase 4b FAIL. Missing note or open FAIL → do not push; go
    back to 4b. *(This precondition is what stops 4b becoming another orphaned gate — the
    exact failure mode that silently killed the plan-review gate for six weeks.)*
@@ -740,7 +752,7 @@ Final line:
 result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Worktree left intact for /land-batch to discover and land. Warnings: <list or none>.
 
 USER-FACING CHANGES (Phase 4b):
-<paste CHANGE-NOTE.md in full, or "none — backend only">
+<paste .goal/CHANGE-NOTE.md in full, or "none — backend only">
 ```
 
 🔴 **Paste the change note in full, do not link to it.** Shane reads the report; a link to a
