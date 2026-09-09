@@ -3,7 +3,7 @@
 
 Run: python3 hooks/night-batch/test-morning-reports.py
 Print both dry-run DMs: append --transcripts
-All fixtures live in temporary directories INSIDE this checkout. PATH stubs
+All fixtures live in $TMPDIR (or the system temp directory). PATH stubs
 replace bd/gh/git/curl/date; curl has no networking code and rejects any token
 except the fixture token. --dry-run additionally rejects any curl invocation.
 """
@@ -19,7 +19,6 @@ import unittest
 
 
 SCRIPTS = Path(__file__).resolve().parent
-CHECKOUT = SCRIPTS.parent.parent
 BASHES = [Path('/bin/bash'), Path('/opt/homebrew/bin/bash')]
 BASHES = [str(path) for path in BASHES if path.exists()]
 
@@ -86,7 +85,7 @@ else:
 
 class Fixture:
     def __init__(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='.test-morning-', dir=CHECKOUT)
+        self.temp = tempfile.TemporaryDirectory(prefix='.test-morning-', dir=os.environ.get('TMPDIR') or None)
         self.root = Path(self.temp.name)
         self.state = self.root / 'state'
         self.bin = self.root / 'bin'
@@ -279,6 +278,81 @@ class Reports(unittest.TestCase):
         self.ok(self.fx.run(args=(), FAKE_TRANSPORT='1', FAKE_TODAY='2026-09-12'))
         self.assertIn('AestheticcNext-ready', self.fx.calls()[0]['text'])
         self.assertTrue((self.fx.outbox() / 'sent.json').exists())
+
+    def test_failed_same_day_retry_keeps_payload_and_completes_local_work(self):
+        first = self.fx.marker('AestheticcNext-ready', 'complete')
+        self.fx.credentials.unlink()
+        self.assertNotEqual(self.fx.run(args=(), FAKE_TRANSPORT='1').returncode, 0)
+        payload = (self.fx.outbox() / 'payload.json').read_bytes()
+        identities = (self.fx.outbox() / 'markers').read_bytes()
+        self.assertFalse(first.exists())
+
+        fresh = self.fx.marker('AestheticcNext-fresh')
+        preview = fresh.with_suffix('.preview-url')
+        preview.write_text('status=ready\nurl=https://example.invalid/fresh\n')
+        alert = self.fx.state / 'zero-eligible-alert'
+        alert.write_text('ALERT: fixture warning\n')
+        self.fx.credentials.write_text('SLACK_BOT_TOKEN=""\n')
+        self.assertNotEqual(self.fx.run(args=(), FAKE_TRANSPORT='1').returncode, 0)
+        todo = (self.fx.root / 'TODO.md').read_text()
+        self.assertEqual(todo.count('### 🟢 AestheticcNext-ready'), 1)
+        self.assertEqual(todo.count('### 🔴 AestheticcNext-fresh'), 1)
+        self.assertIn('https://example.invalid/fresh', todo)
+        self.assertIn('ALERT: fixture warning', todo)
+        for path in [first, fresh, preview, alert]:
+            self.assertFalse(path.exists())
+            self.assertTrue((self.fx.state / 'processed/2026-09-09' / path.name).exists())
+        self.assertEqual((self.fx.outbox() / 'payload.json').read_bytes(), payload)
+        self.assertEqual((self.fx.outbox() / 'markers').read_bytes(), identities)
+        self.assertFalse((self.fx.outbox() / 'sent.json').exists())
+        self.assertEqual(list(self.fx.state.rglob('.pending-*')), [])
+        self.assertIn('ERROR: missing Slack token; retained',
+                      (self.fx.root / 'logs/morning-report.log').read_text())
+        self.assertEqual(self.fx.calls(), [])
+
+        self.fx.credentials.write_text('SLACK_BOT_TOKEN="xoxb-FAKE-NOT-A-TOKEN"\n')
+        self.assertIn('already delivered', self.ok(self.fx.run(args=(), FAKE_TRANSPORT='1')))
+        expected = json.loads(payload)
+        self.assertIn('AestheticcNext-ready', expected['text'])
+        self.assertNotIn('AestheticcNext-fresh', expected['text'])
+        self.assertEqual(self.fx.calls(), [expected])
+        self.assertTrue((self.fx.outbox() / 'sent.json').exists())
+        self.ok(self.fx.run(args=(), FAKE_TRANSPORT='1'))
+        self.assertEqual(self.fx.calls(), [expected])
+        self.assertEqual((self.fx.root / 'TODO.md').read_text(), todo)
+        self.assertEqual(list(self.fx.state.rglob('.pending-*')), [])
+        self.ok(self.fx.run(args=(), FAKE_TRANSPORT='1', FAKE_TODAY='2026-09-10'))
+        self.assertIn('AestheticcNext-fresh', self.fx.calls()[1]['text'])
+        self.assertNotIn('AestheticcNext-ready', self.fx.calls()[1]['text'])
+
+    def test_stuck_backlog_does_not_block_todo_or_archiving(self):
+        for mode in ['missing', 'blank', 'mangled', 'transport', 'api', 'malformed']:
+            with self.subTest(failure=mode):
+                fx = Fixture()
+                self.addCleanup(fx.close)
+                fx.marker('AestheticcNext-backlog')
+                if mode == 'missing':
+                    fx.credentials.unlink()
+                elif mode == 'blank':
+                    fx.credentials.write_text('SLACK_BOT_TOKEN=""\n')
+                elif mode == 'mangled':
+                    # The transport stub rejects this fake token with a trailing quote.
+                    fx.credentials.write_text('SLACK_BOT_TOKEN="xoxb-FAKE-NOT-A-TOKEN""\n')
+                env = {'FAKE_TRANSPORT': '1', 'FAKE_CURL_MODE': mode}
+                self.assertNotEqual(fx.run(args=(), FAKE_TODAY='2026-09-08', **env).returncode, 0)
+                old_outbox = fx.outbox(day='2026-09-08')
+                payload = (old_outbox / 'payload.json').read_bytes()
+                fresh = fx.marker('AestheticcNext-fresh')
+                self.assertNotEqual(fx.run(args=(), **env).returncode, 0)
+                self.assertIn('### 🔴 AestheticcNext-fresh', (fx.root / 'TODO.md').read_text())
+                self.assertFalse(fresh.exists())
+                self.assertTrue((fx.state / 'processed/2026-09-09' / fresh.name).exists())
+                self.assertEqual((old_outbox / 'payload.json').read_bytes(), payload)
+                self.assertFalse((old_outbox / 'sent.json').exists())
+                self.assertIn('AestheticcNext-fresh', (fx.outbox() / 'payload.json').read_text())
+                self.assertFalse((fx.outbox() / 'sent.json').exists())
+                self.assertEqual(list(fx.state.rglob('.pending-*')), [])
+                self.assertIn('ERROR:', (fx.root / 'logs/morning-report.log').read_text())
 
     def test_concurrent_delivery_has_one_acknowledgement(self):
         self.fx.rich()

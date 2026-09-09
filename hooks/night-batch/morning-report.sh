@@ -7,6 +7,10 @@
 # completion and legacy archives on the first morning after rollout. Successful
 # delivery receipts suppress repeat reports and repeat marker identities; failed
 # payloads survive for retry. No ordering contract with the night job is needed.
+# A failed retry never skips rendering, TODO append or marker archiving; finish
+# that local work and return non-zero with delivery still pending. Preserve the
+# first queued payload for a date on same-day reruns (including its marker IDs);
+# newly archived results remain eligible for the following day's DM.
 #
 # Default (07:00 launchd or manual): report recent undelivered results to Shane.
 # night-batch calls --archive-only: append active results to TODO and archive,
@@ -21,7 +25,8 @@ REPORT_NAME=morning-report
 source "$SCRIPT_DIR/morning-common.sh"
 init_report "$@" || exit $?
 lock_report "$@" || exit $?
-prepare_delivery || exit 1
+delivery_status=0
+prepare_delivery || delivery_status=1
 
 TODO="${NIGHT_BATCH_TODO:-/Users/shane/Documents/Obsidian/Aestheticc/Ops/Hermes/SHANE_TODO.md}"
 WORKTREE_BASE="${NIGHT_BATCH_WORKTREES:-$HOME/.worktrees/AestheticcNext}"
@@ -240,5 +245,8 @@ if [[ $ARCHIVE_ONLY -eq 1 ]]; then
   exit 0
 fi
 queue_message "$message_text" || exit 1
+# A retry already failed this run. Local work and queuing are complete; leave
+# the pending outboxes for the next invocation rather than retrying twice.
+[[ $delivery_status -eq 0 ]] || exit "$delivery_status"
 deliver_pending || exit 1
 echo "morning-report: delivered $total result(s) for $TODAY"
