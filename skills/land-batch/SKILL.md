@@ -113,6 +113,10 @@ reversal.
     violation is content loss and HOLDs the candidate for Shane's eyes — it is
     not auto-resolved, matching guardrail 5's "never auto-resolve" spirit even
     though git itself reported no conflict.
+    🔴 **A manual orchestrator land must run `npm test` (the `node-tests`
+    project at minimum) before pushing main** — a manual land bypasses the
+    mechanical content-loss check above entirely, which is exactly how the
+    2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
 
 ## Shared mutex, queue, and ledger
 
