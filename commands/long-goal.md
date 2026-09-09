@@ -78,7 +78,7 @@ promises, matched by `surface`/`trigger_path`/`persists_to`, injecting the WHOLE
 cluster sharing a persist target or runtime consumer, not just the touched row.** Same
 mechanism here, per child, using each child's own `AFFECTED_PATHS` from 0d — paste matches
 into that child's Phase 2 planning context, require "Invariant interactions" and "Promise
-interactions" fields in that child's PLAN.md (inherited automatically, Phase 2 below already
+interactions" fields in that child's `.goal/plans/<child-id>.md` (inherited automatically, Phase 2 below already
 says child plans use the same fields as `/goal`), and if a child's plan adds a new
 save/persist action, it must add its own `promise_inventory.jsonl` row before that child is
 considered plan-complete (0d.1B in `/goal`). No matches (including missing files/dirs) is a
@@ -113,7 +113,7 @@ So: sensitive-path and migration work is **allowed**, not excluded — but it ge
 
 **Taste and clinical-judgment calls — resolved in planning, never a blocking gate.** Some beads carry a genuine judgment fork (a UX taste call, a clinical/compliance framing choice) rather than a technical risk. The founder can make these calls but would rather they weren't blocking, since he's not watching. Two rules:
 1. If the fork is something the *scoping* pass should already have resolved (i.e., it's answerable from the bead's own acceptance criteria, the linked scope doc, or prior decisions in this epic's history), resolve it that way — don't re-litigate a settled decision mid-build.
-2. If it's genuinely novel and unresolved, apply the Shane Decision Frame from `Reference/HEADLESS_MODE` (most robust long-term choice; don't overscope for imaginary scenarios; overscope only when cheap and clearly beneficial), make the call, and log it plainly in that child's PLAN.md under a `Judgment call:` line — one sentence on what was decided and why. Never block Build waiting for an answer nobody's there to give. Every `Judgment call:` line across the run gets collected into the Phase 7 report so Shane reviews them as a batch in the morning — a considerations list, not a gate.
+2. If it's genuinely novel and unresolved, apply the Shane Decision Frame from `Reference/HEADLESS_MODE` (most robust long-term choice; don't overscope for imaginary scenarios; overscope only when cheap and clearly beneficial), make the call, and log it plainly in that child's `.goal/plans/<child-id>.md` under a `Judgment call:` line — one sentence on what was decided and why. Never block Build waiting for an answer nobody's there to give. Every `Judgment call:` line across the run gets collected into the Phase 7 report so Shane reviews them as a batch in the morning — a considerations list, not a gate.
 
 #### 0g. Epic-level completeness check — does the eligible child set actually cover the epic's own ask?
 
@@ -173,7 +173,7 @@ in one specific child's plan but not actually delivered.
 
 ### Phase 2 — Plan (Opus, in-context)
 
-One `PLAN.md` per eligible child under `.plans/long-goal/<child-id>.md`, plus a `BUNDLE.md` at the worktree root that:
+One plan per eligible child at `.goal/plans/<child-id>.md` (create `.goal/plans/` if needed), plus a `.goal/BUNDLE.md` that:
 - Lists every eligible child and every excluded child (with exclusion reason, from 0e/0f).
 - States the execution order, derived from the dependency notes extracted in 0d — topological, not "smallest first": a child whose description says "depends on X" runs after X's commit lands, full stop. Children with no stated dependency and no shared-file overlap with another pending child can run in any relative order; break ties by priority (P1 before P2) then smallest estimated diff first, to surface problems early.
 - Notes the checkpoint convention (Phase 3.5): the epic's own notes field gets a one-line progress update after every child closes, so the founder can check status mid-run without waiting for Phase 7.
@@ -190,7 +190,7 @@ the payments gate, nor let the payments child ride the copy child's lighter revi
 
 ### Phase 3 — Build (Opus)
 
-Implement child plans in `BUNDLE.md` order. **One commit per child**, referencing its bead ID. All commits on the same feature branch, same worktree.
+Implement child plans in `.goal/BUNDLE.md` order. **One commit per child**, referencing its bead ID. All commits on the same feature branch, same worktree.
 
 After each child commits: `npx tsc --noEmit && npx next lint` (scoped to changed files where possible). Fix in the same commit or a fixup before moving to the next child — don't let type/lint debt accumulate across an 8-hour run.
 
@@ -226,7 +226,7 @@ Unlike `/goal`'s single end-of-bundle QA pass, run QA **after each child's commi
 **Per-child round cap: 3, same as `/goal`** (for dual-model children, 3 rounds applies to the pair together, not 3 each). If a child hits the cap still not clean:
 - **Do not abort the run.** Revert or leave that child's commit isolated (don't build subsequent children on top of a known-broken one unless nothing else depends on it), file a follow-up bead (`--parent <epic-id>`, label `qa-followup`), note the state on the original child bead, leave it open.
 - If a later child's plan genuinely depends on the failed child's output, skip that dependent child too (same treatment: note, leave open, follow-up bead referencing the blocking child) rather than building on unverified ground.
-- Continue to the next independent child in `BUNDLE.md` order.
+- Continue to the next independent child in `.goal/BUNDLE.md` order.
 
 ### Phase 4b — User-facing change note (MANDATORY for ANY user surface, per child)
 
@@ -249,7 +249,7 @@ source of truth, do not fork the checklist here). Epic-specific adaptation:
   unresolved Phase 4b FAIL is treated exactly like a child that hit the QA round cap: leave
   it open, file a follow-up bead, do not build later children on top of it if they depend on
   it, continue with the rest.
-- Write one `CHANGE-NOTE-<child-id>.md` per child at the worktree root (or "none — backend
+- Write one `.goal/CHANGE-NOTE-<child-id>.md` per child (or "none — backend
   only" per the evidence rule above).
 - At Phase 7, concatenate every child's note into the single `USER-FACING CHANGES` section —
   Shane reads one report per epic, not one per child.
@@ -258,6 +258,8 @@ Precondition for Phase 5 (below) is unchanged in spirit from `/goal`: no child s
 unresolved Phase 4b FAIL.
 
 ### Phase 5 — Ship to branch (NO deploy) — unchanged from `/goal`
+
+🔴 **Never `git add -f` a gitignored path.** `.goal/` scratch (child plans, `.goal/BUNDLE.md`, `.goal/CHANGE-NOTE-<child-id>.md`) is deliberately untracked; if `git add` refuses it with "hint: Use -f", leave it unstaged — a forced add will fail `/ship` (see `/goal` Phase 5; AestheticcNext-5t3dz, 2026-09-09).
 
 `/ship` to push the feature branch once, after all eligible/surviving children are committed and QA-clean (not once per child). No merge to main. No deploy, ever, in this command.
 
@@ -328,7 +330,7 @@ If everything closed cleanly, `<M>` and `<K>` are 0 — say so plainly, don't pa
 
 **Considerations for review** (always include this section, even if empty — say "none this run" rather than omitting it):
 - Every `dismissed (not-the-police):` line logged across the run — a finding either reviewer raised that failed the calibration gate and was correctly not fixed/filed. Shane spot-checks these, not the reviewers' theoretical attacks.
-- Every `Judgment call:` line logged across all child PLAN.md files during Phase 2, verbatim with its child ID — taste/clinical-judgment forks resolved autonomously, for a quick after-the-fact look, not a gate.
+- Every `Judgment call:` line logged across all child `.goal/plans/<child-id>.md` files during Phase 2, verbatim with its child ID — taste/clinical-judgment forks resolved autonomously, for a quick after-the-fact look, not a gate.
 - Every sensitive-path or migration child that went through dual-model QA (Phase 4), whether it passed clean or not, with both verdicts' locations — even a clean pass is worth a fast confirmation given what it touched.
 - Any migration flagged in Phase 2 as touching existing data (not additive-only) — named explicitly, not buried in the diff.
 
