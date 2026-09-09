@@ -6,6 +6,38 @@ Branch: `goal/aestheticcnext-yoi4o`, starting at `95cdfd5`.
 
 Round 2 starts at `2fc71de`. Changes address delivery failures blocking local work, explicit delivery-state ignores and temporary fixture placement. Pending same-day payloads and marker IDs stay unchanged; newly arriving active results still reach TODO/archive and remain eligible for the following day's DM.
 
+## Round 3 — subprocess TMPDIR
+
+Starting HEAD: `b8c5a59`. The only harness change adds `'TMPDIR': str(self.root)` to the existing scrubbed fixture environment. Every `subprocess.run` and `subprocess.Popen` uses that environment, so child shells and their subprocesses create here-document and `mktemp` files inside the fixture's writable temporary tree. All other environment entries and credential scrubbing remain unchanged. No shell scripts, PLAN.md, live-tree files or plists changed; no real Slack request or push occurred.
+
+Both runs below completed in the default agent sandbox without escalation. The sandboxed-equivalent run explicitly placed fixtures under `/tmp/claude-502`; its temporary parent was removed afterward. The normal run used the inherited environment without a TMPDIR override.
+
+```console
+$ task_tmpdir=$(mktemp -d /tmp/claude-502/yoi4o-round3.XXXXXX)
+$ TMPDIR="$task_tmpdir" env -u SOME_UNRELATED python3 hooks/night-batch/test-morning-reports.py
+Ran 18 tests in 25.043s
+
+OK
+exit 0
+$ rmdir "$task_tmpdir"
+
+$ python3 hooks/night-batch/test-morning-reports.py
+Ran 18 tests in 25.148s
+
+OK
+exit 0
+```
+
+ShellCheck 0.11.0 was rerun on all four shell files:
+
+```console
+$ /private/tmp/claude-502/shellcheck-v0.11.0/shellcheck -x hooks/night-batch/morning-report.sh hooks/night-batch/morning-triage.sh hooks/night-batch/morning-common.sh hooks/night-batch/night-batch.sh
+(no diagnostics)
+exit 0
+```
+
+`git diff --check`: no diagnostics, exit 0.
+
 ## Non-sending proof
 
 - Both reporters' `--dry-run` branches print the rendered DM and exit before TODO writes, marker moves, credential reads, payload creation or Slack transport. The shared transport function also refuses dry-run and archive-only mode.
@@ -76,7 +108,7 @@ New Round 2 tests:
 - `test_failed_same_day_retry_keeps_payload_and_completes_local_work`: missing-token delivery failure, blank-token same-day failure with fresh marker/preview/alert, successful recovery and another same-day rerun. Asserts TODO content, archived files, unchanged payload and marker IDs, one DM with the original content, a receipt and no orphaned `.pending-*` directory. The next day's DM includes the fresh result and excludes the previously delivered result.
 - `test_stuck_backlog_does_not_block_todo_or_archiving`: missing, blank and mangled fake tokens, transport failure, Slack `ok:false` and malformed JSON. Each failed prior-day retry logs failure and returns non-zero while today's fresh result reaches TODO/archive and today's pending payload; the old payload remains intact without a receipt.
 
-The full suite ran through the agent's default sandbox without escalation. Separate fixture checks verified both an explicit temporary `$TMPDIR` override and an unset `$TMPDIR`, including cleanup:
+Round 2 reported a full-suite pass through the agent's default sandbox, but independent reproduction showed that the scrubbed child environment omitted `TMPDIR`, causing Bash here-document failures. The Round 3 results above supersede that sandbox claim. Round 2's separate fixture checks verified temporary-directory placement and cleanup only:
 
 ```text
 PASS: explicit TMPDIR honoured and fixture cleaned up
