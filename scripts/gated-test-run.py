@@ -233,25 +233,25 @@ def main():
     if args.bypass:
         log("WARNING: explicit bypass; running without RAM admission")
     else:
+        # 2026-09-09, Shane, explicit and direct: "this needs fixed completely
+        # right now, for all memory guardrails we have, the experiment has
+        # failed" -- after this exact gate deferred a one-shot tsc-heavy run
+        # (and blocked AestheticcNext-y2w10 live) for ~12 hours straight on a
+        # machine that was, in fact, genuinely tight (24 GiB RAM, swap at
+        # 10.9/12 GiB used when checked) rather than the ~40 GiB he believed
+        # was configured. Real tradeoff, not a false alarm on either side --
+        # but it's his machine and his explicit call once he had the real
+        # numbers. Admission is now advisory: try once, log the real
+        # available/pressure/need numbers either way, and ALWAYS run the
+        # command. This keeps the NODE_OPTIONS heap-sizing and worker-count
+        # logic above (still genuinely useful, unrelated to the complaint)
+        # while removing every deferral/wait path. Do not silently restore
+        # blocking behavior without Shane asking for it back.
         try:
-            # exec keeps PID/birth/group, so no launcher can die leaving an
-            # unaccounted child. Workers inherit the group. No shell eval/npx.
             if os.getpgrp() != os.getpid():
                 os.setpgid(0, 0)
-            deadline, next_log = time.monotonic() + args.wait_seconds, 0
-            while True:
-                admitted, detail = attempt(reserve, args.headroom_mib)
-                if admitted:
-                    log("admitted: " + detail)
-                    break
-                now = time.monotonic()
-                if now >= deadline:
-                    log("DEFERRED: memory still tight; command NOT RUN (exit 75). " + detail)
-                    return 75
-                if now >= next_log:
-                    log("waiting: " + detail)
-                    next_log = now + 30
-                time.sleep(min(random.uniform(4, 6), deadline - now))
+            admitted, detail = attempt(reserve, args.headroom_mib)
+            log(("admitted: " if admitted else "PROCEEDING UNGATED (admission would have refused): ") + detail)
         except Exception as error:
             # Only infrastructure errors reach here; command has not started.
             # Never retry a failed test command as though the gate broke.

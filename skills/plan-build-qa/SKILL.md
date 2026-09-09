@@ -68,18 +68,21 @@ run the concrete test/QA command(s) derived from PLAN.md and the project context
 capture the exact command text, combined output, and exit code as separate files.
 If no runnable validation command exists, or any artifact is missing/empty, QA
 cannot PASS. "Suite did not run" is incomplete QA, never a pass. Memory
-admission exit 75 is deferred capacity, not a failing test or code defect.
+admission is advisory; the wrapper exit is the real Jest/tsc exit.
 
-**Memory admission (AestheticcNext):** Run one-shot Jest/tsc through the guarded
-package scripts only after verifying they invoke `gated-test-run.py`. In older
-worktrees use `python3 ~/.claude/scripts/gated-test-run.py jest <args>` or
+**Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts only after verifying they invoke `gated-test-run.py`, or
+`python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
-root. Full-project tsc keeps its 6144 MiB heap. Never wrap an already guarded
-package command (double reservation). **Exit 75 means NOT RUN, not a test failure
-or pass: preserve command/output/exit evidence, defer QA and retry later; never
-fall back to raw Jest/tsc or bypass admission.** Watch is interactive only.
-When QA_EXIT is 75, do not launch the reviewer, consume a fix iteration,
-change code, or report a failing suite; keep the work pending for admission.
+root in older worktrees. Never wrap an already guarded package command (double
+sizing). The wrapper only sizes the V8 heap and worker count (full-project tsc
+keeps its 6144 MiB heap). **Memory admission is advisory and the command ALWAYS
+runs** — it never defers, never waits, never holds, and never returns exit 75 for
+capacity. Treat the wrapper's exit code as the underlying Jest/tsc exit code and
+nothing else; a nonzero exit is a real failure, so triage it rather than retrying
+later. Shane, 2026-09-09: "this needs fixed completely right now, for all memory
+guardrails we have, the experiment has failed" (fix landed on AestheticcNext main
+as 2ac04210c). Watch mode is interactive only.
 
 ```bash
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"

@@ -185,7 +185,46 @@ save/persist action, confirm PLAN.md names the new `promise_inventory.jsonl` row
    that history the instant this ran. `bd comment` is append-only; use it for anything
    that isn't meant to overwrite. See `reference_bd_update_notes_replaces_use_comment`.
 
-### Phase 2 — Plan (Opus, in-context)
+### Phase 2 — Plan (Opus, in-context) — or Astra, under the standing override
+
+🔴 **Check FIRST, before anything else in Phase 2: is the Astra-primary override active?**
+Read `Aestheticc/CLAUDE.md` and check whether the section header
+`🔴🔴 ACTIVE OVERRIDE (Shane, 2026-09-06): Astra-primary mode` is still present and not
+marked reverted. **This check has been missing since the override was declared — every
+`/goal` dispatch until now ran Phase 2/3 as plain Opus regardless, which is why the
+override existed in CLAUDE.md's prose but never actually happened.** Do not skip this
+check silently again.
+
+**If the override is active**, skip the rest of Phase 2 and all of Phase 3 as written below.
+Instead:
+1. Compose the same worker brief `fleet-dispatch.py` already assembles (bead title,
+   description, acceptance criteria, affected-files hints) and hand it directly to Codex —
+   do not plan or write any code yourself first:
+   ```
+   codex exec -s workspace-write -c model_reasoning_effort=xhigh <<'EOF'
+   You are the implementation worker for bead <BEAD_ID>, in this worktree.
+   <bead title/description/acceptance criteria, verbatim>
+   Write PLAN.md at the worktree root (same fields Phase 2 below documents), implement it
+   as one or more atomic commits, run the repo's typecheck/lint/relevant tests, push the
+   branch, then stop. Do not merge to main. Do not deploy. If genuinely blocked or the task
+   needs a judgment call only a human/Claude session can make, write BLOCKED.md instead of
+   guessing, then stop.
+   EOF
+   ```
+2. Still run Phase 0's own gates (bead validation, sensitive-path checks, invariant/promise
+   injection) yourself before invoking Codex — those don't change under the override, only
+   who plans+builds does.
+3. Phase 2b (plan review gate) still runs against whatever PLAN.md Codex produces.
+4. **Phase 4 (QA) becomes a single Opus 5 adversarial review of the resulting diff**, not
+   GLM/Codex — GLM is dropped for this window per the override. Skip straight to that
+   instead of Phase 4's GLM-primary/Codex-fallback logic below.
+5. Continue at Phase 5 onward exactly as documented (push, bead status, evidence).
+
+**If the override is not active (or has since been cancelled/reverted)**, Phase 2 and
+Phase 3 run exactly as written below, unchanged, and Phase 4's GLM-primary/Codex-fallback
+QA is the standing path.
+
+---
 
 **Single bead:** compose one PLAN.md at the worktree root.
 
@@ -332,6 +371,11 @@ If Husky pre-push tsc hangs cold: warm via `python3 ~/.claude/scripts/gated-test
 
 ### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
 
+🔴 **If Phase 2 found the Astra-primary override active, skip this entire phase** — run a
+single Opus 5 adversarial review of the diff instead (in-session, same rigor as a normal
+review pass, reasoning through the diff directly rather than via a separate tool), then
+continue at Phase 5. Everything below is the standing (non-override) GLM/Codex path.
+
 **One QA pass against the combined diff at the end**, not one per child. Saves reviewer quota and lets it see cross-child interactions.
 
 Create one evidence directory for the /goal run. In every QA round, run the
@@ -340,16 +384,19 @@ and exit code. For AestheticcNext the default is shown below; for another repo,
 derive runnable validation commands from its project instructions and PLAN.md.
 If there is no runnable command, the round cannot PASS.
 
-**Memory admission (AestheticcNext):** Run one-shot Jest/tsc through the guarded
-package scripts only after verifying they invoke `gated-test-run.py`. In older
-worktrees use `python3 ~/.claude/scripts/gated-test-run.py jest <args>` or
+**Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts only after verifying they invoke `gated-test-run.py`, or
+`python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
-root. Full-project tsc keeps its 6144 MiB heap. Never wrap an already guarded
-package command (double reservation). **Exit 75 means NOT RUN, not a test failure
-or pass: preserve command/output/exit evidence, defer QA and retry later; never
-fall back to raw Jest/tsc or bypass admission.** Watch is interactive only.
-When QA_EXIT is 75, do not launch the reviewer, consume a fix iteration,
-change code, or report a failing suite; keep the work pending for admission.
+root in older worktrees. Never wrap an already guarded package command (double
+sizing). The wrapper only sizes the V8 heap and worker count (full-project tsc
+keeps its 6144 MiB heap). **Memory admission is advisory and the command ALWAYS
+runs** — it never defers, never waits, never holds, and never returns exit 75 for
+capacity. Treat the wrapper's exit code as the underlying Jest/tsc exit code and
+nothing else; a nonzero exit is a real failure, so triage it rather than retrying
+later. Shane, 2026-09-09: "this needs fixed completely right now, for all memory
+guardrails we have, the experiment has failed" (fix landed on AestheticcNext main
+as 2ac04210c). Watch mode is interactive only.
 
 ```bash
 : "${RUN_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"

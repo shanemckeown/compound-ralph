@@ -429,18 +429,19 @@ for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-r
 narrower and accurate). Never run full Jest in LAND. Save separate command,
 raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
 
-**Memory admission (AestheticcNext):** Run one-shot Jest/tsc through the guarded
-package scripts only after verifying they invoke `gated-test-run.py`. In older
-worktrees use `python3 ~/.claude/scripts/gated-test-run.py jest <args>` or
+**Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
+package scripts only after verifying they invoke `gated-test-run.py`, or
+`python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
-root. Full-project tsc keeps its 6144 MiB heap. Never wrap an already guarded
-package command (double reservation). **Exit 75 means NOT RUN, not a test failure
-or pass: preserve command/output/exit evidence, defer QA and retry later; never
-fall back to raw Jest/tsc or bypass admission.** Watch is interactive only.
-
-Exit 75 is HOLD/deferred capacity, not a code failure. Preserve evidence and
-remove the unpushed candidate using the LAND-only reset below, but do not send
-it to failure triage or close its bead. Retry admission later.
+root in older worktrees. Never wrap an already guarded package command (double
+sizing). The wrapper only sizes the V8 heap and worker count (full-project tsc
+keeps its 6144 MiB heap). **Memory admission is advisory and the command ALWAYS
+runs** — it never defers, never waits, never holds, and never returns exit 75 for
+capacity. Treat the wrapper's exit code as the underlying Jest/tsc exit code and
+nothing else; a nonzero exit is a real failure, so triage it rather than retrying
+later. Shane, 2026-09-09: "this needs fixed completely right now, for all memory
+guardrails we have, the experiment has failed" (fix landed on AestheticcNext main
+as 2ac04210c). Watch mode is interactive only.
 
 Any red/missing/malformed artifact means:
 
@@ -803,9 +804,8 @@ printf '%s\n' "$!" > "$EVIDENCE_DIR/full-jest.pid"
 ~~~
 
 Poll log and exit file; do not foreground-wait. Save command, PID, poll evidence,
-full log, and parsed exit. Missing/malformed exit, dead child without zero, or
-nonzero is red. Exit 75 specifically means NOT RUN: retain evidence and defer
-SHIP until a later guarded retry passes; never fall back to raw Jest/tsc.
+full log, and parsed exit. Missing/malformed exit, a dead child without zero, or
+ANY nonzero exit is red.
 Do not deploy. This is the one full Jest run.
 
 ### Step 5 — One staging deploy, then full ledger QA
