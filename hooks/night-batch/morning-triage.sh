@@ -6,6 +6,7 @@
 # before midnight, and late completions may still be active at 07:30. Reuse
 # delivery receipts/outboxes for safe manual retry. Empty arrays must work on
 # macOS Bash 3.2 with set -u (the old beads[*] dedup crashed on the first bead).
+# Same-day retries preserve the first queued payload and its marker IDs.
 # --dry-run prints the DM with no credential access, writes or Slack transport.
 # No-op if no recent AestheticcNext-* markers exist.
 

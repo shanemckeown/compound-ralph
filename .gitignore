@@ -49,6 +49,9 @@ gh-pr-status-cache.json
 # Night-batch runtime state + logs
 hooks/night-batch/state/
 hooks/night-batch/logs/
+# Delivery payloads, responses, receipts and .lock files; tracked processed history stays tracked.
+/hooks/night-batch/state/morning-report-delivery/
+/hooks/night-batch/state/morning-triage-delivery/
 
 # Old backups
 gstack-backup-*/

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Shared reporting plumbing for AestheticcNext-yoi4o. Sourced by the two
 # morning scripts; no work or credential access occurs merely by sourcing.
+# The first queued payload and marker IDs for each date stay unchanged on
+# same-day retries. Callers decide when to return delivery failures so the
+# morning report can finish its local TODO/archive work while Slack is down.
 
 init_report() {
   DRY_RUN=0
@@ -151,6 +154,8 @@ PY
 }
 
 queue_message() {
+  # Keep the original snapshot; never move staging inside an existing outbox.
+  [[ -f "$DELIVERY/$TODAY/payload.json" ]] && return 0
   local message="$1" staging="$DELIVERY/.pending-$$"
   mkdir "$staging" || return 1
   if ! printf '%s\n%s' "$SLACK_USER" "$message" | python3 -c '
