@@ -102,6 +102,7 @@ class Fixture:
         self.env = {
             'PATH': str(self.bin) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
             'HOME': str(self.root / 'home'), 'TZ': 'Europe/London',
+            'TMPDIR': str(self.root),
             'LANG': 'en_GB.UTF-8', 'NIGHT_BATCH_ROOT': str(self.root),
             'NIGHT_BATCH_TODO': str(self.root / 'TODO.md'),
             'NIGHT_BATCH_DREAM_ROOT': str(self.root / 'dreams'),
