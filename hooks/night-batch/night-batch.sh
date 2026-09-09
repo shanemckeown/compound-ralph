@@ -52,7 +52,8 @@ log "=== night-batch start (concurrent=$MAX_CONCURRENT, ceiling=$MAX_BEADS_PER_N
 # Hard runtime cap
 START_EPOCH=$(date +%s)
 runtime_exceeded() {
-  local now=$(date +%s)
+  local now
+  now=$(date +%s)
   local elapsed=$((now - START_EPOCH))
   [[ $elapsed -ge $MAX_RUNTIME_SECONDS ]]
 }
@@ -70,7 +71,8 @@ pick_eligible() {
   local limit="$1"
   cd "$BEADS_REPO" || return 1
   local validator="$ROOT/check-eligibility.sh"
-  local today_processed="$STATE/processed/$(date +%Y-%m-%d)"
+  local today_processed
+  today_processed="$STATE/processed/$(date +%Y-%m-%d)"
   local picked=0
   local scan_limit=2000
   for prio in 2 3 4; do
@@ -131,7 +133,8 @@ reap_completed() {
   local parallel_review="$ROOT/blind-claude-review.sh"
   for marker in "$STATE"/*.running; do
     [[ -f "$marker" ]] || continue
-    local bead=$(basename "$marker" .running)
+    local bead
+    bead=$(basename "$marker" .running)
     local session="auto-${bead}"
     if ! tmux has-session -t "$session" 2>/dev/null; then
       log "reap: $bead session ended — running gates"
@@ -139,11 +142,11 @@ reap_completed() {
       if [[ ! -d "$worktree" ]]; then
         log "  $bead: no worktree → .guarded (auto-bead failed to create one)"
         mv "$marker" "$STATE/${bead}.guarded" 2>/dev/null
-      elif ! "$guard" "$bead" "$worktree" >/tmp/guard-$bead.out 2>&1; then
-        log "  $bead: Gate 2 FAIL — $(tail -3 /tmp/guard-$bead.out | tr '\n' ' ')"
+      elif ! "$guard" "$bead" "$worktree" >"/tmp/guard-$bead.out" 2>&1; then
+        log "  $bead: Gate 2 FAIL — $(tail -3 "/tmp/guard-$bead.out" | tr '\n' ' ')"
         mv "$marker" "$STATE/${bead}.guarded" 2>/dev/null
       else
-        log "  $bead: Gate 2 PASS — $(tail -1 /tmp/guard-$bead.out)"
+        log "  $bead: Gate 2 PASS — $(tail -1 "/tmp/guard-$bead.out")"
         local gate3_dir="$STATE/gate3/$bead"
         mkdir -p "$gate3_dir"
 
@@ -156,7 +159,8 @@ reap_completed() {
 
         log "  $bead: running Gate 3 (codex gating; blind-claude parallel, 10min cap)"
         if "$gate_review" "$bead" "$worktree" >"$gate3_dir/codex.log" 2>&1; then
-          local pass_line=$(grep '^PASS:' "$gate3_dir/codex.log" | tail -1)
+          local pass_line
+          pass_line=$(grep '^PASS:' "$gate3_dir/codex.log" | tail -1)
           log "  $bead: Gate 3 PASS (codex) — ${pass_line:-no summary parsed}"
           if ! mv "$marker" "$STATE/${bead}.complete" 2>/dev/null; then
             log "  $bead: ⚠️  ALERT — mv to .complete failed; marker stuck at .running"
@@ -194,7 +198,7 @@ reap_completed() {
         fi
         log "  $bead: blind-claude (parallel, no-gate) exit=$blind_exit — ${blind_summary:-no verdict}"
       fi
-      rm -f /tmp/guard-$bead.out
+      rm -f "/tmp/guard-$bead.out"
       reaped=$((reaped+1))
     fi
   done
@@ -288,10 +292,14 @@ fi
 
 log "=== night-batch end (dispatched=$dispatched) ==="
 
-# Auto-render the morning report so Shane wakes to a SHANE_TODO.md section.
-# A safety-net launchd at 07:00 BST also runs morning-report.sh in case
-# this end-of-run path didn't fire (orchestrator crash, etc).
+# Render TODO + archive now; the 07:00 job reads archives and owns Slack
+# delivery (AestheticcNext-yoi4o). This replaces the old end-of-run Slack DM.
+# Even a night-batch dry-run must never reach a sending reporter invocation.
 if [[ -x "$ROOT/morning-report.sh" ]]; then
-  log "running morning-report.sh"
-  "$ROOT/morning-report.sh" 2>&1 | tee -a "$LOG"
+  log "running morning-report.sh --archive-only"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    "$ROOT/morning-report.sh" --archive-only --dry-run 2>&1 | tee -a "$LOG"
+  else
+    "$ROOT/morning-report.sh" --archive-only 2>&1 | tee -a "$LOG"
+  fi
 fi
