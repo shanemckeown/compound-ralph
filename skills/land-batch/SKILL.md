@@ -164,7 +164,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-<current-claude-pid>"
 # (_cleanup_orphan_worktree) only ever `git worktree remove`s a path whose
 # basename starts with "land-batch-", and only ever `git branch -D`s a branch
 # under "land-batch/". Renaming either convention silently defeats cleanup.
-SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID"
+# SCRATCH itself is set in Step 2 as land-batch-$RUN_ID-attempt-N (one per replay attempt).
 EVIDENCE_DIR="$HOME/.claude/evidence/land-batch/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
 ADMISSION_RESULT="$EVIDENCE_DIR/admission.json"
@@ -355,28 +355,42 @@ worktree first — do not reuse or `cd` into `$REPO`'s own working tree for any
 part of Step 2:
 
 ~~~bash
-git -C "$REPO" worktree add "$SCRATCH" -b "land-batch/$RUN_ID" "$BASE_SHA"
+# Re-run this block for every replay; preserve prior attempts and their evidence.
+LAND_ATTEMPT=$((${LAND_ATTEMPT:-0} + 1))
+INT="land-batch/$RUN_ID-attempt-$LAND_ATTEMPT"
+SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-attempt-$LAND_ATTEMPT"
+git -C "$REPO" worktree add "$SCRATCH" -b "$INT" "$BASE_SHA"
 ~~~
 
 Before the first merge, prove the pinned main baseline is green. Dependency
-setup must already be complete in `$SCRATCH` (the usual ignored node_modules
-symlink); all source must be tracked and the scratch clean. The helper runs
+setup links the installed dependencies below (ignored path, never committed);
+all source must be tracked and the scratch clean. The helper runs
 from the scratch root and strips inherited UPDATE_BASELINE/FILE_LENGTH_GROW_OK
 in check mode, so this cannot accidentally repair main drift:
 
 ~~~bash
+[ -e "$SCRATCH/node_modules" ] || ln -s "$REPO/node_modules" "$SCRATCH/node_modules"
 RATCHET_HELPER="$HOME/.claude/skills/land-batch/bin/file_length_ratchet.py"
-if ! python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
-  --expected-head "$BASE_SHA" --evidence-dir "$EVIDENCE_DIR/ratchet-base"; then
-  printf 'HELD main-baseline-red — inspect ratchet-base/result.json; no candidates merged\n'
+RATCHET_EXIT=0
+RATCHET_RESULT="$(python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+  --expected-head "$BASE_SHA" --evidence-dir "$EVIDENCE_DIR/ratchet-base")" || RATCHET_EXIT=$?
+BASE_RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || BASE_RATCHET_EVIDENCE=""
+if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$BASE_RATCHET_EVIDENCE" ] \
+  || ! jq -e '.valid == true' "$BASE_RATCHET_EVIDENCE/result.json" >/dev/null; then
+  printf '%s\n' "$RATCHET_RESULT"
+  printf 'HELD base ratchet — no candidates merged; evidence: %s\n' "$BASE_RATCHET_EVIDENCE"
   # Stop LAND, preserve evidence, clean scratch/release normally. Do not regen main.
   exit 1
 fi
 ~~~
 
-A red base belongs to main, never the first candidate. Surface the actual
-command error (including infrastructure errors); do not dispatch a candidate
-kickback or supply a bead to erase it.
+A base assertion failure (`ratchet-check-red`) is **main-baseline-red**, never
+the first candidate's fault. **ratchet-infra means fix the scratch, not main
+drifted**: repair missing/non-executable Jest, the dependency symlink or the
+runner, then retry; preserve and surface its actual command error.
+
+For a genuinely red main baseline, create a dedicated fix bead and, with Shane's explicit OK, run `UPDATE_BASELINE=1 FILE_LENGTH_GROW_OK=<fix-bead> npx jest --selectProjects node-tests --runTestsByPath tests/meta/file-length-ratchet.test.ts --runInBand` directly on an isolated scratch at main, review the diff, and land it as its own commit outside the candidate loop.
+Never feed that fix bead to the first candidate or use a candidate kickback to erase main drift.
 
 Configure the existing .beads merge=ours driver in common git info attributes
 (inside `$SCRATCH`, not `$REPO`'s own `.git/info/attributes`, since a worktree
@@ -409,10 +423,18 @@ if ! git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
   -m "land: $BR @ $SOURCE_SHA (batch $RUN_ID via /land-batch)"; then
   # Only a baseline-only conflict is mechanically resolvable here. The helper
   # inspects the COMPLETE unmerged list before changing anything.
-  if ! python3 "$RATCHET_HELPER" resolve-conflict --repo "$SCRATCH" \
-    --evidence-dir "$RATCHET_EVIDENCE-conflict"; then
+  RATCHET_EXIT=0
+  RATCHET_RESULT="$(python3 "$RATCHET_HELPER" resolve-conflict --repo "$SCRATCH" \
+    --evidence-dir "$RATCHET_EVIDENCE-conflict")" || RATCHET_EXIT=$?
+  CONFLICT_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || CONFLICT_EVIDENCE=""
+  if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$CONFLICT_EVIDENCE" ] \
+    || ! jq -e '.valid == true' "$CONFLICT_EVIDENCE/result.json" >/dev/null; then
+    printf '%s\n' "$RATCHET_RESULT"  # Includes the actual HOLD message.
+    if printf '%s\n' "$RATCHET_RESULT" | jq -e '.hold == "ratchet-no-merge-in-progress"' >/dev/null; then
+      continue  # Merge refused to START; clean staged/dirty Beads state, no abort.
+    fi
     git -C "$SCRATCH" merge --abort
-    printf 'HELD conflict: %s (see %s-conflict/result.json)\n' "$BR" "$RATCHET_EVIDENCE"
+    printf 'HELD conflict: %s (see %s)\n' "$BR" "$CONFLICT_EVIDENCE"
     continue
   fi
   if ! git -C "$SCRATCH" commit --no-edit --no-verify; then
@@ -453,24 +475,29 @@ HELD/BLOCKED report.
 
 #### Mandatory per-candidate file-length regeneration
 
-After the sensitive-file check passes and **before scoped gating or any push**:
+For the **ordinary candidate loop only**, after the sensitive-file check passes
+and **before scoped gating or any push** (migration uses its separate block below):
 
 ~~~bash
-if ! python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
+RATCHET_EXIT=0
+RATCHET_RESULT="$(python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
   --merge "$MERGE_SHA" --branch "$BR" --bead-id "$BEAD_ID" \
-  --evidence-dir "$RATCHET_EVIDENCE"; then
-  cat "$RATCHET_EVIDENCE/result.json"
+  --evidence-dir "$RATCHET_EVIDENCE")" || RATCHET_EXIT=$?
+RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || RATCHET_EVIDENCE=""
+if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$RATCHET_EVIDENCE" ] \
+  || ! jq -e '.valid == true' "$RATCHET_EVIDENCE/result.json" >/dev/null; then
+  printf '%s\n' "$RATCHET_RESULT"
   git -C "$SCRATCH" reset --hard "$MERGE_SHA^1"
   printf 'HELD ratchet: %s (see %s)\n' "$BR" "$RATCHET_EVIDENCE"
-  continue  # In a migration transaction, roll back the WHOLE unpushed set instead.
+  continue
 fi
-jq -e '.valid == true' "$RATCHET_EVIDENCE/result.json" >/dev/null || exit 1
 ~~~
 
 The helper requires the just-created two-parent merge at HEAD and a clean
 scratch (new files are already tracked by the merge). Both cleanliness checks
-ignore `.beads/` churn because `bd` can stage/export generated issue state
-between candidates. It always seeds the
+ignore `.beads/**` plus top-level `issues.jsonl` and `export-state.json`
+because `bd` can stage/export generated issue state between candidates; no
+other paths are excluded. It always seeds the
 regeneration from `MERGE_SHA^1`'s baseline, **even after a clean JSON merge**,
 then runs the existing generator with UPDATE_BASELINE=1 and
 FILE_LENGTH_GROW_OK="$BEAD_ID". This prevents incoming counts/allowances from
@@ -480,11 +507,13 @@ silently laundering growth. The exact command is the single-test run:
 # Executed by the helper with cwd=$SCRATCH; shown here for auditability.
 UPDATE_BASELINE=1 FILE_LENGTH_GROW_OK="$BEAD_ID" \
   python3 "$HOME/.claude/scripts/gated-test-run.py" jest \
-  --selectProjects node-tests --runTestsByPath tests/meta/file-length-ratchet.test.ts
+  --selectProjects node-tests --runTestsByPath tests/meta/file-length-ratchet.test.ts --runInBand
 ~~~
 
 Use the existing sizing wrapper for consistency; this is one ratchet test,
-not full Jest. `--command-json` is only for portable fixture tests.
+not full Jest; `--runInBand` makes the wrapper omit `--maxWorkers`. The helper
+kills the runner's entire process group on timeout before restoring the baseline.
+`--command-json` and `--timeout` allow injected runners and short deadlines in tests.
 Mechanically compare the generated baseline with the first parent: every
 raised limit or changed/new allowance must be a subset of
 `git diff --name-only MERGE_SHA^1 MERGE_SHA`, and every raised/new-oversized
@@ -492,6 +521,16 @@ entry must name this bead. Unrelated growth HOLDs as **ratchet-unrelated-growth*
 never silently attribute pre-existing main drift to a candidate. Previous
 allowances survive where a limit did not rise. This is the required baseline
 review, not a reminder for the landing agent to eyeball a diff.
+Attribution is last-writer-wins: when candidate B grows a file previously grown
+by A, its allowance changes to B rather than preserving a cumulative history.
+Because attribution uses `--no-renames`, moving an oversized file attributes
+its new path to the mover.
+
+Candidates changing `tests/meta/file-length-ratchet.test.ts`, `jest.config.js`
+or any `jest.setup*` file HOLD as **ratchet-generator-changed** before the
+generator runs. After regeneration, dropped entries whose paths still exist
+in the merged tree HOLD as **ratchet-entries-dropped**; actual candidate file
+deletions are allowed and both dropped lists are saved in the summary.
 
 After a second run in check mode, a changed baseline is committed alone as
 `chore(ratchet): regenerate file-length baseline for <branch> (<bead-id>)`.
@@ -500,16 +539,23 @@ command: Beads hooks otherwise stage/export unrelated issues even with
 `--only`. The ratchet regeneration, attribution, and check gates have already
 passed; authored feature merges retain their existing gates. No shared hook
 config is changed. If identical to the merge result, `commit_sha` is null and
-no commit is needed.
+no commit is needed. Repeating `regenerate` with the same merge/branch/bead
+returns the existing `commit_sha` when HEAD is its immediate baseline-only
+child with that exact subject; it does not run the generator or create another commit.
+For that retry, cite the original generation’s baseline artifacts alongside the
+new result; the retry records only identity checks.
 Keep `MERGE_SHA` pointing at the feature merge; HEAD may now be the ratchet
 commit. A later red scoped gate resets to `MERGE_SHA^1`, removing both.
 
-Each invocation requires a **fresh** evidence directory (add an attempt suffix
-on retry). It writes numbered `*-command.txt`, `*-raw-output.txt`, and numeric
+Each invocation allocates a **fresh** evidence directory: if the requested path
+exists it selects the first free `-2`, `-3`, … suffix, preserving prior evidence.
+Read the actual `evidence_dir` from the helper's printed JSON, including on HOLD;
+never read a previous attempt's result at the requested path. It writes numbered `*-command.txt`, `*-raw-output.txt`, and numeric
 `*-exit-code.txt` triples, plus `result.json`. Regeneration also saves
 `baseline-before.json`, `baseline-after.json`, `baseline.diff` (against the
 integration parent), and `baseline-summary.json` with old/new counts, raised
-entries, candidate files, allowance changes, and out-of-scope paths. Cite these
+entries, candidate files, allowance changes, out-of-scope paths, and
+`dropped`/`dropped_present` lists. Cite these
 in the final report. Regeneration also pins pre-existing, un-baselined main
 files of ≤350 lines without attribution, so `entries` outside
 `candidate_changed_files` are expected tightening of main's own drift; only
@@ -521,7 +567,11 @@ HOLD categories: **ratchet-missing-bead**, **ratchet-unrelated-growth**,
 **ratchet-invalid-attribution**, **ratchet-malformed-baseline**,
 **ratchet-invalid-input** (wrong root/SHA/non-merge), **ratchet-dirty-tree**,
 **ratchet-command-failed**, **ratchet-check-red**, **ratchet-check-mutated**,
-and **ratchet-authored-conflict**. Preserve their artifacts for Shane; these
+**ratchet-infra**, **ratchet-generator-changed**, **ratchet-entries-dropped**,
+**ratchet-no-merge-in-progress**, and **ratchet-authored-conflict**.
+`ratchet-no-merge-in-progress` means the merge refused to start (usually staged/
+dirty Beads state): print the message and clean that state before retrying,
+without `merge --abort`. Preserve their artifacts for Shane; these
 are not scoped-gate kickback candidates. The helper restores its baseline
 working file on pre-commit failure but never resets authored files or pushes.
 
@@ -650,7 +700,9 @@ If push is rejected because main moved, fetch origin main and preserve this
 attempt’s evidence. Recreate only the unpushed candidate/transaction in a fresh
 isolated scratch at the new pinned main SHA, starting with the base ratchet
 check, then replay the original pinned candidates and all Step 2 gates with
-fresh evidence directories. Do not rebase/reuse the old ratchet commits:
+fresh evidence directories. Increment `LAND_ATTEMPT` with the scratch-creation
+block so both the scratch path and branch name carry the new attempt suffix;
+record the replacement `INT`/`SCRATCH` in the heartbeat. Do not rebase/reuse the old ratchet commits:
 their attribution was checked against a different integration parent. Never
 force-push or replay already-pushed candidates. The no-ff merge message ties
 every land to RUN_ID; record the replacement MERGE_SHA for ledger/close checks.
@@ -669,13 +721,45 @@ Before the migration loop, capture its rollback point:
 
 ~~~bash
 MIGRATION_START_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
+MIGRATION_HELD=0
 ~~~
 
-Merge
-each migration feature sequentially in deterministic candidate-branch order.
-Run the sensitive-file check, **the same per-candidate ratchet regenerate block
-above with this candidate’s bead_id**, then its scoped gate before merging the
-next candidate. Retain every candidate’s ratchet commit; do not regenerate the
+Merge each migration feature sequentially in deterministic candidate-branch order.
+Use the source/bead validation and sensitive-file check commands above, but
+**never their ordinary-loop rollback/continue paths**: on any such failure,
+abort only if MERGE_HEAD exists, reset to `MIGRATION_START_SHA`, set
+`MIGRATION_HELD=1`, and `break` the migration loop. After each sensitive-file
+check passes, run this transaction-specific ratchet block with the candidate's
+`BR`, `BEAD_ID`, `MERGE_SHA`, and requested `RATCHET_EVIDENCE`, then its scoped
+gate before merging the next candidate (scoped failure uses the same whole-
+transaction reset/flag/break):
+
+~~~bash
+RATCHET_EXIT=0
+RATCHET_RESULT="$(python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
+  --merge "$MERGE_SHA" --branch "$BR" --bead-id "$BEAD_ID" \
+  --evidence-dir "$RATCHET_EVIDENCE")" || RATCHET_EXIT=$?
+RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || RATCHET_EVIDENCE=""
+if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$RATCHET_EVIDENCE" ] \
+  || ! jq -e '.valid == true' "$RATCHET_EVIDENCE/result.json" >/dev/null; then
+  printf '%s\n' "$RATCHET_RESULT"
+  git -C "$SCRATCH" reset --hard "$MIGRATION_START_SHA"
+  printf 'HELD whole migration transaction: %s (see %s)\n' "$BR" "$RATCHET_EVIDENCE"
+  MIGRATION_HELD=1
+  break  # Leave the migration loop; no candidate may be omitted.
+fi
+~~~
+
+Immediately **after** the migration loop, before reconciliation or any push:
+
+~~~bash
+if [ "$MIGRATION_HELD" -ne 0 ]; then
+  printf 'HELD whole migration transaction — no push\n'
+  exit 1  # Outside the loop; preserve evidence, clean scratch/release normally.
+fi
+~~~
+
+Retain every candidate’s ratchet commit; do not regenerate the
 complete transaction under the last bead or RUN_ID. On any merge/ratchet/scoped
 failure, preserve evidence and reset only this unpushed scratch transaction to
 `MIGRATION_START_SHA`; HOLD the transaction, with no partial migration push.
@@ -708,7 +792,7 @@ jq --argjson selected "$SELECTED_MIGRATION_BRANCHES_JSON" \
 jq -e '.candidates | length > 0' "$MIGRATION_CANDIDATES_JSON" >/dev/null
 ~~~
 
-Once every surviving migration feature is present, run the repository's
+Once every selected migration feature is present, run the repository's
 documented land-time recipe through the wrapper (it calls
 `scripts/reconcile-drizzle-migrations.mjs` directly because `package.json` may
 itself have suffered a clean-merge overwrite):
@@ -757,17 +841,29 @@ from the rebuilt snapshot delta before checking the integration database object
 by object. Native PostgreSQL is primary; PostgreSQL-WASM is an allowed sandbox
 fallback, not a mock. Missing PostgreSQL capability is red evidence, never a
 skip. Commit the generated reconciliation as
-`chore(migrations): reconcile <RUN_ID> migration batch`, rerun the scoped gates
-against the reconciled names, then run the final **check-only** ratchet below
-before the one normal non-force fast-forward push:
+`chore(migrations): reconcile <RUN_ID> migration batch` and **immediately**
+capture its SHA, before rerunning scoped gates or any other operation:
 
 ~~~bash
-if ! python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
-  --expected-head "$(git -C "$SCRATCH" rev-parse HEAD)" \
-  --evidence-dir "$EVIDENCE_DIR/ratchet-migration-final"; then
+RECONCILE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
+~~~
+
+Rerun the scoped gates against the reconciled names, then run the final
+**check-only** ratchet pinned to that captured commit before the one normal
+non-force fast-forward push:
+
+~~~bash
+RATCHET_EXIT=0
+RATCHET_RESULT="$(python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+  --expected-head "$RECONCILE_SHA" \
+  --evidence-dir "$EVIDENCE_DIR/ratchet-migration-final")" || RATCHET_EXIT=$?
+FINAL_RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || FINAL_RATCHET_EVIDENCE=""
+if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$FINAL_RATCHET_EVIDENCE" ] \
+  || ! jq -e '.valid == true' "$FINAL_RATCHET_EVIDENCE/result.json" >/dev/null; then
+  printf '%s\n' "$RATCHET_RESULT"
   git -C "$SCRATCH" reset --hard "$MIGRATION_START_SHA"
-  printf 'HELD migration transaction — final ratchet check failed\n'
-  exit 1  # Preserve evidence, clean scratch/release normally; no push.
+  printf 'HELD migration transaction — final ratchet check failed; evidence: %s\n' "$FINAL_RATCHET_EVIDENCE"
+  exit 1  # Outside the loop; preserve evidence, clean scratch/release normally; no push.
 fi
 ~~~
 
@@ -909,8 +1005,11 @@ This atomically updates ledger.json and pending-qa.md before tails can be pruned
 LAND never touches staging. Clean scratch/branch after ledger writes, then release:
 
 ~~~bash
-git -C "$REPO" worktree remove "$SCRATCH" --force
-git -C "$REPO" branch -D "land-batch/$RUN_ID"
+# Step 2 creates one scratch + branch per attempt (…-attempt-N); remove them all.
+for n in $(seq 1 "${LAND_ATTEMPT:-1}"); do
+  git -C "$REPO" worktree remove "$REPO/.claude/worktrees/land-batch-$RUN_ID-attempt-$n" --force
+  git -C "$REPO" branch -D "land-batch/$RUN_ID-attempt-$n"
+done
 ~~~
 
 This is the normal-completion path — the same convention (`land-batch-` worktree
