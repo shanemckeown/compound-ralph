@@ -13,17 +13,19 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 
 BASELINE = "tests/meta/file-length-baseline.json"
 # Beads exports are generated churn, never part of the baseline-only commit.
-CLEAN_PATHSPEC = ["--", ".", ":(top,exclude).beads/**"]
+CLEAN_PATHSPEC = ["--", ".", ":(top,exclude).beads/**",
+                  ":(top,exclude)issues.jsonl", ":(top,exclude)export-state.json"]
 BEAD = re.compile(r"(?:AestheticcNext|LUCY)-[a-z0-9.]+")
 DEFAULT_COMMAND = [
     "python3", str(Path.home() / ".claude/scripts/gated-test-run.py"), "jest",
     "--selectProjects", "node-tests", "--runTestsByPath",
-    "tests/meta/file-length-ratchet.test.ts",
+    "tests/meta/file-length-ratchet.test.ts", "--runInBand",
 ]
 
 
@@ -34,11 +36,20 @@ class Hold(RuntimeError):
 
 
 class Gate:
-    def __init__(self, repo, evidence, command):
+    def __init__(self, repo, evidence, command, timeout=600):
         self.repo = Path(repo).resolve()
-        self.evidence = Path(evidence).resolve()
-        self.evidence.mkdir(parents=True, exist_ok=False)
+        requested = Path(evidence).resolve()
+        self.evidence = requested
+        attempt = 1
+        while True:
+            try:
+                self.evidence.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                attempt += 1
+                self.evidence = requested.with_name(f"{requested.name}-{attempt}")
         self.command = command
+        self.timeout = timeout
         self.sequence = 0
         self.result = {"valid": False, "repo": str(self.repo),
                        "evidence_dir": str(self.evidence)}
@@ -59,19 +70,35 @@ class Gate:
         if grow_bead:
             rendered += f"UPDATE_BASELINE=1 FILE_LENGTH_GROW_OK={shlex.quote(grow_bead)} "
         Path(f"{prefix}-command.txt").write_text(
-            f"cd {shlex.quote(str(self.repo))}\n{rendered}{shlex.join(command)}\n")
+            f"cd {shlex.quote(str(self.repo))}\n{rendered}{shlex.join(command)}\n",
+            errors="surrogateescape")
         try:
-            proc = subprocess.run(command, cwd=self.repo, env=env, capture_output=True,
-                                  timeout=600)
-            output, errors, code = proc.stdout, proc.stderr, proc.returncode
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            output, errors, code = b"", str(exc).encode(), 124 if isinstance(
-                exc, subprocess.TimeoutExpired) else 127
+            proc = subprocess.Popen(command, cwd=self.repo, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    start_new_session=True)
+            try:
+                output, errors = proc.communicate(timeout=self.timeout)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                output, errors = proc.communicate()
+                errors += f"\nTimed out after {self.timeout}s; killed process group\n".encode()
+                code = 124
+        except OSError as exc:
+            output, errors, code = b"", str(exc).encode(errors="surrogateescape"), 127
         Path(f"{prefix}-raw-output.txt").write_bytes(output + errors)
         Path(f"{prefix}-exit-code.txt").write_text(f"{code}\n")
+        if code in (124, 127, 134, 137, -signal.SIGABRT, -signal.SIGKILL) or any(
+                marker in output + errors for marker in (
+                    b"Test suite failed to run", b"Cannot find module")):
+            raise Hold("ratchet-infra", f"{label} infrastructure failure (exit {code}); "
+                       f"fix scratch dependencies/runner and retry; see {prefix}-raw-output.txt")
         if code:
             raise Hold(category, f"{label} exited {code}; see {prefix}-raw-output.txt")
-        return output.decode("utf-8")
+        return output.decode("utf-8", errors="surrogateescape")
 
     def git(self, label, *args):
         return self.run(label, ["git", *args])
@@ -94,11 +121,24 @@ class Gate:
     def check(self, expected=None):
         self.identity(expected)
         self.require_clean()
+        self.require_jest()
         self.run("check", self.command, category="ratchet-check-red")
         self.require_clean()
 
+    def require_jest(self):
+        jest = self.repo / "node_modules/.bin/jest"
+        if not jest.is_file() or not os.access(jest, os.X_OK):
+            raise Hold("ratchet-infra", f"Missing or non-executable {jest}; fix the scratch's "
+                       "node_modules symlink to the repo's installed dependencies "
+                       "and ensure node_modules/.bin/jest is executable, then retry")
+
     def resolve_conflict(self):
         self.identity()
+        merge_head = self.git("merge-head-path", "rev-parse", "--git-path", "MERGE_HEAD").strip()
+        if not (self.repo / merge_head).is_file():
+            raise Hold("ratchet-no-merge-in-progress", "The merge refused to START (usually "
+                       "staged/dirty Beads state); clean that state and retry. "
+                       "Do not treat this as a conflict or call merge --abort")
         conflicts = self.git("unmerged", "diff", "--name-only", "--diff-filter=U", "-z")
         paths = set(filter(None, conflicts.split("\0")))
         if paths != {BASELINE}:
@@ -124,8 +164,10 @@ class Gate:
         except (ValueError, KeyError, AssertionError, TypeError) as exc:
             raise Hold("ratchet-malformed-baseline", "Invalid version-1 baseline") from exc
 
-    def verify_delta(self, before, after, changed, bead):
+    def verify_delta(self, before, after, changed, bead, tree):
         old, new = before["files"], after["files"]
+        dropped = old.keys() - new.keys()
+        dropped_present = dropped & tree
         raised = {p for p, count in new.items() if count > old.get(p, 350)}
         allowances = after["growAllowances"]
         reattributed = {p for p, owner in allowances.items()
@@ -139,10 +181,14 @@ class Gate:
                         "bead_id": allowances.get(p)} for p in sorted(raised)],
             "allowance_changes": sorted(reattributed), "out_of_scope": sorted(outside),
             "invalid_allowance_owners": sorted(bad_owners),
+            "dropped": sorted(dropped), "dropped_present": sorted(dropped_present),
             "entries": [{"path": p, "before": old.get(p), "after": new.get(p)}
                         for p in sorted(old.keys() | new.keys()) if old.get(p) != new.get(p)],
         }
         self.write_json("baseline-summary.json", summary)
+        if dropped_present:
+            raise Hold("ratchet-entries-dropped", "Baseline entries dropped for files still in "
+                       "the merged tree: " + ", ".join(sorted(dropped_present)))
         if outside:
             raise Hold("ratchet-unrelated-growth", "Growth/attribution outside candidate: " + ", ".join(sorted(outside)))
         if bad_owners:
@@ -153,13 +199,35 @@ class Gate:
             raise Hold("ratchet-missing-bead", "Use the resolved candidate bead_id, never RUN_ID")
         if not merge or not branch:
             raise Hold("ratchet-invalid-input", "--merge and --branch are required")
-        head = self.identity(merge)
+        head = self.identity()
         self.require_clean()
+        merge = self.git("merge-sha", "rev-parse", "--verify", merge).strip()
         parents = self.git("parents", "rev-list", "--parents", "-n", "1", head).split()
+        message = f"chore(ratchet): regenerate file-length baseline for {branch} ({bead})"
+        if head != merge:
+            if len(parents) == 2 and parents[1] == merge:
+                paths = self.git("retry-files", "diff", "--name-only", "--no-renames",
+                                 "-z", merge, head, "--").split("\0")
+                subject = self.git("retry-subject", "log", "-1", "--format=%s").strip()
+                if set(filter(None, paths)) == {BASELINE} and subject == message:
+                    self.result.update(merge_sha=merge, branch=branch, bead_id=bead,
+                                       commit_sha=head, commit_message=message)
+                    return
+            raise Hold("ratchet-invalid-input", "HEAD differs from the pinned merge SHA "
+                       "and is not its matching baseline-only ratchet commit")
         if len(parents) != 3:
             raise Hold("ratchet-invalid-input", "HEAD must be the just-created two-parent --no-ff merge")
+        self.require_jest()
         changed = set(filter(None, self.git(
             "candidate-files", "diff", "--name-only", "--no-renames", "-z", parents[1], head, "--").split("\0")))
+        generator_changes = {p for p in changed if p in (
+            "tests/meta/file-length-ratchet.test.ts", "jest.config.js")
+            or Path(p).name.startswith("jest.setup")}
+        if generator_changes:
+            raise Hold("ratchet-generator-changed", "Candidate changes ratchet/Jest execution: "
+                       + ", ".join(sorted(generator_changes)))
+        tree = set(filter(None, self.git(
+            "merged-tree", "ls-tree", "-r", "--name-only", "-z", head).split("\0")))
         before_text = self.git("parent-baseline", "show", f"{parents[1]}:{BASELINE}")
         before = self.baseline(before_text)
         path = self.repo / BASELINE
@@ -168,14 +236,15 @@ class Gate:
         try:
             # Even a clean merge may have imported obsolete counts/allowances.
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(before_text)
+            path.write_text(before_text, encoding="utf-8", errors="surrogateescape")
             self.run("regenerate", self.command, grow_bead=bead)
-            after = self.baseline(path.read_text())
-            (self.evidence / "baseline-before.json").write_text(before_text)
+            after = self.baseline(path.read_text(encoding="utf-8", errors="surrogateescape"))
+            (self.evidence / "baseline-before.json").write_text(
+                before_text, encoding="utf-8", errors="surrogateescape")
             (self.evidence / "baseline-after.json").write_bytes(path.read_bytes())
             diff = self.git("baseline-diff", "diff", parents[1], "--", BASELINE)
-            (self.evidence / "baseline.diff").write_text(diff)
-            self.verify_delta(before, after, changed, bead)
+            (self.evidence / "baseline.diff").write_text(diff, errors="surrogateescape")
+            self.verify_delta(before, after, changed, bead, tree)
             generated = path.read_bytes()
             self.run("check", self.command, category="ratchet-check-red")
             if generated != path.read_bytes():
@@ -185,7 +254,6 @@ class Gate:
             untracked = self.git("untracked", "ls-files", "--others", "--exclude-standard", "-z", *CLEAN_PATHSPEC)
             if dirty - {BASELINE} or untracked:
                 raise Hold("ratchet-dirty-tree", "Ratchet command changed files outside the baseline")
-            message = f"chore(ratchet): regenerate file-length baseline for {branch} ({bead})"
             if self.git("baseline-status", "diff", "HEAD", "--", BASELINE):
                 # Beads hooks stage/export unrelated state even for --only commits.
                 # Scope this exception to the already-verified generated artifact.
@@ -217,13 +285,16 @@ def main():
     parser.add_argument("--branch")
     parser.add_argument("--bead-id")
     parser.add_argument("--command-json", help="Test command argv JSON; defaults to gated single-file Jest")
+    parser.add_argument("--timeout", type=float, default=600, help="Subprocess timeout in seconds")
     args = parser.parse_args()
+    if not 0 < args.timeout < float("inf"):
+        parser.error("--timeout must be positive and finite")
     gate = None
     try:
         command = json.loads(args.command_json) if args.command_json else DEFAULT_COMMAND
         if not isinstance(command, list) or not command or not all(isinstance(x, str) for x in command):
             raise Hold("ratchet-invalid-input", "--command-json must be a nonempty string array")
-        gate = Gate(args.repo, args.evidence_dir, command)
+        gate = Gate(args.repo, args.evidence_dir, command, args.timeout)
         if args.action == "check":
             gate.check(args.expected_head)
         elif args.action == "resolve-conflict":
