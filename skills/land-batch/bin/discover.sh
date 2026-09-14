@@ -1099,6 +1099,7 @@ def main():
         patch_unique_count = None
         patch_equivalent_count = None
         conflicts_with_base = False
+        baseline_regeneration_required = False
         conflicting_files = []
         branch_changed_files = []
         sensitive_paths = []
@@ -1119,10 +1120,16 @@ def main():
                 recommendation = "held-bead-ambiguous"
             else:
                 conflicts_with_base, conflicting_files = merge_conflicts(REPO, base_ref, branch_ref)
+                # Generated baseline conflicts are resolved from the integration
+                # parent by Step 2, then mechanically regenerated before any push.
+                baseline_regeneration_required = bool(
+                    conflicts_with_base
+                    and conflicting_files == ["tests/meta/file-length-baseline.json"]
+                )
                 branch_changed_files = changed_files(REPO, base_ref, branch_ref)
                 sensitive_paths = sensitive_files(branch_changed_files)
                 touches_sensitive = bool(sensitive_paths)
-                if conflicts_with_base:
+                if conflicts_with_base and not baseline_regeneration_required:
                     hold_reasons.append("held-conflict")
                 if stale:
                     hold_reasons.append("held-stale")
@@ -1130,7 +1137,7 @@ def main():
                     hold_reasons.append("held-sensitive")
                 if stale:
                     recommendation = "held-stale"
-                elif conflicts_with_base:
+                elif conflicts_with_base and not baseline_regeneration_required:
                     recommendation = "held-conflict"
                 elif touches_sensitive:
                     recommendation = "review-sensitive"
@@ -1203,7 +1210,7 @@ def main():
             held_labels.append("HELD — branch-only completion; premise review required")
         elif source["source_kind"] == "remote-branch" and patch_unique_count and patch_unique_count > 0:
             held_labels.append("HELD — branch-only source; completion evidence incomplete")
-        if conflicts_with_base:
+        if conflicts_with_base and not baseline_regeneration_required:
             held_labels.append("HELD — conflicts with main; rebase required")
         if stale:
             held_labels.append("HELD — stale branch; premise review required")
@@ -1236,6 +1243,7 @@ def main():
                 "age_days": age_days,
                 "conflicts_with_base": conflicts_with_base,
                 "conflicting_files": conflicting_files,
+                "baseline_regeneration_required": baseline_regeneration_required,
                 "touches_sensitive": touches_sensitive,
                 "sensitive_paths": sensitive_paths,
                 "hold_reasons": hold_reasons,
@@ -1311,6 +1319,9 @@ def main():
                     continue
                 sibling_conflicts.append(
                     {
+                        **({"kind": "generated-baseline"} if real_files == [
+                            "tests/meta/file-length-baseline.json"
+                        ] else {}),
                         "branch_a": left["branch"],
                         "branch_b": right["branch"],
                         "files": real_files or files,

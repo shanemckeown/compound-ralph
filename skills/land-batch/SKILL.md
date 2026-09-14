@@ -1,6 +1,6 @@
 ---
 name: land-batch
-version: 0.4.1
+version: 0.5.0
 description: |
   Serialises parallel Claude worktree landing with a durable lock, FIFO queue,
   and cross-run QA ledger. Default /land-batch cheaply discovers, curates, and
@@ -55,7 +55,8 @@ reversal.
    operate on a feature worktree's main or checkout/stash/clean the dirty trunk.
 3. **New main/prod invariant.** LAND may push green --no-ff feature merges to
    main but never deploys. SHIP alone promotes traffic. Never force-push. If
-   main moved, fetch, rebase, re-gate, retry; abort and hold any rebase conflict.
+   main moved, fetch and replay the unpushed LAND transaction from a fresh
+   checked base, re-gate, retry; abort and hold authored conflicts.
 4. **Direct evidenced deploys only.** One AskUserQuestion at the prod gate,
    defaulting to post-19:30 BST except explicit S1. Never trust deploy agents.
 5. **Never auto-resolve authored conflicts.** Abort/hold conflicts; never touch
@@ -64,11 +65,15 @@ reversal.
    .beads/ gets only the local merge=ours generated-churn driver. The dedicated
    migration gate may mechanically rebuild generated journal/snapshot metadata;
    it never changes migration SQL and does not license resolving an SQL conflict.
+   `tests/meta/file-length-baseline.json` is the other generated exception:
+   keep the integration side, then regenerate via the Step 2 helper. Never
+   hand-merge JSON or take the incoming baseline as the regeneration input.
 6. **Sensitive paths never auto-land.** Require explicit Shane opt-in and exclude
    a candidate depending on a held sensitive branch.
 7. **Worktree finish gate preserved; branch-only completion quarantined.** A
    worktree source still requires effectively_clean, ahead >=1, non-active
-   session, premise OK, non-sensitive, non-conflicting, and non-retired.
+   session, premise OK, non-sensitive, non-conflicting (except the generated
+   baseline), and non-retired.
    A remote-only source is discoverable but never auto-landable in this release,
    even when exact bead CLOSED + pinned patch-unique tip proves it finished.
    Optional .claude/land-ready.json remains confidence metadata; tail vetoes
@@ -119,9 +124,19 @@ reversal.
     not auto-resolved, matching guardrail 5's "never auto-resolve" spirit even
     though git itself reported no conflict.
     🔴 **A manual orchestrator land must run `npm test` (the `node-tests`
-    project at minimum) before pushing main** — a manual land bypasses the
-    mechanical content-loss check above entirely, which is exactly how the
+    project at minimum) before pushing main**, after the same base check and
+    per-candidate ratchet regeneration/attribution gate in Step 2. A manual
+    land must use a resolved bead id, preserve baseline evidence, and HOLD
+    unrelated growth; the ratchet helper never substitutes for `npm test`.
+    A manual land bypasses the mechanical content-loss check above entirely, which is exactly how the
     2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
+
+11. **Ratchet before every LAND push.** Check the pinned base first; after
+    each merge and sensitive-file check, regenerate with that candidate’s
+    resolved `bead_id` and mechanically verify growth attribution before the
+    scoped gate. This includes every migration candidate, plus a final check
+    after migration reconciliation. Unknown bead, unrelated growth, or missing
+    evidence means HOLD. Never use RUN_ID as FILE_LENGTH_GROW_OK.
 
 ## Shared mutex, queue, and ledger
 
@@ -264,7 +279,13 @@ top-level `skipped_merged_count`; a worktree-backed branch remains visible as
 `source_ref` and `tip_sha`. It classifies fully landed
 patches as `skip-patch-equivalent` before merge analysis, explicit retired.txt
 matches as hard `skip-retired`, age >45 as loud `held-stale`, and base conflicts
-as loud `held-conflict` with `conflicting_files`.
+as loud `held-conflict` with `conflicting_files`. The exact baseline-only
+conflict is the narrow exception: discovery retains `conflicts_with_base` and
+`conflicting_files` as raw facts, sets `baseline_regeneration_required=true`,
+and preserves all other finish/sensitivity gates. Render **GENERATED BASELINE —
+regenerate in Step 2**, not an authored-conflict HOLD. A sibling conflict with
+`kind=generated-baseline` may be jointly selected; Step 2 resolves/regenerates
+each merge. Empty/unknown conflict paths or any authored path still HOLD.
 
 An exact/uniquely aliased CLOSED bead plus a pinned patch-unique remote tip is
 finish evidence only. Render it exactly as **HELD — branch-only completion;
@@ -353,7 +374,8 @@ Keep the multiSelect curation gate exactly:
 - At most four options/question and four questions/call. Chunk >4; above 16,
   offer the highest-confidence 16 and visibly log every remainder.
 - Print HELD/BLOCKED/SKIP beside the selector. Deselection is held by Shane.
-- Sensitive candidates require separate explicit opt-in. Choose at most one of
+- Sensitive candidates require separate explicit opt-in. A `generated-baseline`
+  sibling pair may both land with mandatory per-candidate regeneration. Choose at most one of
   an authored/Git sibling-conflict pair. A `migration-number-collision` pair may
   be jointly selected only through the all-or-nothing migration transaction in
   Step 2; it is blocked from the ordinary per-feature push path.
@@ -375,8 +397,28 @@ worktree first — do not reuse or `cd` into `$REPO`'s own working tree for any
 part of Step 2:
 
 ~~~bash
-git -C "$REPO" worktree add "$SCRATCH" -b "land-batch/$RUN_ID" origin/main
+git -C "$REPO" worktree add "$SCRATCH" -b "land-batch/$RUN_ID" "$BASE_SHA"
 ~~~
+
+Before the first merge, prove the pinned main baseline is green. Dependency
+setup must already be complete in `$SCRATCH` (the usual ignored node_modules
+symlink); all source must be tracked and the scratch clean. The helper runs
+from the scratch root and strips inherited UPDATE_BASELINE/FILE_LENGTH_GROW_OK
+in check mode, so this cannot accidentally repair main drift:
+
+~~~bash
+RATCHET_HELPER="$HOME/.claude/skills/land-batch/bin/file_length_ratchet.py"
+if ! python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+  --expected-head "$BASE_SHA" --evidence-dir "$EVIDENCE_DIR/ratchet-base"; then
+  printf 'HELD main-baseline-red — inspect ratchet-base/result.json; no candidates merged\n'
+  # Stop LAND, preserve evidence, clean scratch/release normally. Do not regen main.
+  exit 1
+fi
+~~~
+
+A red base belongs to main, never the first candidate. Surface the actual
+command error (including infrastructure errors); do not dispatch a candidate
+kickback or supply a bead to erase it.
 
 Configure the existing .beads merge=ours driver in common git info attributes
 (inside `$SCRATCH`, not `$REPO`'s own `.git/info/attributes`, since a worktree
@@ -388,6 +430,14 @@ same-named local branch in its place:
 
 ~~~bash
 BR="<candidate.branch>"
+BEAD_ID="<candidate.bead_id from discover.json; epic id for a bundle>"
+# Use the resolved discovery identity. Never guess one or pass RUN_ID.
+if ! [[ "$BEAD_ID" =~ ^(AestheticcNext|LUCY)-[a-z0-9.]+$ ]]; then
+  printf 'HELD ratchet-missing-bead: %s\n' "$BR"
+  continue
+fi
+# Fresh per-attempt directory; a branch slash is encoded for readable paths.
+RATCHET_EVIDENCE="$EVIDENCE_DIR/ratchet-${BR//\//__}"
 SOURCE_REF="<candidate.source_ref>"
 SOURCE_SHA="<candidate.tip_sha>"
 if ! CURRENT_SOURCE_SHA="$(
@@ -397,14 +447,31 @@ if ! CURRENT_SOURCE_SHA="$(
   printf 'HELD source missing/moved; rediscover: %s\n' "$SOURCE_REF"
   continue
 fi
-git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
-  -m "land: $BR @ $SOURCE_SHA (batch $RUN_ID via /land-batch)"
+if ! git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
+  -m "land: $BR @ $SOURCE_SHA (batch $RUN_ID via /land-batch)"; then
+  # Only a baseline-only conflict is mechanically resolvable here. The helper
+  # inspects the COMPLETE unmerged list before changing anything.
+  if ! python3 "$RATCHET_HELPER" resolve-conflict --repo "$SCRATCH" \
+    --evidence-dir "$RATCHET_EVIDENCE-conflict"; then
+    git -C "$SCRATCH" merge --abort
+    printf 'HELD conflict: %s (see %s-conflict/result.json)\n' "$BR" "$RATCHET_EVIDENCE"
+    continue
+  fi
+  if ! git -C "$SCRATCH" commit --no-edit --no-verify; then
+    git -C "$SCRATCH" merge --abort
+    printf 'HELD resolved merge commit failed: %s\n' "$BR"
+    continue
+  fi
+fi
 MERGE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 ~~~
 
-A merge conflict means abort and hold it. Even a clean (no-conflict) merge is
-not yet trusted — per Hard guardrail 10, run the sensitive-file check before
-the scoped gate:
+An authored merge conflict means abort and hold it. The baseline-only
+exception above restores `HEAD`'s baseline to both index and worktree, then
+finishes the merge; it does not hand-merge JSON. Taking the incoming baseline
+would let stale counts overwrite earlier candidates’ allowances and attribute
+their growth to this bead. Even a clean (no-conflict) merge is not yet trusted —
+per Hard guardrail 10, run the sensitive-file check before the scoped gate:
 
 ~~~bash
 SENSITIVE_MERGE_LOG="$EVIDENCE_DIR/sensitive-merge-check-$BR.log"
@@ -426,7 +493,81 @@ Treat it exactly like guardrail 5's other HOLD categories: preserve the log,
 do not touch the file to "fix" it yourself, surface it in the final
 HELD/BLOCKED report.
 
-For each merge that passes both checks, run full-project typecheck via
+#### Mandatory per-candidate file-length regeneration
+
+After the sensitive-file check passes and **before scoped gating or any push**:
+
+~~~bash
+if ! python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
+  --merge "$MERGE_SHA" --branch "$BR" --bead-id "$BEAD_ID" \
+  --evidence-dir "$RATCHET_EVIDENCE"; then
+  cat "$RATCHET_EVIDENCE/result.json"
+  git -C "$SCRATCH" reset --hard "$MERGE_SHA^1"
+  printf 'HELD ratchet: %s (see %s)\n' "$BR" "$RATCHET_EVIDENCE"
+  continue  # In a migration transaction, roll back the WHOLE unpushed set instead.
+fi
+jq -e '.valid == true' "$RATCHET_EVIDENCE/result.json" >/dev/null || exit 1
+~~~
+
+The helper requires the just-created two-parent merge at HEAD and a clean
+scratch (new files are already tracked by the merge). Both cleanliness checks
+ignore `.beads/` churn because `bd` can stage/export generated issue state
+between candidates. It always seeds the
+regeneration from `MERGE_SHA^1`'s baseline, **even after a clean JSON merge**,
+then runs the existing generator with UPDATE_BASELINE=1 and
+FILE_LENGTH_GROW_OK="$BEAD_ID". This prevents incoming counts/allowances from
+silently laundering growth. The exact command is the single-test run:
+
+~~~bash
+# Executed by the helper with cwd=$SCRATCH; shown here for auditability.
+UPDATE_BASELINE=1 FILE_LENGTH_GROW_OK="$BEAD_ID" \
+  python3 "$HOME/.claude/scripts/gated-test-run.py" jest \
+  --selectProjects node-tests --runTestsByPath tests/meta/file-length-ratchet.test.ts
+~~~
+
+Use the existing sizing wrapper for consistency; this is one ratchet test,
+not full Jest. `--command-json` is only for portable fixture tests.
+Mechanically compare the generated baseline with the first parent: every
+raised limit or changed/new allowance must be a subset of
+`git diff --name-only MERGE_SHA^1 MERGE_SHA`, and every raised/new-oversized
+entry must name this bead. Unrelated growth HOLDs as **ratchet-unrelated-growth**;
+never silently attribute pre-existing main drift to a candidate. Previous
+allowances survive where a limit did not rise. This is the required baseline
+review, not a reminder for the landing agent to eyeball a diff.
+
+After a second run in check mode, a changed baseline is committed alone as
+`chore(ratchet): regenerate file-length baseline for <branch> (<bead-id>)`.
+The generated-only commit scopes `-c core.hooksPath=/dev/null` to that Git
+command: Beads hooks otherwise stage/export unrelated issues even with
+`--only`. The ratchet regeneration, attribution, and check gates have already
+passed; authored feature merges retain their existing gates. No shared hook
+config is changed. If identical to the merge result, `commit_sha` is null and
+no commit is needed.
+Keep `MERGE_SHA` pointing at the feature merge; HEAD may now be the ratchet
+commit. A later red scoped gate resets to `MERGE_SHA^1`, removing both.
+
+Each invocation requires a **fresh** evidence directory (add an attempt suffix
+on retry). It writes numbered `*-command.txt`, `*-raw-output.txt`, and numeric
+`*-exit-code.txt` triples, plus `result.json`. Regeneration also saves
+`baseline-before.json`, `baseline-after.json`, `baseline.diff` (against the
+integration parent), and `baseline-summary.json` with old/new counts, raised
+entries, candidate files, allowance changes, and out-of-scope paths. Cite these
+in the final report. Regeneration also pins pre-existing, un-baselined main
+files of ≤350 lines without attribution, so `entries` outside
+`candidate_changed_files` are expected tightening of main's own drift; only
+`raised`/`allowance_changes` outside the candidate cause an out-of-scope HOLD.
+Nonzero exit, absent/malformed result, or missing required
+artifacts is HOLD; never proceed on narration alone.
+
+HOLD categories: **ratchet-missing-bead**, **ratchet-unrelated-growth**,
+**ratchet-invalid-attribution**, **ratchet-malformed-baseline**,
+**ratchet-invalid-input** (wrong root/SHA/non-merge), **ratchet-dirty-tree**,
+**ratchet-command-failed**, **ratchet-check-red**, **ratchet-check-mutated**,
+and **ratchet-authored-conflict**. Preserve their artifacts for Shane; these
+are not scoped-gate kickback candidates. The helper restores its baseline
+working file on pre-commit failure but never resets authored files or pushes.
+
+For each merge that passes these checks, run full-project typecheck via
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
 and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
 for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
@@ -549,11 +690,15 @@ fi
 
 Latency/budget note: this is one GLM call per CLOSED bead, not per candidate — a 20-branch LAND run with 15 closes is 15 calls. If that proves too slow/expensive in practice, batch multiple closed beads' diffs into one GLM call per land-batch run instead of one-per-bead, and say so plainly rather than silently skipping the check.
 
-If push is rejected because main moved, `git -C "$SCRATCH" fetch origin main` and
-`git -C "$SCRATCH" rebase --rebase-merges origin/main`, re-gate, retry. Abort/hold
-rebase conflicts. Never force-push. The no-ff merge message ties every land to
-RUN_ID. Every command in this retry stays scoped to `$SCRATCH` — same guardrail
-as Step 2's merge loop, for the same reason.
+If push is rejected because main moved, fetch origin main and preserve this
+attempt’s evidence. Recreate only the unpushed candidate/transaction in a fresh
+isolated scratch at the new pinned main SHA, starting with the base ratchet
+check, then replay the original pinned candidates and all Step 2 gates with
+fresh evidence directories. Do not rebase/reuse the old ratchet commits:
+their attribution was checked against a different integration parent. Never
+force-push or replay already-pushed candidates. The no-ff merge message ties
+every land to RUN_ID; record the replacement MERGE_SHA for ledger/close checks.
+All retry mutations stay in scratch worktrees, never the trunk checkout.
 
 #### Mandatory migration-batch transaction
 
@@ -564,12 +709,31 @@ selected migration feature is still unintegrated: parallel branches commonly
 claim the same next number, and only the complete selected set can be safely
 numbered.
 
-Merge and scoped-gate each migration feature sequentially in deterministic
-candidate-branch order. A conflict in authored SQL or application code is still
+Before the migration loop, capture its rollback point:
+
+~~~bash
+MIGRATION_START_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
+~~~
+
+Merge
+each migration feature sequentially in deterministic candidate-branch order.
+Run the sensitive-file check, **the same per-candidate ratchet regenerate block
+above with this candidate’s bead_id**, then its scoped gate before merging the
+next candidate. Retain every candidate’s ratchet commit; do not regenerate the
+complete transaction under the last bead or RUN_ID. On any merge/ratchet/scoped
+failure, preserve evidence and reset only this unpushed scratch transaction to
+`MIGRATION_START_SHA`; HOLD the transaction, with no partial migration push.
+A conflict in authored SQL or application code is still
 held under Guardrail 5. Generated `drizzle/meta/_journal.json` and numeric
 `drizzle/meta/NNNN_snapshot.json` conflicts are the narrow mechanical exception:
-verify the complete unmerged-path list contains no authored path, keep the
-integration-side generated files temporarily, and finish the merge. Never take
+verify the complete unmerged-path list contains only those generated paths
+and/or `tests/meta/file-length-baseline.json`, never an authored path. Keep the
+integration-side Drizzle generated files temporarily (remove a conflicted new
+snapshot if no integration-side version exists). If the baseline is also
+conflicted, resolve the Drizzle paths first, then run `resolve-conflict` above
+against the remaining baseline-only conflict. Finish the merge. If any step
+fails, abort and HOLD the whole transaction; never use the ordinary loop’s
+`continue` to omit a migration candidate silently. Never take
 one branch's generated snapshot as the final answer. The wrapper below rebuilds
 those files from every selected candidate's pinned `tip_sha`; a missing or moved
 source, SQL hash change, SQL path/tag collision, or byte-identical SQL with a
@@ -638,9 +802,25 @@ by object. Native PostgreSQL is primary; PostgreSQL-WASM is an allowed sandbox
 fallback, not a mock. Missing PostgreSQL capability is red evidence, never a
 skip. Commit the generated reconciliation as
 `chore(migrations): reconcile <RUN_ID> migration batch`, rerun the scoped gates
-against the reconciled names, then make one normal non-force fast-forward push.
-If main moved, rebase, rerun reconciliation and the entire from-empty proof, and
-only then retry the push.
+against the reconciled names, then run the final **check-only** ratchet below
+before the one normal non-force fast-forward push:
+
+~~~bash
+if ! python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+  --expected-head "$(git -C "$SCRATCH" rev-parse HEAD)" \
+  --evidence-dir "$EVIDENCE_DIR/ratchet-migration-final"; then
+  git -C "$SCRATCH" reset --hard "$MIGRATION_START_SHA"
+  printf 'HELD migration transaction — final ratchet check failed\n'
+  exit 1  # Preserve evidence, clean scratch/release normally; no push.
+fi
+~~~
+
+This final check catches reconciliation drift without assigning it to the
+last migration bead. If main moved, replay the whole unpushed transaction from
+the newly checked base as above, rerun each candidate’s ratchet and scoped
+gates, reconciliation, the entire from-empty proof, and the final ratchet check
+before retrying. SHIP Step 4 remains a full validation of main; it is never a
+late substitute for these LAND gates.
 
 ### Step 2.5 — Dispatch qualifying kickback fixes after the final LAND push
 
@@ -854,8 +1034,9 @@ git -C "$REPO" worktree add "$FIX_SCRATCH" origin/main
 
 For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files;
 surface any sensitive path. Commit atomically, then direct ff-push to main with
-the same fetch/rebase/re-gate/retry, never-force mechanics as LAND (all
-`-C "$FIX_SCRATCH"`). Redeploy staging with both gates and re-run affected QA.
+SHIP’s existing fetch/rebase/re-gate/retry discipline, never force-pushing
+(all `-C "$FIX_SCRATCH"`). LAND candidate merges use fresh replay as documented
+in Step 2; these direct SHIP fix commits retain their existing retry flow. Redeploy staging with both gates and re-run affected QA.
 
 If a feature cannot be clean, verify MERGE_SHA^2 exists (real --no-ff merge),
 then inside a fresh `$FIX_SCRATCH` off current origin/main:
@@ -941,7 +1122,10 @@ branch, kickback bead ID, Agent View session name, one-line failure summary,
 attempt number, and primary evidence path. Keep it strictly separate from the
 HELD/BLOCKED/SKIP judgment section, which contains baseline-red, sensitive,
 conflict, malformed, infra-after-retry, same-signature, cap-exceeded, stalled,
-and launch-failure cases. Do not send Slack/Hermes or other proactive notices;
+launch-failure, main-baseline-red, and every ratchet HOLD category above.
+Cite each candidate’s ratchet result, baseline summary/diff, command triples,
+and ratchet commit SHA (or explicit no-change), plus the migration final check.
+Do not send Slack/Hermes or other proactive notices;
 the report, discovery label, and --status are the brief.
 
 Run tests with:
