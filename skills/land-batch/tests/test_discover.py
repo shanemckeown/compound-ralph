@@ -779,3 +779,47 @@ def test_remote_only_kickback_fix_is_identified_by_resolved_bead_without_marker(
         "original_branch": "fix/AestheticcNext-original",
         "state": "stalled",
     }
+
+
+def test_generated_baseline_base_conflict_can_reach_regeneration_gate(tmp_path):
+    repo = _init_repo(tmp_path)
+    path = 'tests/meta/file-length-baseline.json'
+    _write(repo / path, '{"version":1,"files":{"lib/schema.ts":2},"growAllowances":{}}\n')
+    _commit_all(repo, 'baseline')
+    wt = _add_worktree(repo, tmp_path, 'goal/aestheticcnext-ratchet')
+    _write(wt / path, '{"version":1,"files":{"lib/schema.ts":3},"growAllowances":{}}\n')
+    _commit_all(wt, 'feature baseline')
+    _write(repo / path, '{"version":1,"files":{"lib/schema.ts":4},"growAllowances":{}}\n')
+    _commit_all(repo, 'main baseline')
+    candidate = _candidate(_discover(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
+    assert candidate['conflicts_with_base'] is True
+    assert candidate['conflicting_files'] == [path]
+    assert candidate['baseline_regeneration_required'] is True
+    assert candidate['auto_land'] is True
+    assert 'held-conflict' not in candidate['hold_reasons']
+    # A real authored conflict alongside it must still quarantine the candidate.
+    _write(wt / 'app.txt', 'branch authored edit\n')
+    _commit_all(wt, 'authored feature')
+    _write(repo / 'app.txt', 'main authored edit\n')
+    _commit_all(repo, 'authored main')
+    candidate = _candidate(_discover(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
+    assert candidate['baseline_regeneration_required'] is False
+    assert candidate['auto_land'] is False
+    assert candidate['recommendation'] == 'held-conflict'
+
+
+def test_generated_baseline_sibling_pair_is_labelled_not_authored_conflict(tmp_path):
+    repo = _init_repo(tmp_path)
+    path = 'tests/meta/file-length-baseline.json'
+    _write(repo / path, '{"version":1,"files":{"lib/schema.ts":2},"growAllowances":{}}\n')
+    _commit_all(repo, 'baseline')
+    branches = ['goal/aestheticcnext-ratch1', 'goal/aestheticcnext-ratch2']
+    for count, branch in enumerate(branches, 3):
+        wt = _add_worktree(repo, tmp_path, branch)
+        _write(wt / path, json.dumps({'version': 1, 'files': {'lib/schema.ts': count}, 'growAllowances': {}}) + '\n')
+        _commit_all(wt, 'branch baseline')
+    report = _discover(repo, tmp_path / 'home')
+    assert all(_candidate(report, branch)['auto_land'] for branch in branches)
+    assert report['sibling_conflicts'] == [{
+        'kind': 'generated-baseline', 'branch_a': branches[0],
+        'branch_b': branches[1], 'files': [path]}]
