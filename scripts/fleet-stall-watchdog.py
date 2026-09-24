@@ -236,22 +236,20 @@ def check_unacknowledged_blocked(alerts: list[str]) -> None:
             print(f"ACKNOWLEDGEMENT ERROR: cannot write {seen_path}: {exc}")
 
 
-def parse_fleet_slots(output: str) -> tuple[int, int]:
-    # fleet-slots.py's summary block always prints "codex_glm:    <n>" -- that count
-    # alone is authoritative. The "active codex_glm:" listing section and the
-    # "queued (<n>):" section are BOTH conditional: fleet-slots.py only prints them
-    # when there is something to list (cg > 0, or the queue is non-empty). Their
-    # absence means 0, not a parse failure -- confirmed live: a real `status` run
-    # with codex_glm=0 prints no "active codex_glm:" line at all.
-    active_match = re.search(r"^codex_glm:\s*(\d+)", output, re.IGNORECASE | re.MULTILINE)
-    if not active_match:
-        raise ValueError("codex_glm summary line not found")
-    active_count = int(active_match.group(1))
+def parse_fleet_slots(output: str) -> tuple[int, int, int]:
+    # Builders run as agent_view slots ("agent_view:   2/7"). codex_glm workers are
+    # retired (Shane, 24 Sep): counting them made this fire every 15 min whenever
+    # anything was queued. The "queued (<n>):" section is only printed when the
+    # queue is non-empty; its absence means 0.
+    slots_match = re.search(r"^agent_view:\s*(\d+)\s*/\s*(\d+)", output, re.IGNORECASE | re.MULTILINE)
+    if not slots_match:
+        raise ValueError("agent_view summary line not found")
+    active_count, capacity = int(slots_match.group(1)), int(slots_match.group(2))
 
     queue_match = re.search(r"\bqueued\s*\((\d+)\)\s*:", output, re.IGNORECASE)
     queue_depth = int(queue_match.group(1)) if queue_match else 0
 
-    return active_count, queue_depth
+    return active_count, capacity, queue_depth
 
 
 def check_queue_stall(alerts: list[str]) -> None:
@@ -272,14 +270,16 @@ def check_queue_stall(alerts: list[str]) -> None:
         return
 
     try:
-        active_count, queue_depth = parse_fleet_slots(result.stdout)
+        active_count, capacity, queue_depth = parse_fleet_slots(result.stdout)
     except ValueError as exc:
         fire(f"Cannot parse fleet-slots.py status: {exc}", alerts)
         return
 
-    if queue_depth > 0 and active_count == 0:
+    # A real stall is queued work while builder slots sit free (seen 24 Sep:
+    # 2/7 active, 22 queued). A full fleet with a queue is normal.
+    if queue_depth > 0 and active_count < capacity:
         fire(
-            f"Fleet queue is stalled: {queue_depth} queued, zero active codex_glm workers",
+            f"Fleet queue is stalled: {queue_depth} queued, only {active_count}/{capacity} builder slots in use",
             alerts,
         )
 
