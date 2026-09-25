@@ -29,7 +29,7 @@ Observed 2026-05-13 on `AestheticcNext-sdait` — fix shipped via Plan-Build-QA 
 
 `/do-bead` is retired (Ralph one-prompt loop, single model). Use `/goal` for everything from single beads to epic bundles.
 
-Plan + Build with Claude Opus, QA with OpenAI Codex 5.5 (adversarial, model-independent). The partnership loop catches what one-model loops miss.
+Plan + Build with Claude Opus; the own-gate review is `aestheticc-review code` (Codex Astra at xhigh, plus a fresh Opus head-to-head on money / patient data / tenancy). The seats are the Aestheticc/CLAUDE.md model table. The partnership loop catches what one-model loops miss.
 
 Fired from a fresh /agent chat. The /agent view is the supervisor. Shane keeps 3-5 running, fires another when one drops out.
 
@@ -39,9 +39,11 @@ Fired from a fresh /agent chat. The /agent view is the supervisor. Shane keeps 3
 
 #### 0a. Resolve BEADS_DIR by prefix
 
-Per-prefix routing fixes the vault-vs-code confusion:
+Per-prefix routing fixes the vault-vs-code confusion. `BEAD_ID` is the `/goal` argument
+(the bead or epic id). Set it once here and export it, because every later phase uses it:
 
 ```bash
+export BEAD_ID="<the /goal argument, e.g. AestheticcNext-az50>"
 case "$BEAD_ID" in
   LUCY-*)
     export BEADS_DIR=/Users/shane/Documents/Obsidian/.beads
@@ -185,45 +187,24 @@ save/persist action, confirm .goal/PLAN.md names the new `promise_inventory.json
    that history the instant this ran. `bd comment` is append-only; use it for anything
    that isn't meant to overwrite. See `reference_bd_update_notes_replaces_use_comment`.
 
-### Phase 2 — Plan (Opus, in-context) — or Astra, under the standing override
+### Phase 2 — Plan (Opus, in-context)
 
-🔴 **Check FIRST, before anything else in Phase 2: is the Astra-primary override active?**
-Read `Aestheticc/CLAUDE.md` and check whether the section header
-`🔴🔴 ACTIVE OVERRIDE (Shane, 2026-09-06): Astra-primary mode` is still present and not
-marked reverted. **This check has been missing since the override was declared — every
-`/goal` dispatch until now ran Phase 2/3 as plain Opus regardless, which is why the
-override existed in CLAUDE.md's prose but never actually happened.** Do not skip this
-check silently again.
+**Seats (Aestheticc/CLAUDE.md model table, Shane 2026-09-23):** you (Opus) plan and build;
+Astra reviews. The 2026-09-06 "Astra-primary override" block that used to sit here is
+retired. It tested for a CLAUDE.md header that no longer exists, so every run silently fell
+through to the GLM reviewer, and GLM is not a seat. Restore neither.
 
-**If the override is active**, skip the rest of Phase 2 and all of Phase 3 as written below.
-Instead:
-1. Compose the same worker brief `fleet-dispatch.py` already assembles (bead title,
-   description, acceptance criteria, affected-files hints) and hand it directly to Codex —
-   do not plan or write any code yourself first:
-   ```
-   codex exec -s workspace-write -c model_reasoning_effort=xhigh <<'EOF'
-   You are the implementation worker for bead <BEAD_ID>, in this worktree.
-   <bead title/description/acceptance criteria, verbatim>
-   Create .goal/ if needed. Write .goal/PLAN.md (same fields Phase 2 below documents), implement it
-   as one or more atomic commits, run the repo's typecheck/lint/relevant tests, push the
-   branch, then stop. Do not merge to main. Do not deploy. If genuinely blocked or the task
-   needs a judgment call only a human/Claude session can make, write .goal/BLOCKED.md instead of
-   guessing, then stop.
-   🔴 Never `git add -f` a gitignored path: .goal/ scratch is deliberately untracked; if git add refuses it with "hint: Use -f", leave it unstaged — a forced add will fail /ship (see Phase 5).
-   EOF
-   ```
-2. Still run Phase 0's own gates (bead validation, sensitive-path checks, invariant/promise
-   injection) yourself before invoking Codex — those don't change under the override, only
-   who plans+builds does.
-3. Phase 2b (plan review gate) still runs against whatever .goal/PLAN.md Codex produces.
-4. **Phase 4 (QA) becomes a single Opus 5 adversarial review of the resulting diff**, not
-   GLM/Codex — GLM is dropped for this window per the override. Skip straight to that
-   instead of Phase 4's GLM-primary/Codex-fallback logic below.
-5. Continue at Phase 5 onward exactly as documented (push, bead status, evidence).
-
-**If the override is not active (or has since been cancelled/reverted)**, Phase 2 and
-Phase 3 run exactly as written below, unchanged, and Phase 4's GLM-primary/Codex-fallback
-QA is the standing path.
+🔴 **Every plan runs `aestheticc-review plan`. Every bead, no routing (Shane 2026-09-23,
+LUCY-2w17x).** On 22–24 Sep almost every build failed its first independent review
+(`Aestheticc/Ops/REVIEW_FIRST_PASS_LOG.md`), and the findings were items already written in
+our persona docs (`Aestheticc/Ops/personas/*.md`). Reviewers applied them after the build;
+plans never applied them before it. Invoke the skill
+(`~/.claude/skills/aestheticc-review/SKILL.md`, mode `plan`) *while* writing the plan. It
+stays short on a small bead but it is never skipped. Don't substitute `/plan-eng-review`:
+vg5rs ran it and still shipped a double-charge, because a generic review doesn't know our
+hazards. **If the skill file is missing**, read the four persona docs and the skill's hazard
+list yourself, write the same sections, and record `aestheticc-review missing — applied by
+hand` in the evidence.
 
 ---
 
@@ -231,8 +212,25 @@ QA is the standing path.
 
 **Bundle:** compose one plan per child at `.goal/plans/<child-id>.md` (create `.goal/plans/` if needed), plus a `.goal/BUNDLE.md` that links all child plans and states the execution order. For bundles, references to `.goal/PLAN.md` below mean the corresponding child plan.
 
-Each PLAN contains:
-- Goal — one sentence
+Each PLAN contains, **in this order**. The first six are `aestheticc-review plan`'s fields;
+use its headings:
+- **Outcome promise** — first line, in Shane's words: "pressing X does Y for Z". This is the
+  acceptance criterion, verified by driving the app, not by reading code.
+- **Premise check (prod)** — the read-only SELECT(s) showing on prod that the problem is real,
+  with the result pasted. If prod disproves the premise, rescope or downgrade the bead with
+  `bd comment` and stop; don't build it (v15fm, oa58j and 0mwa0 were filed on false premises).
+  Where no prod state is involved (a new capability, a harness or tooling change), write
+  `n/a — <why no prod state is involved>` plus the evidence the need is real: the Shane
+  request or capture it came from, or the failing check. A bare `n/a` is not a premise.
+- **Touchpoint map** — every call site and every copy of the rule / predicate / writer being
+  changed, as `file:line`: every write path, and every reader of a field whose writer changes.
+- **Hazards answered** — each applicable hazard ID from the skill with a one-line answer; name
+  the ones that don't apply.
+- **Shane questions** — ONE batched list of outcome / UI / business / clinical questions, or the
+  literal line `none`. Code questions never go here: decide them with the Shane Decision Frame
+  and record the decision under Approach.
+- **Acceptance tests** — runnable tests that prove the promise, each naming the real path it
+  drives and the mutation it must catch; none in a quarantined suite (H-D4).
 - Bead context — verbatim description quote
 - Affected files — list (this is what Phase 0f re-checks against)
 - Invariant interactions — one line per invariant injected at 0d.1A: respected unmodified /
@@ -247,7 +245,24 @@ Each PLAN contains:
 - Approach — bullet list of changes
 - Risk — what could break, especially boundary-crossing
 - Rollback — how to undo
-- Acceptance criteria — concrete pass/fail checks
+
+🔴 **Shane questions go up once, before Build — never mid-build.** If the list isn't `none`:
+send the whole list in one message with
+`~/.claude/scripts/relay-to-orchestrator.sh "<BEAD_ID> plan questions for Shane: 1) … 2) …"`,
+and **stop without building**. Leave the bead re-dispatchable; otherwise `fleet-dispatch.py`
+check 0 (in progress) and check 1 (worktree exists) refuse the next run:
+1. `bd comment <BEAD_ID> "SHANE QUESTIONS (plan): …"`, then `bd comment <BEAD_ID> "PLAN DRAFT
+   (pre-answers): <.goal/PLAN.md in full>"`, so the next run starts from this plan.
+2. `bd update <BEAD_ID> --status open` releases the Phase 1 claim.
+3. No commits exist yet, so remove the worktree (`git worktree remove <path>`) and delete the
+   local branch.
+4. Run Phase 6.6: release the slot and advance the queue.
+5. Report `blocked: awaiting Shane plan answers` (Phase 7).
+
+A refused or unacknowledged relay was not delivered, so say that in the report. The
+orchestrator re-dispatches once the answers are on the bead as comments, and the next run's
+plan reads them (they override the bead description, as every Shane decision in a comment does). (0mwa0's hidden-vs-direct-link,
+vg5rs's short notice and qnl6e.3's aftercare toggle all reached Shane mid-build.)
 
 For bundles, execution order should batch tightly-coupled children together but otherwise run smallest-first to surface failures early.
 
@@ -278,9 +293,15 @@ every `/goal` dispatch. Do not proceed to Phase 3 without running this.
 
 **2. Route to reviews.** Keep this gate light on purpose — see the note below.
 
+`aestheticc-review plan` has already run in Phase 2 on **every** bead, and that is not
+routed. Check here that the plan carries all six of its fields; a plan missing one goes back
+to Phase 2. The routing below adds only the *extra* reviews:
+
 ```
-touchesSensitive       -> /plan-eng-review      # exemption-list domains; over-caution is
-                                               # correct and cheap here
+touchesSensitive       -> none extra            # aestheticc-review plan already covers it
+                                               # with our hazards (/plan-eng-review retired
+                                               # for AestheticcNext: vg5rs passed it and
+                                               # still shipped a double-charge)
 scopeDivergence        -> /plan-ceo-review      # the taste call worth interrupting for:
                                                # AI ballooning work for no reason
 userSurfaceNew         -> /plan-design-review   # the plan DOES contain the IA and flow
@@ -288,8 +309,8 @@ userSurfaceOverhaul    -> /plan-design-review   # decisions here — review them
                                                # are still cheap to change
 userSurfaceMinor       -> none                  # Phase 4b catches this class
 isDocsOnly             -> none
-isHotfix (S1/S2)       -> none                  # /review and /ship still run. Never skipped.
-everything else        -> none. Go straight to Build.
+isHotfix (S1/S2)       -> none extra            # aestheticc-review plan still ran; /ship still runs
+everything else        -> none extra. Go straight to Build.
                           The gate that matters for this class is Phase 4b.
 ```
 
@@ -336,7 +357,8 @@ and what it said. A review that ran but left no artifact did not run.
 
 **5. Act on the verdict.**
 - **Blocking findings** → revise .goal/PLAN.md, re-run *that* review once. Still blocking →
-  stop, surface to Shane, do not proceed to Build. A refusal here is the gate working.
+  stop, report up to the orchestrator (never straight to Shane), do not proceed to Build. A
+  refusal here is the gate working.
 - **Non-blocking findings** → record them in .goal/PLAN.md under a *Review notes* heading and
   proceed.
 
@@ -370,12 +392,19 @@ If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed
 
 If Husky pre-push tsc hangs cold: warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` first (per `feedback_husky_tsc_cold_cache.md`).
 
-### Phase 4 — QA (GLM primary / Codex fallback, read-only, adversarial)
+### Phase 4 — QA (`aestheticc-review code`: Astra xhigh, plus Opus head-to-head on money / patient data / tenancy)
 
-🔴 **If Phase 2 found the Astra-primary override active, skip this entire phase** — run a
-single Opus 5 adversarial review of the diff instead (in-session, same rigor as a normal
-review pass, reasoning through the diff directly rather than via a separate tool), then
-continue at Phase 5. Everything below is the standing (non-override) GLM/Codex path.
+Follow `~/.claude/skills/aestheticc-review/SKILL.md` mode `code`. The seats come from the
+Aestheticc/CLAUDE.md model table. GLM is not a seat: the old GLM-primary / Codex-fallback
+path (B-10, 2026-09-01) is retired, so don't restore it.
+
+🔴 **This review is YOUR gate, not the independent review.** After you push, the
+orchestrator runs its own independent `aestheticc-review code` on a fresh context, and that
+is the review that decides landing and goes in `Aestheticc/Ops/REVIEW_FIRST_PASS_LOG.md`.
+Never report your Phase 4 verdict as "Astra PASS" or "independently reviewed" in the bead,
+the Phase 7 report or a relay: c96ck and oa58j both reported "Astra PASS, 0 findings" from
+inside `/goal`, then failed the independent review. Phrase it as `own-gate review: PASS`.
+Don't append to the metric log yourself.
 
 **One QA pass against the combined diff at the end**, not one per child. Saves reviewer quota and lets it see cross-child interactions.
 
@@ -413,14 +442,45 @@ set -e
 printf '%s\n' "$QA_EXIT" > "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
 ```
 
-Follow `~/.claude/skills/plan-build-qa/SKILL.md` Pattern B (structured JSON). Pipe the prompt via stdin (never `$TMPDIR` in nested subshell, per `feedback_codex_exec_prompt_passing.md`):
+**Build the review brief** (the skill's `code`-mode brief). Write it to a file; never
+`$TMPDIR` in a nested subshell (`feedback_codex_exec_prompt_passing.md`):
 
 ```bash
+: "${BEAD_ID:?BEAD_ID must be the /goal argument}"
+PERSONAS=/Users/shane/Documents/Obsidian/Aestheticc/Ops/personas
+# Capture every required input ONCE, check each status, and only then assemble the brief.
+# A brief built from a failed bd/git call, or with no plan, reviews nothing.
+IN="$EVIDENCE_DIR/brief-inputs-round-N"; mkdir -p "$IN"
+capture_brief_inputs() {
+  bd show "$BEAD_ID" > "$IN/bead.txt" || return 1
+  bd comments "$BEAD_ID" > "$IN/comments.txt" || return 1
+  git fetch origin main --quiet || return 1
+  # NOT local main: a stale local main sweeps in already-merged work (feedback_goal_qa_diff_base_stale_main)
+  git diff origin/main...HEAD > "$IN/diff-committed.txt" || return 1
+  { git diff --cached && git diff; } > "$IN/diff-uncommitted.txt" || return 1
+  git ls-files --others --exclude-standard > "$IN/untracked.txt" || return 1
+  ls .goal/PLAN.md .goal/plans/*.md 2>/dev/null | grep -q . || return 1
+  for p in tenancy-and-money comms data-and-reliability ui; do [ -s "$PERSONAS/$p.md" ] || return 1; done
+  [ -s "$IN/bead.txt" ] && [ -s "$IN/diff-committed.txt" ]   # a review with no bead or no diff is void
+}
+capture_brief_inputs || { echo "failed: $BEAD_ID review brief inputs unavailable (bd / comments / diff / plan / personas)"; exit 1; }
 set +e
 {
-  cat ~/.claude/skills/plan-build-qa/prompts/qa.md
+  echo "You are the OWN-GATE reviewer for bead $BEAD_ID: the builder's pre-push review, run"
+  echo "on a fresh context. You are not the orchestrator's independent review; don't log a metric."
+  echo "Don't edit files in this worktree."
+  echo "Read ~/.claude/skills/aestheticc-review/SKILL.md (mode: code, and its hazard list),"
+  echo "the four personas in full and cite their rule IDs: $PERSONAS/{tenancy-and-money,comms,data-and-reliability,ui}.md"
+  echo "and the review line in /Users/shane/Documents/Obsidian/Aestheticc/CLAUDE.md."
+  echo "Answer every applicable hazard ID. Trace real code paths from each entry point to the write."
+  echo "Output: line 1 PASS or FAIL; then one finding per line:"
+  echo "  P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix"
+  echo "then VERIFIED OK and UNVERIFIED lists. Unverified is never called verified."
   echo "---"
-  echo "PROJECT CLAUDE.md (calibration rules — apply before assigning S1/S2):"
+  echo "BEAD + COMMENTS:"
+  cat "$IN/bead.txt" "$IN/comments.txt"
+  echo "---"
+  echo "PROJECT CLAUDE.md:"
   [ -f CLAUDE.md ] && cat CLAUDE.md
   echo "---"
   echo "PLANS:"
@@ -428,109 +488,98 @@ set +e
     [ -f "$f" ] && echo "## $f" && cat "$f" && echo
   done
   echo "---"
-  echo "DIFF (committed):"
-  git fetch origin main --quiet
-  git diff origin/main...HEAD   # NOT local main — stale local main sweeps in already-merged PRs (feedback_goal_qa_diff_base_stale_main)
+  echo "DIFF (committed, origin/main...HEAD):"
+  cat "$IN/diff-committed.txt"
   echo "---"
   echo "DIFF (uncommitted, staged + unstaged):"
-  git diff --cached
-  git diff
+  cat "$IN/diff-uncommitted.txt"
   echo "---"
   echo "Untracked:"
-  git ls-files --others --exclude-standard
+  cat "$IN/untracked.txt"
   echo "---"
   echo "EVIDENCE ARTIFACTS (the verdict must cite all three):"
   echo "$EVIDENCE_DIR/qa-command-round-N.txt"
   echo "$EVIDENCE_DIR/qa-output-round-N.log"
   echo "$EVIDENCE_DIR/qa-exit-code-round-N.txt"
-} > "$EVIDENCE_DIR/qa-prompt-round-N.txt"
+} > "$EVIDENCE_DIR/review-brief-round-N.txt"
 ```
 
-🔴 **B-10 (AI Fleet Grand Plan, 2026-09-01): GLM is the primary Phase 4 reviewer, Codex is the fallback.** Shane's decision — GLM (`glm review`) is the cheap-first resource (~£80/mo flat-rate vs ~£200/mo Codex+Claude combined), not the fallback. Codex only runs when `glm review` itself exits non-zero (a genuine call failure — auth/network against z.ai — same GLM-outage doctrine as everywhere else in `CLAUDE.md`). A clean GLM run that found nothing wrong still exits 0 with a PASS verdict; that is NOT a fallback trigger.
-
-🔴 **Fixed 2026-09-07 (AestheticcNext-s88u9): `glm`'s arg parser never reads the prompt from
-stdin — it takes it as a POSITIONAL argument, so `glm review --cd DIR < file` hit `glm`'s own
-usage-error path (exit 1) and every dispatch silently fell through to the Codex fallback below,
-never actually invoking GLM. Pass the prompt file as a positional argument instead — `glm`
-detects an existing regular-file argument and reads its content (see `~/.local/bin/glm`'s
-file-detection block), so this works even though `qa-prompt-round-N.txt` routinely exceeds the
-~1MB `ARG_MAX` that inlining its content directly (`"$(cat file)"`) would blow past.
-🔴 **A second, independent bug hides behind the first — don't stop at the positional-arg fix.**
-`glm`'s default `-o` result path is `/tmp/glm-<mode>-<pid>.txt`, which the Bash tool's sandbox
-does NOT allow writing to (only `/tmp/claude`, `/private/tmp/claude`, `$TMPDIR` etc. are
-allowlisted — see the sandbox filesystem config). Under a sandboxed `/goal` dispatch this makes
-`glm`'s own `| tee "$OUT"` fail with `Operation not permitted`, which — because `tee` is the
-last stage of that pipeline — makes `$GLM_EXIT` non-zero even though the actual GLM review
-succeeded and is sitting correctly in `$EVIDENCE_DIR/glm-verdict-round-N.log` via the outer
-redirect. Left unfixed, this reproduces the exact silent-fallback symptom this bead exists to
-kill, just one layer deeper. Passing `-o` explicitly at a path already in the sandbox allowlist
-(`$EVIDENCE_DIR`, under `~/.claude/evidence`) avoids it entirely.**
+**Step 1: Astra at `xhigh` (always).** Run it in the foreground and read-only, with the brief on
+stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
 ```bash
 set +e
-glm review --cd "$(pwd)" -o "$EVIDENCE_DIR/glm-raw-round-N.txt" "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
-  > "$EVIDENCE_DIR/glm-verdict-round-N.log" \
-  2> "$EVIDENCE_DIR/glm-stderr-round-N.log"
-GLM_EXIT=$?
+cat "$EVIDENCE_DIR/review-brief-round-N.txt" \
+  | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 review round-N" codex exec \
+    --cd "$(pwd)" \
+    -c model_reasoning_effort=xhigh \
+    --sandbox read-only \
+    - > "$EVIDENCE_DIR/astra-verdict-round-N.log" \
+    2> "$EVIDENCE_DIR/astra-stderr-round-N.log"
+ASTRA_EXIT=$?
 set -e
-printf '%s\n' "$GLM_EXIT" > "$EVIDENCE_DIR/glm-exit-code-round-N.txt"
-
-if [[ "$GLM_EXIT" -eq 0 ]]; then
-  VERDICT_LOG="$EVIDENCE_DIR/glm-verdict-round-N.log"
-  REVIEWER="glm"
-else
-  echo "GLM unreachable (exit $GLM_EXIT) — falling back to Codex for this round. Note this in Phase 7's report: GLM unreachable, Codex fallback used." >&2
-  set +e
-  cat "$EVIDENCE_DIR/qa-prompt-round-N.txt" \
-    | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 QA round-N" codex exec \
-      --cd "$(pwd)" \
-      --ephemeral \
-      --sandbox read-only \
-      - > "$EVIDENCE_DIR/codex-verdict-round-N.log" \
-      2> "$EVIDENCE_DIR/codex-stderr-round-N.log"
-  CODEX_EXIT=$?
-  set -e
-  printf '%s\n' "$CODEX_EXIT" > "$EVIDENCE_DIR/codex-exit-code-round-N.txt"
-  VERDICT_LOG="$EVIDENCE_DIR/codex-verdict-round-N.log"
-  REVIEWER="codex (GLM fallback)"
-fi
+printf '%s\n' "$ASTRA_EXIT" > "$EVIDENCE_DIR/astra-exit-code-round-N.txt"
+VERDICT_LOG="$EVIDENCE_DIR/astra-verdict-round-N.log"
+REVIEWER="astra-xhigh"
+# xhigh is passed on THIS review call only; config default stays medium (Shane 2026-09-23).
+# No --ephemeral: if the 10-minute tool limit hits, resume the SAME session in the
+# foreground (`codex exec resume <session-id> "continue; finish the verdict" </dev/null`),
+# taking the id from the output. Never start a fresh session.
 # NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
-# (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
-# (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt (same qa.md prompt
-# for both reviewers); parse it from the output between the `^codex$`/model-name
-# marker and `^tokens used$`.
-#
-# 🔴 Added 2026-08-23: the Codex fallback path routes through fleet-guarded.sh, which
-# claims a slot against the same 11-total fleet budget Agent View dispatch uses (see
-# fleet-slots.py) before running Codex, and releases it on exit regardless of outcome.
-# Fails open after 90s at capacity rather than blocking a QA gate indefinitely — never
-# remove this wrapper to "simplify" the command; that's exactly how this budget leaks
-# back to uncounted. GLM does NOT need this — it's a separate flat-rate z.ai account,
-# not competing for the same Codex/Claude budget.
-# NO `-c model="gpt-5-codex"` (unsupported on ChatGPT acct) and NO `--output-schema`
-# (verdict.json not strict-compatible) — both make Phase 4 fail before reviewing
-# (feedback_goal_qa_codex_flags_drift). Ask for JSON in the prompt; parse it from
-# the output between the `^codex$` and `^tokens used$` markers.
-#
-# 🔴 Added 2026-08-23: routed through fleet-guarded.sh, which claims a slot against
-# the same 11-total fleet budget Agent View dispatch uses (see fleet-slots.py) before
-# running Codex, and releases it on exit regardless of outcome. Fails open after 90s
-# at capacity rather than blocking a QA gate indefinitely — never remove this wrapper
-# to "simplify" the command; that's exactly how this budget leaks back to uncounted.
+# (feedback_goal_qa_codex_flags_drift). Parse the verdict from the output between the
+# `^codex$` and `^tokens used$` markers.
+# fleet-guarded.sh claims a slot against the shared fleet budget (fleet-slots.py) and
+# releases it on exit. Never remove the wrapper to "simplify" the command.
 ```
 
-**Before acting on any S1/S2 finding, independently re-apply qa.md's calibration gate yourself** — don't just trust the reviewer's ($REVIEWER — GLM or Codex) severity label. For each S1/S2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. This is a second, independent check on top of qa.md's own instructions — both reviewers still sometimes over-flag even when told not to.
+**If Codex itself fails** (non-zero exit that a resume doesn't fix: auth, quota or network),
+don't swap seats silently:
+- **Money / patient-data / tenancy bead (Step 2 applies): hold.** Its gate is two
+  independent model families, and one Opus review can't stand in for both (CLAUDE.md:
+  "provider down → hold"). Commit the work, don't push, write
+  `held: Astra unavailable — <reason>` to `$EVIDENCE_DIR/fallback-round-N.txt`, and report
+  `needs input: <BEAD_ID> review held, Astra unavailable` in Phase 7.
+- **Any other bead:** Step 2's Opus reviewer becomes the reviewer of record. Set
+  `REVIEWER="opus (Astra unavailable, fallback)"`, write `fallback used: <reason>` to
+  `$EVIDENCE_DIR/fallback-round-N.txt`, and say so in Phase 7.
+
+**Step 2: fresh-context Opus head-to-head** — required when the plan's Hazards section hit
+any money (H-M*), patient-data (H-P*) or tenancy (H-T*) hazard, or when `touchesSensitive`
+fired. Spawn a separate Agent (`model: opus`) whose prompt is only the path to
+`$EVIDENCE_DIR/review-brief-round-N.txt`, plus: "trace each entry point to the write; where SQL
+decides the outcome, you MAY create a separate scratch worktree
+(`git worktree add <scratch> HEAD`) and run a pg test or revert a guard there — never edit
+this branch's worktree; remove the scratch worktree when done". It must not see Astra's
+output, and you must not read either verdict until both have finished. Save it to
+`$EVIDENCE_DIR/opus-h2h-round-N.md`. A P1/P2 from either reviewer counts.
+
+**Step 3: non-vacuous check — you run it, not the reviewers** (Astra is read-only). In a
+scratch worktree at the tip, revert each new guard and confirm a test fails; confirm a
+control case passes both ways. Record each mutant and its result in
+`$EVIDENCE_DIR/mutants-round-N.txt`, then remove the scratch worktree. A surviving mutant on
+a promised behaviour is a P2 (H-D1).
+
+**Severity is the CLAUDE.md review line (decision #4):** P1 = money / patient data / tenancy /
+security; P2 = any user-facing broken promise; both block. P3 = not user-facing only, and it
+may pass with one written line rejecting it. Don't grade a defect down because its patch is small.
+
+**Before acting on any P1/P2 finding, independently re-apply the calibration gate yourself** — don't just trust the reviewer's ($REVIEWER) severity label. For each P1/P2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. Reviewers still sometimes over-flag even when told not to. A user-facing broken promise is never "not-the-police": the screen must tell the truth (H-U0).
 
 Parse the (calibrated) verdict:
-- **PASS + zero surviving S1/S2 + valid evidence:** go to Phase 5.
-- **PASS + only S3 + valid evidence:** log S3s as follow-up beads, go to Phase 5.
-- **NEEDS_CHANGES or BLOCK, with surviving findings:** ingest findings, fix S1/S2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
+- **PASS + zero surviving P1/P2 + valid evidence:** go to Phase 5.
+- **PASS + only P3 + valid evidence:** for each P3, either fix it or write the one-line rejection in the round notes (not user-facing only); log real follow-ups as beads; go to Phase 5.
+- **FAIL, with surviving findings:** ingest the findings, fix P1/P2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
 - **After 3 rounds still not clean:** file each remaining finding **that survives calibration** as a follow-up bead with `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes (including any dismissed findings, for a fast audit trail), and STOP. This is `failed:` not `result:`.
 
 **Valid evidence is mandatory:** the verdict must cite the round's command,
 captured output, and exit-code artifacts under `$EVIDENCE_DIR`; those files must
-exist, the output must record the command that actually ran, and both the QA and
-Codex exit-code files must contain `0`. A model-returned PASS without those
+exist, and the output must record the command that actually ran. **All** of these must hold:
+(1) the QA exit-code file contains `0`, with no exceptions; (2) the Astra exit-code file
+contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
+`fallback used` alongside a completed Opus verdict; (3) where Step 2 applies, both the Astra
+and the Opus verdicts are complete (no fallback exists for these); (4) `mutants-round-N.txt`
+exists.
+A model-returned PASS without those
 artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
 
 ### Phase 4b — User-facing change note (MANDATORY for ANY user surface)
@@ -606,9 +655,11 @@ broken. Source: `Product/QA/PROACTIVE_BUG_CLASSES_2026-08-28.md` class 3.
 > `feedback_code_blindness_ghost_features`, `project_promise_debt_feature_does_not_exist`
 > (BET-8: 127 broken promises), `feedback_buttons_dont_disappear_on_empty`.
 >
-> This is the harness that replaces asking Shane questions *before* the work. He says yes to
-> nearly everything up front; what he actually needs is a truthful account of what moved,
-> after, with the evidence in front of him.
+> This is the harness for the questions a plan *can't* predict. He says yes to nearly
+> everything up front; what he actually needs is a truthful account of what moved, after,
+> with the evidence in front of him. It does not replace the one batched list of outcome /
+> UI questions Phase 2 sends before Build (decision #3). Those are asked once, up front,
+> and never mid-build.
 
 ### Phase 5 — Ship to branch (NO deploy)
 
@@ -749,7 +800,7 @@ This is now genuinely the LAST mutating step — only the Phase 7 report follows
 Final line:
 
 ```
-result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed, <N> QA rounds clean. Evidence: <absolute command, output, and exit-code artifact paths>. Worktree left intact for /land-batch to discover and land. Warnings: <list or none>.
+result: <BEAD_ID> (or epic <EPIC_ID> with N children) closed — branch goal/<id> pushed at <tip sha>, own-gate review PASS after <N> rounds (reviewer: <$REVIEWER>; NOT the independent review — orchestrator to run aestheticc-review code). Plan review: aestheticc-review plan, Shane questions: none|answered. Evidence: <absolute command, output, and exit-code artifact paths>. Worktree left intact for /land-batch to discover and land. Warnings: <list or none>.
 
 USER-FACING CHANGES (Phase 4b):
 <paste .goal/CHANGE-NOTE.md in full, or "none — backend only">
@@ -764,7 +815,11 @@ QA happens after `/land-batch` lands the branch to main and the normal staging d
 For partial/failed runs:
 
 ```
-needs input: <BEAD_ID> hit 3-round QA cap, <N> follow-up beads filed (<bead-ids>). Shane review needed.
+needs input: <BEAD_ID> hit 3-round QA cap, <N> follow-up beads filed (<bead-ids>). Orchestrator review needed.
+```
+
+```
+blocked: awaiting Shane plan answers — <BEAD_ID>, <N> questions relayed to the orchestrator (relay: accepted|NOT delivered). No code written.
 ```
 
 ```
