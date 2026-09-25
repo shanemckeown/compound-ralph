@@ -236,6 +236,111 @@ def check_headless_eligible(bead, diagnostic_output=None):
     ]
 
 
+# A labelled field, tolerant of markdown decoration and numbering: "Outcome: …",
+# "**Outcome promise:** …", "1. Premise check (prod): …", or a heading ("## Premise") whose
+# value is the next non-blank line. The value must be substantive, not just the label.
+OUTCOME_RE = re.compile(r"(?im)^[\s>*_#-]*(?:\d+[.)]\s*)?[*_]*outcome(?:\s+promise)?\b[\s*_]*:?[\s*_]*(.*)$")
+PREMISE_RE = re.compile(r"(?im)^[\s>*_#-]*(?:\d+[.)]\s*)?[*_]*premise(?:\s+(?:check|note))?\b"
+                        r"(?:\s*\(prod\))?[\s*_]*:?[\s*_]*(.*)$")
+# A real path (has a directory) or a file with a code/doc extension. Not "2.0", not "example.com".
+BRIEF_PATH_RE = re.compile(r"(?<![\w.@/-])(?:[\w.@-]{2,}/)+[\w.@-]{2,}"
+                           r"|\b[\w-]+\.(?:tsx?|jsx?|mjs|cjs|sql|py|sh|md|json|ya?ml|css|swift|kt)\b"
+                           r"|\b(?:Makefile|Dockerfile|Procfile|Gemfile|Podfile)\b")
+PLACEHOLDER_RE = re.compile(r"(?i)^\W*(?:tbd|todo|tbc|n/?a|none|see (?:above|below|description)|\?+"
+                            r"|to be (?:determined|confirmed|decided)|works?(?: as expected)?|it works)\W*$")
+# Outcome/Premise apply to beads filed from this date. Measured at cutover: all 240 open
+# headless-eligible beads lacked both, so enforcing them retroactively would stall the whole
+# queue. Older beads get them written at plan time instead (/goal Phase 2 requires the same
+# sections). Acceptance + file path were already CLAUDE.md rules and apply to every bead.
+BRIEF_CUTOVER = "2026-09-25"
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# Any heading, or any "Label:" line (populated or not): a section boundary, never a value.
+LABEL_LINE_RE = re.compile(r"^(?:#|[\s>*_-]*(?:\d+[.)]\s*)?[*_]*[A-Za-z][\w ()/*_-]{0,40}:)")
+
+
+def labelled_value(pattern, text):
+    """The value of the first labelled field matching `pattern` that has one: the text after
+    the label on the same line, else the next non-blank line (heading form)."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = pattern.match(line)
+        if not m:
+            continue
+        value = m.group(1).strip(" *_")
+        if not value and (":" not in line or line.lstrip().startswith("#")):
+            # Heading form: the value is the next non-blank line, unless that line is itself
+            # a heading or another label ("## Premise", "Touchpoint map:").
+            value = next((l.strip() for l in lines[i + 1:] if l.strip()), "")
+            if LABEL_LINE_RE.match(value):
+                value = ""
+        if len(value) >= 3 and not PLACEHOLDER_RE.match(value):
+            return value
+    return ""
+
+
+def is_new_bead(record):
+    """Missing or unparseable created_at counts as new: fail closed, not open."""
+    created = record.get("created_at") or ""
+    if not DATE_RE.match(created):
+        return True
+    try:  # the whole timestamp must parse, not just its date
+        stamp = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return stamp.year < 2020 or created[:10] >= BRIEF_CUTOVER
+
+
+def check_bead_brief(record):
+    """Check 5 (LUCY-2w17x, 2026-09-25): a single bead must carry the plan contract's inputs
+    before a Worker sees it — an Outcome line (the promise in Shane's words), a Premise note
+    (why we believe the problem is real on prod, or 'n/a — <why no prod state is involved>'),
+    an acceptance check that isn't a placeholder, and at least one file path. CLAUDE.md said
+    "no oracle, no dispatch" but check 4 only printed these as non-blocking diagnostics.
+    v15fm, oa58j and 0mwa0 were built on premises prod disproved. Comments count
+    (append-only `bd comment` is how beads get amended), except for acceptance, which must be
+    the field itself. `--force` (reason recorded) remains the authorised exception."""
+    acceptance = (record.get("acceptance_criteria") or "").strip()
+    comments = "\n".join((c.get("text") or "") for c in (record.get("comments") or [])
+                         if isinstance(c, dict))
+    text = "\n".join((record.get("description") or "", record.get("design") or "",
+                      acceptance, record.get("notes") or "", comments))
+    bead = record.get("id") or "<bead>"
+    new_bead = is_new_bead(record)
+    missing, fixes = [], []
+    if new_bead and not labelled_value(OUTCOME_RE, text):
+        missing.append("an 'Outcome:' line (\"pressing X does Y for Z\", Shane's words)")
+        fixes.append(f"`bd comment {bead} \"Outcome: …\"`")
+    if new_bead and not (labelled_value(PREMISE_RE, text)
+                         or re.search(r"(?im)^[\s>*_#-]*premise\b[^\n]*:\s*n/a\s*[—-]+\s*\S{3,}", text)):
+        missing.append("a 'Premise:' note (the prod evidence the problem is real, "
+                       "or 'n/a — <why no prod state is involved>')")
+        fixes.append(f"`bd comment {bead} \"Premise: …\"`")
+    if len(acceptance) < 5 or PLACEHOLDER_RE.match(acceptance):
+        missing.append("acceptance_criteria (a runnable check, not a placeholder)")
+        fixes.append(f"`bd update {bead} --acceptance \"…\"`")
+    if not BRIEF_PATH_RE.search(re.sub(r"\b[a-z][\w+.-]*://\S+", " ", text)):  # URLs aren't files
+        missing.append("at least one file path")
+        fixes.append(f"`bd comment {bead} \"Files: path/to/file.ts\"`")
+    if not missing:
+        return []
+    return [f"bead brief incomplete — missing {', '.join(missing)}. Fix with "
+            f"{' and '.join(fixes)}, then re-run."]
+
+
+def load_bead_record(bead):
+    code, out, err = sh(f"bd show {bead} --json", cwd=REPO, bead=bead)
+    if code != 0 or not out:
+        return None, f"`bd show {bead} --json` failed: {err or out or 'no output'}"
+    try:
+        records = json.loads(out)
+    except Exception as exc:
+        return None, f"`bd show {bead} --json` returned invalid JSON: {exc}"
+    record = records[0] if isinstance(records, list) and records else None
+    if not isinstance(record, dict):
+        return None, f"`bd show {bead} --json` did not return a one-object array"
+    return record, None
+
+
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
     headless_diagnostics = None
@@ -249,6 +354,9 @@ def run_gate(bead, is_epic):
     else:
         headless_diagnostics = io.StringIO()
         results["4 headless eligible"] = check_headless_eligible(bead, headless_diagnostics)
+        record, load_error = load_bead_record(bead)
+        results["5 bead brief complete"] = ([f"cannot verify the bead brief — {load_error}"]
+                                            if load_error else check_bead_brief(record))
     failed = False
     for name, problems in results.items():
         if problems:
