@@ -1,13 +1,11 @@
 ---
 name: plan-build-qa
 description: |
-  Dual-model workflow for non-trivial code changes. Plan + Build with Claude Opus 4.7,
-  QA with OpenAI Codex 5.5 (adversarial, model-independent). Replaces "Shane reviews
-  every diff" with structured eval gates that catch bugs different model families miss.
-trigger:
-  - "/plan-build-qa <description>"
-  - User mentions "non-trivial diff", "needs review", "complex change"
-status: VALIDATED 2026-04-27 — first real fix loop on PR #291 (LUCY-whcq), 4 rounds, caught S1 security issue + race condition + filed merge-blocker follow-up bead. Ready for global install.
+  RETIRED 2026-09-25: superseded by /goal's aestheticc-review plan/code phases (LUCY-2w17x).
+  Do not invoke. For AestheticcNext beads use /goal (plan via /aestheticc-review plan mode,
+  Astra review via /aestheticc-review code mode). Kept on disk for history only.
+trigger: []
+status: RETIRED 2026-09-25 (LUCY-2w17x). Previously VALIDATED 2026-04-27 — first real fix loop on PR #291 (LUCY-whcq), 4 rounds, caught S1 security issue + race condition + filed merge-blocker follow-up bead. Ready for global install.
 ---
 
 # Plan-Build-QA Skill
