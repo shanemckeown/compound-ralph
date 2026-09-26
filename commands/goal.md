@@ -473,6 +473,7 @@ capture_brief_inputs() {
   git ls-files --others --exclude-standard > "$IN/untracked.txt" || return 1
   ls .goal/PLAN.md .goal/plans/*.md 2>/dev/null | grep -q . || return 1
   for p in tenancy-and-money comms data-and-reliability ui; do [ -s "$PERSONAS/$p.md" ] || return 1; done
+  [ -s "$PERSONAS/CLINIC_REALITY.md" ] || return 1
   [ -s "$IN/bead.txt" ] && [ -s "$IN/diff-committed.txt" ]   # a review with no bead or no diff is void
 }
 capture_brief_inputs || { echo "failed: $BEAD_ID review brief inputs unavailable (bd / comments / diff / plan / personas)"; exit 1; }
@@ -483,6 +484,8 @@ set +e
   echo "Don't edit files in this worktree."
   echo "Read ~/.claude/skills/aestheticc-review/SKILL.md (mode: code, and its hazard list),"
   echo "the four personas in full and cite their rule IDs: $PERSONAS/{tenancy-and-money,comms,data-and-reliability,ui}.md"
+  echo "and $PERSONAS/CLINIC_REALITY.md. For each finding, name the real clinic scenario: who does it,"
+  echo "on which device, at what moment in the clinic day. If you cannot name one, say so on the finding line."
   echo "and the review line in /Users/shane/Documents/Obsidian/Aestheticc/CLAUDE.md."
   echo "Answer every applicable hazard ID. Trace real code paths from each entry point to the write."
   echo "Output: line 1 PASS or FAIL; then one finding per line:"
@@ -569,19 +572,92 @@ output, and you must not read either verdict until both have finished. Save it t
 scratch worktree at the tip, revert each new guard and confirm a test fails; confirm a
 control case passes both ways. Record each mutant and its result in
 `$EVIDENCE_DIR/mutants-round-N.txt`, then remove the scratch worktree. A surviving mutant on
-a promised behaviour is a P2 (H-D1).
+a promised behaviour is a P2 (H-D1). The file is a verdict the lead must classify: line 1 is
+`PASS` (all killed) or `FAIL`, and each survivor is a finding line
+`P2 <file:line> — mutant survived: <what was reverted> — <test to add>`.
 
 **Severity is the CLAUDE.md review line (decision #4):** P1 = money / patient data / tenancy /
 security; P2 = any user-facing broken promise; both block. P3 = not user-facing only, and it
 may pass with one written line rejecting it. Don't grade a defect down because its patch is small.
 
-**Before acting on any P1/P2 finding, independently re-apply the calibration gate yourself** — don't just trust the reviewer's ($REVIEWER) severity label. For each P1/P2: does the finding's own text actually establish (a) a real entry point a normal user or the never-dismissible categories (cross-tenant/unauthenticated/payment/GDPR) reach, and (b) that the proposed fix stops real harm rather than a theoretical one with a trivial out-of-band bypass? A finding that fails this re-check is **dismissed, not fixed** — log `dismissed (not-the-police): <finding> — <one-line why>` in the round notes, don't fix it, don't file it as a follow-up bead, and don't let it count toward NEEDS_CHANGES. Reviewers still sometimes over-flag even when told not to. A user-facing broken promise is never "not-the-police": the screen must tell the truth (H-U0).
+**Step 4: review lead: only Act-on findings reach you (LUCY-oawgi, Shane 26 Sep).** Don't read
+the reviewer verdicts and start fixing. Reviewers see code, not clinics: tiy3q's face-map P0 was
+fixed on 24 Sep, then stalled 2 days while rounds chased two devices editing one map, a case no
+clinic has (*"we never need two device sync ever"*). After Steps 1-3 finish, spawn a
+**fresh-context Opus Agent** (`model: opus`) as the lead. Its prompt is only this:
 
-Parse the (calibrated) verdict:
-- **PASS + zero surviving P1/P2 + valid evidence:** go to Phase 5.
-- **PASS + only P3 + valid evidence:** for each P3, either fix it or write the one-line rejection in the round notes (not user-facing only); log real follow-ups as beads; go to Phase 5.
-- **FAIL, with surviving findings:** ingest the findings, fix P1/P2 in the working tree, commit as a fixup (or amend if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
-- **After 3 rounds still not clean:** file each remaining finding **that survives calibration** as a follow-up bead with `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes (including any dismissed findings, for a fast audit trail), and STOP. This is `failed:` not `result:`.
+> You are the review lead. Follow `~/.claude/references/review-lead/LEAD.md` exactly. bead: $BEAD_ID;
+> round: N; scope_lock: <true|false>; evidence dir: $EVIDENCE_DIR (bead, comments, plan and diff
+> are in `brief-inputs-round-N/`; this round's verdicts are `astra-verdict-round-N.log` and, if
+> present, `opus-h2h-round-N.md`; earlier rounds' verdicts and `lead-round-*.json` are alongside).
+> Write your JSON to `$EVIDENCE_DIR/lead-round-N.json`.
+
+The lead reads `Aestheticc/Ops/personas/CLINIC_REALITY.md` and the learned
+`~/.claude/references/review-lead/DISMISSAL_PATTERNS.md`. It sorts every finding into Act on,
+Consider, Noted or Dismissed, and gives a written reason for everything it doesn't act on. A
+finding counts only when it names a real clinic scenario (who, which device, what moment) **and**
+is demonstrated (a red test, a reproduction, or a traced path from a real entry point). From
+round 2 on, it attacks the premise.
+
+**Scope lock (P0/P1 bug beads):** `scope_lock` is true when the bead's type is `bug` and its
+priority is P0 or P1. The smallest change the evidence justifies ships. Belt-and-braces does not.
+Anything the branch caused (the fix not fixing the bug, or any new defect on any entry point)
+stays in scope. Act-on items the branch didn't cause (pre-existing issues, adjacent hardening, a
+wider class than the report) become follow-up beads, or escalations if protected. They **cannot
+add a round and cannot block**.
+
+Then gate it. The checker, not you, decides what you may act on:
+
+```bash
+python3 ~/.claude/references/review-lead/review_lead_check.py \
+  --lead "$EVIDENCE_DIR/lead-round-N.json" \
+  $( grep -qs "^fallback used" "$EVIDENCE_DIR/fallback-round-N.txt" \
+       || echo --verdict "$EVIDENCE_DIR/astra-verdict-round-N.log" ) \
+  --verdict "$EVIDENCE_DIR/mutants-round-N.txt" \
+  $( [ -f "$EVIDENCE_DIR/opus-h2h-round-N.md" ] && echo --verdict "$EVIDENCE_DIR/opus-h2h-round-N.md" ) \
+  --out-dir "$EVIDENCE_DIR" --round N $( [ "$SCOPE_LOCK" = true ] && echo --scope-lock )
+```
+
+The Astra log is left out only when `fallback-round-N.txt` says `fallback used` (non-sensitive
+beads; the Opus verdict is then the reviewer of record and must be present). A sensitive bead
+never has a fallback: it holds. It refuses (exit 1) on an empty or unparseable verdict, a missing or invented finding, a
+reasonless dismissal, a P1 dismissed without a named pattern, an Act on with no scenario or
+demonstration, more than 5 blocking items, a missing premise from round 2, or a **Dismissed or
+Noted finding in a never-dismiss area**: booking slots, money and the terminal, sends and
+crons, webhooks, tenancy and auth, GDPR, prescribing, single-device data loss. Those are real concurrency; the
+money and booking protection stays. On a refusal, send the lead its errors and re-run it once,
+in the same Agent via SendMessage. A second refusal is `needs input: <BEAD_ID> review lead
+refused twice`: hold. Don't fall back to acting on the raw verdict.
+
+On exit 0 it writes, and you use **only** these:
+- `lead-actions-round-N.txt`: the blocking findings. This is your entire fix list.
+- `lead-escalate-round-N.txt`: protected-area items that won't be fixed on this branch
+  (not demonstrated, or out of scope under the lock). They don't add a round, and the push goes
+  ahead. But non-empty means **the branch must not land** until the orchestrator clears each one:
+  report `needs input: <BEAD_ID> escalated <n> protected item(s): <path>` in Phase 7, and put the
+  same line in a `bd comment`.
+- `lead-followups-round-N.txt`: file each as a bead (`bd create … --deps discovered-from:$BEAD_ID`,
+  label `qa-followup`). Don't fix them on this branch.
+- `lead-dismissals-round-N.md`: the audit trail. Copy it into the round notes. When a dismissal is
+  a new, reusable shape, the lead may append a `candidate` pattern to DISMISSAL_PATTERNS.md;
+  commit that file with the round.
+
+A user-facing broken promise on the bead's own path is always Act on: the screen must tell the
+truth (H-U0).
+
+Parse the round from the checker's `BLOCKING=` count, not from the reviewer's PASS/FAIL line:
+- **BLOCKING=0 + valid evidence:** go to Phase 5, whatever the reviewers' line 1 said. For each
+  P3 that the lead marked Noted, its reason is the one-line rejection. ESCALATE>0 still pushes,
+  with the `needs input:` line above.
+- **BLOCKING>0:** fix exactly the items in `lead-actions-round-N.txt`, commit as a fixup (or amend
+  if the fix belongs to a specific child), GOTO Phase 4. Hard cap: 3 rounds.
+- **After 3 rounds still BLOCKING>0:** file each remaining Act-on item as a follow-up bead with
+  `--parent <epic-id-or-singleton-id>`, label `qa-followup`, write a summary in the parent's notes
+  (with the dismissals file, for a fast audit trail), and STOP. This is `failed:` not `result:`.
+  Don't rewind the branch yourself. If the lead's `premise.action` names an earlier commit that
+  fixed the reported bug, put it in the Phase 7 `needs input:` line
+  (`premise: <premise>; lead suggests shipping <sha> with <sha..> reverted`). A re-dispatch with a
+  REFLECTION does that, and runs the full Phase 4 on the restored tree.
 
 **Valid evidence is mandatory:** the verdict must cite the round's command,
 captured output, and exit-code artifacts under `$EVIDENCE_DIR`; those files must
@@ -590,7 +666,7 @@ exist, and the output must record the command that actually ran. **All** of thes
 contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
 `fallback used` alongside a completed Opus verdict; (3) where Step 2 applies, both the Astra
 and the Opus verdicts are complete (no fallback exists for these); (4) `mutants-round-N.txt`
-exists.
+exists; (5) `lead-round-N.json` exists and `review_lead_check.py` exited 0 on it.
 A model-returned PASS without those
 artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
 

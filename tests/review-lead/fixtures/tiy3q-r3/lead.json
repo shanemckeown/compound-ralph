@@ -1,0 +1,84 @@
+{
+  "bead": "AestheticcNext-tiy3q",
+  "round": 3,
+  "scope_lock": true,
+  "premise": {
+    "premise": "The face map must detect and merge concurrent edits from two devices so that nothing on either device is ever lost.",
+    "rounds_failed_on_it": 3,
+    "action": "Premise fails CLINIC_REALITY (one practitioner, one device, one record; phone to iPad is sequential). Ship the reported-bug fix only: Save adopts the stroke autosave stamp, reads it after awaiting autosaves, and never overwrites local points on a 409 (e91bdaec3 + ac314b0fa, with c800e83bc's honest copy). Revert the widened two-device work (three-way merge, conflict-refresh machinery, version-checked autosave editor registry in 5654b2cd7/9520af4bb/ff0bf6700), which also removes F4's cause; if any of it is kept, F4 must be fixed before landing. Re-run the original draw -> autosave -> add point -> Save -> X check."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 components/face-mapping/face-mapping-save.ts:57 — Press Save while a conflicting autosave is pending: the queue merges the remote point, then Save sends its pre-wait snapshot with the newly adopted stamp, deleting that point. Reproduced — stop Save when draining discovers a conflict; keep the payload and version from the same snapshot. (TM-07, DR-05)",
+      "verdict": "dismissed",
+      "category": "clinical_record_concurrency",
+      "clinic_scenario": "none: needs a second device to have written a remote point to the same face map while this device's autosave is pending; one practitioner writes one client's map on one device (CLINIC_REALITY).",
+      "reason": "Trigger is a conflicting autosave carrying another device's point; two devices writing one clinical record at once does not happen in a clinic (Shane 26 Sep: 'we never need two device sync ever').",
+      "pattern": "multi-device concurrent edit of one clinical record"
+    },
+    {
+      "id": "F2",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 lib/stroke-queue-send.ts:78 — Draw before the opening GET returns: `sync.live` is false, so the autosave writes unchecked and erases another device’s point. Reproduced — wait for authoritative synchronization and reconcile before writing; an unavailable stamp must not authorize an unchecked replacement. (TM-07, DR-01)",
+      "verdict": "dismissed",
+      "category": "timing_window",
+      "clinic_scenario": "none: the practitioner would have to draw before the opening GET returns AND a second device must have written the same map; both halves fail CLINIC_REALITY.",
+      "reason": "Human racing the opening load, and the only harm is erasing another device's point on the same record; if the load is realistically seconds on clinic wifi, the smallest guard is disabling the pen until loaded, never a sync protocol.",
+      "pattern": "a person acting inside a sub-second or few-second window"
+    },
+    {
+      "id": "F3",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 lib/stroke-queue-send.ts:85 — Close the editor while its checked autosave is pending: a genuine 409 is retried unchecked, deleting the other device’s point. Reproduced — retain the conflicting snapshot for reconciliation after reopening, preserving its version check. (TM-07, DR-06)",
+      "verdict": "dismissed",
+      "category": "clinical_record_concurrency",
+      "clinic_scenario": "none: a genuine 409 only arises when another device wrote the same map; the single-device close-while-autosaving path still saves (unchecked, as on main).",
+      "reason": "The data loss is 'deleting the other device's point'; it needs two devices on one record. Unchecked retry with no editor open is main's pre-branch behaviour for the single device, so nothing regresses for a real clinic.",
+      "pattern": "multi-device concurrent edit of one clinical record"
+    },
+    {
+      "id": "F4",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 lib/stroke-queue-send.ts:67 — Draw during photo A’s pending Save, then replace the displayed photo with B: the captured editor resumes using B’s shared refs and PUTs B’s map into A. Reproduced — bind asynchronous sends to a photo-specific editor lifetime and revalidate that identity after waiting. (TM-07, UI-04)",
+      "verdict": "act_on",
+      "category": "single_device_data_loss",
+      "clinic_scenario": "Practitioner on the treatment-room iPad annotates photo A, presses Save on clinic wifi (Save waits on queued autosaves that retry with backoff for up to a minute), then moves on to photo B of the same client at normal pace; A's queued autosave resumes with the editor's shared refs and writes B's map onto A.",
+      "reason": "Branch-caused (editor registry and snapshot() introduced in ff0bf6700) and one device misfiling its own clinical record; fix is to bind the send to the photo's editor lifetime, or drop the registry by reverting the widened autosave-check work per the premise action.",
+      "demonstrated": "Reviewer reproduced it. Traced path: lib/stroke-queue-send.ts sendStrokeSave awaits editor.whenNotSaving(), then sends editor.snapshot(); the editor registered for photo A (added in ff0bf6700) reads the modal's shared refs, which now hold B's map, and PUTs /api/photos/A/face-mapping. The system supplies the delay, not a human racing it.",
+      "in_scope": true
+    },
+    {
+      "id": "F5",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 components/face-mapping/face-mapping-conflict.ts:99 — Switch from A to B while A’s autosave conflict GET is pending: its callback merges A’s points into B’s canvas and replaces B’s synchronization state. Reproduced — invalidate callbacks on photo change/unmount and reject results from an obsolete editor lifetime. (TM-07, DR-05)",
+      "verdict": "dismissed",
+      "category": "clinical_record_concurrency",
+      "clinic_scenario": "none: the path starts from A's autosave conflict GET, which only fires after a genuine 409 from another device writing the same map.",
+      "reason": "Looks single-device (wrong-photo merge) but can only start from a two-device conflict callback; the pattern names this exact case (tiy3q r3 F5).",
+      "pattern": "multi-device concurrent edit of one clinical record"
+    },
+    {
+      "id": "F6",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 components/face-mapping/face-mapping-save.ts:83 — Both devices change a dose; a stroke drawn during conflict refresh resumes automatically and persists the locally chosen dose before the practitioner reviews the warning. Reproduced: remote 8 units became 6 despite “Check the map and press Save again” — pause autosaves on unresolved conflicts until explicit review and Save. (TM-07, UI-07, H-U0)",
+      "verdict": "dismissed",
+      "category": "clinical_record_concurrency",
+      "clinic_scenario": "none: requires both devices to change the same point's dose on one client's face map at once; the treating practitioner alone records doses in the room (CLINIC_REALITY, confirmed by Shane).",
+      "reason": "Two-device concurrent edit of one clinical record, the premise Shane rejected on 26 Sep; not a prescribing-pathway safety gate, it is conflict-resolution UX for a scenario that does not occur.",
+      "pattern": "multi-device concurrent edit of one clinical record"
+    },
+    {
+      "id": "F7",
+      "reviewer": "astra-xhigh",
+      "source_line": "P1 pages/api/photos/[photoId]/face-mapping.ts:201 — Two overlapping ordinary checked saves read the same version, pass the separate check, and both return 200; the last update replaces the first. Reproduced through the real handler with controlled database doubles; the actual SQL update has no version predicate. Pre-existing, but required by this bead’s promise — make comparison and update atomic, returning 409 to the losing writer. (DR-01, TM-07)",
+      "verdict": "dismissed",
+      "category": "clinical_record_concurrency",
+      "clinic_scenario": "none: two overlapping checked saves of the same face map need two writers on one record at the same moment.",
+      "reason": "Reviewer itself says pre-existing; server-side atomic version check only matters for two concurrent writers on one clinical record, which the clinic never has. Single-device saves are serialised by the branch's wait-for-autosaves.",
+      "pattern": "multi-device concurrent edit of one clinical record"
+    }
+  ],
+  "act_on_over_cap_reason": null
+}

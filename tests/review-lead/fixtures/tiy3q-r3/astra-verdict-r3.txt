@@ -1,0 +1,54 @@
+# Source: ~/.claude/evidence/goal/tiy3q-20260924T101552Z/astra-independent-r3.txt (final verdict block, verbatim)
+FAIL
+
+P1 components/face-mapping/face-mapping-save.ts:57 — Press Save while a conflicting autosave is pending: the queue merges the remote point, then Save sends its pre-wait snapshot with the newly adopted stamp, deleting that point. Reproduced — stop Save when draining discovers a conflict; keep the payload and version from the same snapshot. (TM-07, DR-05)
+
+P1 lib/stroke-queue-send.ts:78 — Draw before the opening GET returns: `sync.live` is false, so the autosave writes unchecked and erases another device’s point. Reproduced — wait for authoritative synchronization and reconcile before writing; an unavailable stamp must not authorize an unchecked replacement. (TM-07, DR-01)
+
+P1 lib/stroke-queue-send.ts:85 — Close the editor while its checked autosave is pending: a genuine 409 is retried unchecked, deleting the other device’s point. Reproduced — retain the conflicting snapshot for reconciliation after reopening, preserving its version check. (TM-07, DR-06)
+
+P1 lib/stroke-queue-send.ts:67 — Draw during photo A’s pending Save, then replace the displayed photo with B: the captured editor resumes using B’s shared refs and PUTs B’s map into A. Reproduced — bind asynchronous sends to a photo-specific editor lifetime and revalidate that identity after waiting. (TM-07, UI-04)
+
+P1 components/face-mapping/face-mapping-conflict.ts:99 — Switch from A to B while A’s autosave conflict GET is pending: its callback merges A’s points into B’s canvas and replaces B’s synchronization state. Reproduced — invalidate callbacks on photo change/unmount and reject results from an obsolete editor lifetime. (TM-07, DR-05)
+
+P1 components/face-mapping/face-mapping-save.ts:83 — Both devices change a dose; a stroke drawn during conflict refresh resumes automatically and persists the locally chosen dose before the practitioner reviews the warning. Reproduced: remote 8 units became 6 despite “Check the map and press Save again” — pause autosaves on unresolved conflicts until explicit review and Save. (TM-07, UI-07, H-U0)
+
+P1 pages/api/photos/[photoId]/face-mapping.ts:201 — Two overlapping ordinary checked saves read the same version, pass the separate check, and both return 200; the last update replaces the first. Reproduced through the real handler with controlled database doubles; the actual SQL update has no version predicate. Pre-existing, but required by this bead’s promise — make comparison and update atomic, returning 409 to the losing writer. (DR-01, TM-07)
+
+HAZARDS
+
+- H-U0: FAIL. Conflict feedback promises review before Save, but pending autosaves can already persist the disputed dose.
+- H-U2: FAIL. Save is reachable, but the scenarios above violate its preservation promise.
+- H-T3: Existing reads and updates are business-scoped in SQL; no new queries. Access tests pass. (TM-01)
+- H-P0, H-P1: No new external telemetry sink or patient-data logging introduced; the synchronization event stays within the page.
+- H-D1: Independently confirmed all 19 mutations fail tests, with unaffected controls passing. This does not establish correctness of every pinned behavior.
+- H-D2: Exercised the real modal, queue, merge, mutation hook and API handler. Viewer/transport substitutes and database doubles remain; PostgreSQL concurrency was not exercised.
+- H-D3: FAIL. The editor-close test explicitly requires the unsafe unchecked retry. The fake server also makes version comparison and writing atomic, unlike the actual handler.
+- H-D4: Reviewed suites are active, not quarantined.
+- H-D5: Supplied tests pass; seven additional behavioral reproductions fail. Evidence is separated below. (DR-07)
+- H-D6: Server synchronization stamps use UTC ISO strings; no naive timestamp arithmetic added.
+- H-D7: No migrations.
+- H-M1–H-M7: N/A; no payments.
+- H-T1–H-T2: N/A; no settings changes or new clinic ability.
+- H-P2–H-P3: N/A; no client communication or new persistent store.
+- H-C1–H-C4: N/A; no sends, schedulers or activation changes. (COM-01–COM-07)
+- H-B1–H-B6: N/A; no booking predicates.
+- H-U1, H-U3: N/A; no distinct-status display or persistent staff-alert changes.
+
+VERIFIED OK
+
+- 33/33 supplied focused tests, 16/16 existing access-handler tests, and 3/3 repository file-length checks pass.
+- 19/19 supplied mutations independently killed using in-memory transformations.
+- Round-2 findings 2–7 pass their targeted regression checks; finding 1 is only partially resolved.
+- Original draw → autosave → add point → Save → X passes.
+- No Save/queue deadlock in the tested single-editor orderings.
+- Cached `origin/main` merge check reports no conflicts.
+- Worktree remains clean at `ff0bf6700`.
+
+UNVERIFIED
+
+- Actual iPad Safari gestures and full browser-route behavior.
+- Real PostgreSQL concurrent writes and IndexedDB replay across tabs.
+- Two simultaneously open modals for the same photo in one page.
+- Full lint, typecheck, test and Cloud Build gates; the 29 filesystem-writing ratchet fixture tests were excluded.
+- Fresh remote state, other pending branches and deployment status.
