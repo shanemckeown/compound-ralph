@@ -123,6 +123,9 @@ reversal.
     per-candidate ratchet regeneration/attribution gate in Step 2. A manual
     land must use a resolved bead id, preserve baseline evidence, and HOLD
     unrelated growth; the ratchet helper never substitutes for `npm test`.
+    It must also run the FULL pg lane once on the combined tree before
+    pushing (the Step 2 full-pg-lane block, serialised by the laptop-wide
+    lock; LUCY-w6fpi) — builders only ran targeted pg suites.
     A manual land bypasses the mechanical content-loss check above entirely, which is exactly how the
     2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
 
@@ -579,7 +582,7 @@ For each merge that passes these checks, run full-project typecheck via
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
 and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
 for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
-narrower and accurate). Never run full Jest in LAND. Save separate command,
+narrower and accurate). Never run full Jest in LAND. The full pg lane runs once per LAND push, on the combined tree (below). Save separate command,
 raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
@@ -611,8 +614,8 @@ after the reset, collect a kickback decision while the precise pre-merge
 baseline is available:
 
 1. Re-run the exact failed scoped command(s), unchanged, at the scratch's
-   current HEAD. That is origin/main plus only earlier green merges already
-   pushed in this batch. Write separate
+   current HEAD. That is origin/main plus only earlier green merges of this
+   batch (pushed or still in `GREEN_PENDING`). Write separate
    scoped-baseline-<branch>-command/raw-output/exit-code artifacts. A red or
    malformed baseline is held as **baseline-red** (or malformed evidence): it
    is not safe to blame or dispatch against this branch.
@@ -641,11 +644,61 @@ sensitive, conflict, malformed evidence, infra-after-retry, same signature,
 cap, or a live fix session), preserve the evidence and put it in the final
 HELD/BLOCKED report for Shane's judgment.
 
-For a green feature:
+For a green feature, **do not push yet** (LUCY-w6fpi). Append `BR`, `BEAD_ID` and
+`MERGE_SHA` to `GREEN_PENDING` and continue the loop; the next candidate merges on
+top of it in the same scratch. "Earlier green merges" above means these pending ones.
+
+#### Mandatory full pg lane before every LAND push to main (LUCY-w6fpi)
+
+Builders no longer run the full pg lane (`/goal` runs `~/.claude/scripts/targeted-tests.py`:
+related suites only). This default LAND run is therefore where cross-branch pg breakage
+is caught before main moves (25 Sep: build 1aeebc99), so **nothing is pushed to main from
+LAND until the full pg lane has passed on the exact tree being pushed.** It runs once
+after the ordinary loop (on all of `GREEN_PENDING`), and once more on the migration
+transaction's final tree before that push. Run `colima start` first. The command calls
+the laptop-wide lock directly (not the repo's `scripts/ci/pg-lane.sh`, which older mains
+lack), so a second full lane anywhere on the laptop waits for this one:
 
 ~~~bash
-git -C "$SCRATCH" push origin HEAD:main
+PG_TREE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
+PG_EVIDENCE="$EVIDENCE_DIR/full-pg-$PG_TREE_SHA"
+nohup bash -o pipefail -c '
+  cd "$2" && python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- \
+    env TZ=UTC RUN_PG_TESTS=true npx jest --selectProjects pg-tests
+  code=$?; printf "%s\n" "$code" > "$1"; exit "$code"
+' bash "$PG_EVIDENCE.exit" "$SCRATCH" > "$PG_EVIDENCE.log" 2>&1 </dev/null &
+printf '%s\n' "$!" > "$PG_EVIDENCE.pid"
 ~~~
+
+Poll the log and exit file; never foreground-wait. A `waiting: full pg lane already
+running` line is normal, not red (`~/.claude/fleet/pg-lane.log` names the holder). Only
+this is green, and only then push, exactly the tree that was tested:
+
+~~~bash
+PG_EXIT="$(cat "$PG_EVIDENCE.exit" 2>/dev/null || echo missing)"
+if [ -z "${PG_TREE_SHA:-}" ] || [ "$PG_EXIT" != 0 ] \
+  || [ "$(git -C "$SCRATCH" rev-parse HEAD)" != "$PG_TREE_SHA" ]; then
+  printf 'HELD — full pg lane not green on the tree to push (exit: %s); evidence: %s. Nothing pushed.\n' \
+    "$PG_EXIT" "$PG_EVIDENCE.log"
+  exit 1  # never push main past a red, missing or stale full pg lane (LUCY-w6fpi)
+fi
+git -C "$SCRATCH" push origin "$PG_TREE_SHA:main"
+~~~
+
+Then run the B-1 close and B-2 blocks below once per `GREEN_PENDING` entry, with that
+entry's `BEAD_ID` and `MERGE_SHA`.
+
+Missing/malformed exit, a dead pid without an exit file, or any nonzero exit pushes
+nothing. Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
+a pass and never a reason to run the lane without the lock. Infra-shaped red (exit
+3/134/137, Docker/Colima or container start errors, killed) reruns once with separate
+retry evidence, then HOLDs the whole batch as **pg-lane-infra**. A red assertion
+isolates the culprit: reset the scratch to `$BASE_SHA` and replay `GREEN_PENDING` one
+candidate at a time as a push-rejected replay does (new `LAND_ATTEMPT`, every Step 2
+gate with fresh evidence), running this full pg lane before each single-candidate push.
+A candidate whose lane is red is reset to `$MERGE_SHA^`, held as **pg-lane-red** with
+both lanes' evidence, and goes through the kickback steps above (its pre-merge tree's
+lane is the baseline). The others push one at a time.
 
 🔴 **B-1 (AI Fleet Grand Plan, 2026-09-01): this push is the moment a bead's status changes from `pushed` to `closed` — land-batch is now the ONLY place that happens for AestheticcNext- code beads.** Workers stop closing their own beads in `/goal` Phase 6; they leave them `pushed`. Immediately after the push above succeeds, for every AestheticcNext- bead ID this candidate's branch corresponds to (derive from the branch name, e.g. `goal/aestheticcnext-<id>` → `AestheticcNext-<id>`; a bundle/epic closes every child then the parent):
 
@@ -849,7 +902,9 @@ RECONCILE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 ~~~
 
 Rerun the scoped gates against the reconciled names, then run the final
-**check-only** ratchet pinned to that captured commit before the one normal
+**check-only** ratchet pinned to that captured commit, then the full pg lane block
+from the ordinary loop on this exact tree (red HOLDs the whole transaction, no push;
+LUCY-w6fpi), before the one normal
 non-force fast-forward push:
 
 ~~~bash
@@ -1046,6 +1101,29 @@ Poll log and exit file; do not foreground-wait. Save command, PID, poll evidence
 full log, and parsed exit. Missing/malformed exit, a dead child without zero, or
 ANY nonzero exit is red.
 Do not deploy. This is the one full Jest run.
+
+🔴 **Then the FULL pg lane, once, on this same combined scratch — mandatory, never
+dropped (LUCY-w6fpi).** Builders no longer run it (they run
+`~/.claude/scripts/targeted-tests.py`). LAND already ran it on every tree it pushed; this
+run also covers commits that reached main another way (the overnight PR lane, manual
+lands) before the staging deploy (25 Sep: build 1aeebc99). Run it detached exactly like
+full Jest, after full Jest finishes, with `colima start` done first and `$SCRATCH` = the
+Step 4 scratch path:
+
+~~~bash
+nohup bash -o pipefail -c '
+  cd "$2" && python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- \
+    env TZ=UTC RUN_PG_TESTS=true npx jest --selectProjects pg-tests
+  code=$?; printf "%s\n" "$code" > "$1"; exit "$code"
+' bash "$EVIDENCE_DIR/full-pg.exit" "$SCRATCH" > "$EVIDENCE_DIR/full-pg.log" 2>&1 </dev/null &
+printf '%s\n' "$!" > "$EVIDENCE_DIR/full-pg.pid"
+~~~
+
+`pg-lane-lock.py` takes the laptop-wide lock (`~/.claude/fleet/pg-lane.lock`); if
+another full lane holds it, this one waits and the log says who holds it
+(`~/.claude/fleet/pg-lane.log`). Waiting is normal, not red. Same red rules as full Jest,
+and a killed lane is INCOMPLETE, never a pass. Exit 3 means the lock refused (rerun
+unsandboxed), never a pass.
 
 ### Step 5 — One staging deploy, then full ledger QA
 
