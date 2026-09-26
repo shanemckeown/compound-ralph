@@ -26,62 +26,6 @@ import time
 
 MIB = 1024 * 1024
 ROOT = Path(os.environ.get("HEAVY_GATE_DIR", "~/.claude/state/heavy-runs-v1")).expanduser()
-PG_LANE_LOCK = Path(__file__).resolve().parent / "pg-lane-lock.py"
-# Any of these narrows a pg-tests run below the full lane (LUCY-w6fpi).
-PG_NARROWING = ("--findRelatedTests", "--testPathPattern", "--testPathPatterns",
-                "--runTestsByPath", "--onlyChanged", "-o", "--changedSince")
-# Options whose values are never test filters. Every token up to the next option is
-# treated as their value; that over-locks at worst. --selectProjects is an array
-# option: jest reads `--selectProjects pg-tests tests/x.test.ts` as two project names.
-JEST_PATH_OPTIONS = {"--selectProjects", "--testEnvironment", "--env", "--testRunner",
-                     "--testPathIgnorePatterns", "--modulePaths", "--moduleDirectories",
-                     "--config", "-c", "--outputFile", "--rootDir", "--roots", "--reporters",
-                     "--coverageDirectory", "--cacheDirectory", "--testSequencer",
-                     "--globalSetup", "--globalTeardown", "--setupFiles",
-                     "--setupFilesAfterEnv", "--testResultsProcessor", "--resolver"}
-
-
-def is_full_pg_lane(tail, env=None):
-    """True for `jest --selectProjects pg-tests` with no path/related filter.
-
-    Also true for a bare `jest` run with RUN_PG_TESTS=true: jest.config.js then adds
-    the pg-tests project to the default set, so it is the full lane plus node/dom.
-    Full lanes are serialised laptop-wide through pg-lane-lock.py; targeted
-    pg runs (the builder gate) are not.
-    """
-    env = os.environ if env is None else env
-    selects = any(t == "--selectProjects" or t.startswith("--selectProjects=") for t in tail)
-    selects_pg = not selects and env.get("RUN_PG_TESTS") == "true"
-    for index, token in enumerate(tail):
-        if token == "--selectProjects":
-            selects_pg |= any(value == "pg-tests" for value in
-                              _values_after(tail, index + 1))
-        elif token.startswith("--selectProjects="):
-            selects_pg |= "pg-tests" in token.split("=", 1)[1].split(",")
-    if not selects_pg:
-        return False
-    if any(token.split("=", 1)[0] in PG_NARROWING for token in tail):
-        return False
-    # A positional test path (tests/pg-integration/x.test.ts) also narrows it. Err
-    # towards "full": an unrecognised token only costs a wait for the lock, while a
-    # full lane misread as targeted is the load this lock exists to stop.
-    in_path_option = False
-    for token in tail:
-        if token.startswith("-"):
-            # `--selectProjects=pg-tests x` still consumes x as a project name.
-            in_path_option = token.split("=", 1)[0] in JEST_PATH_OPTIONS
-            continue
-        if not in_path_option and ("/" in token or ".test" in token
-                                   or token.endswith((".ts", ".tsx", ".js"))):
-            return False
-    return True
-
-
-def _values_after(tail, start):
-    for token in tail[start:]:
-        if token.startswith("-"):
-            return
-        yield token
 
 
 def log(message):
@@ -249,8 +193,6 @@ def command_for(args, parser):
                 workers, explicit_workers = int(value), True
         worker_args = [] if in_band or explicit_workers else ["--maxWorkers=2"]
         command = ["node", "./node_modules/jest/bin/jest.js", *tail, *worker_args]
-        if is_full_pg_lane(tail):
-            command = [sys.executable, str(PG_LANE_LOCK), "--", *command]
         # AestheticcNext-54pd3: full node/dom ~1.2 GiB each; concurrent groups
         # ~3.54 GiB combined. Reserve 4 GiB for a normal two-worker run, with
         # margin and linear growth for extra workers. Heaps are ceilings, not RSS.
