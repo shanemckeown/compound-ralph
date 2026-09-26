@@ -341,6 +341,176 @@ def load_bead_record(bead):
     return record, None
 
 
+# ------------------------------------------------------- host resource gate ---
+# Checks 6–9 (2026-09-26, after the kernel panic). The Mac panicked with the memory
+# compressor at 100% of its segment limit and LOW swap space: the disk was 90% full
+# (115 git worktrees, 63 GB) so swap could not grow, and ~300 Claude sessions were
+# registered, many idle background sessions still resident. `memory_pressure -Q` read
+# 40–60% free throughout and missed it — free RAM is not the constraint once swap has
+# nowhere to go. Every probe here is cheap (statvfs, one git plumbing call, one registry
+# read with a 5s timeout): no `du` walks, under 2s total.
+DATA_VOLUME = "/System/Volumes/Data"
+MIN_FREE_DISK_GB = 120
+MAX_WORKTREES = 40
+MAX_RESIDENT_BG_SESSIONS = 8
+MIN_MEMORY_FREE_PCT = 25
+AGENTS_TIMEOUT_S = 5
+RESIDENT_STATES = {"working", "blocked", "idle", "done"}
+
+PRUNE_WORKTREES_CMD = (
+    f"git -C {REPO} fetch -q origin && git -C {REPO} worktree list --porcelain "
+    f"| sed -n 's/^worktree //p' | grep -vx '{REPO}' | while read -r w; do "
+    f"b=$(git -C \"$w\" rev-parse HEAD) && [ -z \"$(git -C \"$w\" status --porcelain)\" ] "
+    f"&& git -C {REPO} merge-base --is-ancestor \"$b\" origin/main "
+    f"&& git -C {REPO} worktree remove \"$w\"; done; git -C {REPO} worktree prune")
+
+
+def probe_disk_free_gb(path=DATA_VOLUME):
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize / 2**30  # GiB, same unit as `df -g`
+
+
+def probe_worktree_count():
+    code, out, err = sh(f"git -C {REPO} worktree list --porcelain", timeout=10)
+    if code != 0:
+        raise RuntimeError(err or out or f"git worktree list exited {code}")
+    return sum(1 for line in out.splitlines() if line.startswith("worktree "))
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def resident_background_sessions(rows):
+    """Background sessions still holding memory. A row that carries a pid counts if that
+    process is alive (any of working/blocked/idle/done — an idle or done session with a
+    live process is still resident). A row with no pid counts only if working or blocked."""
+    resident = []
+    for a in rows:
+        if a.get("kind") != "background":
+            continue
+        state = a.get("state")
+        if a.get("pid"):
+            if state in RESIDENT_STATES and _pid_alive(a["pid"]):
+                resident.append(a)
+        elif state in ("working", "blocked"):
+            resident.append(a)
+    return resident
+
+
+def probe_agents():
+    """`claude agents --json` rows. Raises on failure or timeout (caller warns, never refuses)."""
+    r = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True,
+                       timeout=AGENTS_TIMEOUT_S)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"exit {r.returncode}")
+    rows = json.loads(r.stdout)
+    if not isinstance(rows, list):
+        raise ValueError("registry is not a list")
+    return rows
+
+
+def probe_memory_free_pct():
+    code, out, _ = sh("memory_pressure -Q", timeout=5)
+    m = re.search(r"free percentage:\s*(\d+)%", out)
+    if code != 0 or not m:
+        raise RuntimeError("could not read `memory_pressure -Q`")
+    return int(m.group(1))
+
+
+def resource_snapshot(agent_rows=None):
+    """The four numbers, each None if its probe failed (with the error in `errors`)."""
+    snap = {"disk_free_gb": None, "worktrees": None, "resident_bg": None,
+            "resident_rows": [], "memory_free_pct": None, "errors": {}}
+    for key, probe in (("disk_free_gb", probe_disk_free_gb),
+                       ("worktrees", probe_worktree_count),
+                       ("memory_free_pct", probe_memory_free_pct)):
+        try:
+            snap[key] = probe()
+        except Exception as exc:
+            snap["errors"][key] = str(exc) or type(exc).__name__
+    try:
+        rows = agent_rows if agent_rows is not None else probe_agents()
+        snap["resident_rows"] = resident_background_sessions(rows)
+        snap["resident_bg"] = len(snap["resident_rows"])
+    except subprocess.TimeoutExpired:
+        snap["errors"]["resident_bg"] = f"`claude agents --json` timed out after {AGENTS_TIMEOUT_S}s"
+    except Exception as exc:
+        snap["errors"]["resident_bg"] = f"`claude agents --json` failed: {exc}"
+    return snap
+
+
+def resource_status_line(snap):
+    def fmt(v, suffix=""):
+        return "?" if v is None else f"{v:.0f}{suffix}" if isinstance(v, float) else f"{v}{suffix}"
+    return (f"RESOURCES: disk free {fmt(snap['disk_free_gb'], ' GB')} (min {MIN_FREE_DISK_GB}) · "
+            f"worktrees {fmt(snap['worktrees'])} (max {MAX_WORKTREES}) · "
+            f"resident bg sessions {fmt(snap['resident_bg'])} (max {MAX_RESIDENT_BG_SESSIONS}) · "
+            f"memory free {fmt(snap['memory_free_pct'], '%')} (min {MIN_MEMORY_FREE_PCT}%)")
+
+
+def check_resources(snap=None):
+    """Checks 6–9. Returns (results, warnings, details): results maps check name → problems
+    (a failed probe for disk/worktrees/memory refuses — fail closed; a failed/timed-out
+    `claude agents` only warns, per Shane 2026-09-26)."""
+    snap = snap or resource_snapshot()
+    err = snap["errors"]
+    results, warnings, details = {}, {}, {}
+
+    name = "6 disk free"
+    if snap["disk_free_gb"] is None:
+        results[name] = [f"cannot read free space on {DATA_VOLUME}: {err.get('disk_free_gb')}"]
+    else:
+        details[name] = f"{snap['disk_free_gb']:.0f} GB free on {DATA_VOLUME} (min {MIN_FREE_DISK_GB})"
+        results[name] = [] if snap["disk_free_gb"] >= MIN_FREE_DISK_GB else [
+            f"only {snap['disk_free_gb']:.0f} GB free on {DATA_VOLUME} (< {MIN_FREE_DISK_GB} GB) — "
+            f"swap cannot grow; this is what panicked the kernel on 26 Sep.",
+            f"fix: remove merged+clean worktrees: {PRUNE_WORKTREES_CMD}"]
+
+    name = "7 worktree count"
+    if snap["worktrees"] is None:
+        results[name] = [f"cannot count worktrees in {REPO}: {err.get('worktrees')}"]
+    else:
+        details[name] = f"{snap['worktrees']} worktrees (max {MAX_WORKTREES})"
+        results[name] = [] if snap["worktrees"] <= MAX_WORKTREES else [
+            f"{snap['worktrees']} worktrees in {REPO} (> {MAX_WORKTREES}).",
+            f"fix: remove merged+clean worktrees: {PRUNE_WORKTREES_CMD}"]
+
+    name = "8 resident bg sessions"
+    if snap["resident_bg"] is None:
+        results[name] = []
+        warnings[name] = f"{err.get('resident_bg')} — session count not enforced this run"
+    else:
+        details[name] = f"{snap['resident_bg']} resident background sessions (max {MAX_RESIDENT_BG_SESSIONS})"
+        if snap["resident_bg"] <= MAX_RESIDENT_BG_SESSIONS:
+            results[name] = []
+        else:
+            listing = [f"  {a.get('id') or a.get('sessionId', '?')[:8]}  {a.get('state')}"
+                       f"{'  pid ' + str(a['pid']) if a.get('pid') else ''}  {a.get('name') or ''}"
+                       for a in snap["resident_rows"]]
+            results[name] = [
+                f"{snap['resident_bg']} resident background Claude sessions (> {MAX_RESIDENT_BG_SESSIONS}).",
+                "fix: claude rm finished sessions (check each is landed/closed first: "
+                "fleet-supervisor.py triages them). Resident now:"] + listing
+
+    name = "9 memory free"
+    if snap["memory_free_pct"] is None:
+        results[name] = [f"cannot read memory pressure: {err.get('memory_free_pct')}"]
+    else:
+        details[name] = f"memory_pressure -Q {snap['memory_free_pct']}% free (min {MIN_MEMORY_FREE_PCT}%)"
+        results[name] = [] if snap["memory_free_pct"] >= MIN_MEMORY_FREE_PCT else [
+            f"memory_pressure -Q reports {snap['memory_free_pct']}% free (< {MIN_MEMORY_FREE_PCT}%).",
+            "fix: claude rm finished sessions and stop idle workers before dispatching more "
+            "(`claude agents --json` lists them)."]
+    return results, warnings, details
+
+
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
     headless_diagnostics = None
@@ -357,17 +527,22 @@ def run_gate(bead, is_epic):
         record, load_error = load_bead_record(bead)
         results["5 bead brief complete"] = ([f"cannot verify the bead brief — {load_error}"]
                                             if load_error else check_bead_brief(record))
+    resource_results, resource_warnings, resource_details = check_resources()
+    results.update(resource_results)
     failed = False
     for name, problems in results.items():
+        detail = f" — {resource_details[name]}" if name in resource_details else ""
         if problems:
             failed = True
-            print(f"   ✗ {name}")
+            print(f"   ✗ {name}{detail}")
             if name == "4 headless eligible" and headless_diagnostics is not None:
                 print(headless_diagnostics.getvalue(), end="")
             for p in problems:
                 print(f"       {p}")
+        elif name in resource_warnings:
+            print(f"   ⚠ {name} — WARN (not refusing): {resource_warnings[name]}")
         else:
-            print(f"   ✓ {name}")
+            print(f"   ✓ {name}{detail}")
     return failed, {k: v for k, v in results.items() if v}
 
 

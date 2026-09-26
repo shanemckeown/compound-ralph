@@ -76,6 +76,7 @@ class BeadBriefCheck(unittest.TestCase):
             "check_dependencies": lambda b: [],
             "check_headless_eligible": lambda b, out=None: [],
             "load_bead_record": lambda b: ({"id": b, "description": "fix it"}, None),
+            "check_resources": lambda snap=None: ({}, {}, {}),  # host checks 6-9: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:
@@ -200,6 +201,7 @@ class BeadBriefCheck(unittest.TestCase):
             "check_no_inflight_work": lambda b: [],
             "check_dependencies": lambda b: [],
             "check_epic_has_children": lambda b: [],
+            "check_resources": lambda snap=None: ({}, {}, {}),  # host checks 6-9: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:

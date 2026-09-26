@@ -143,6 +143,20 @@ def stale_manager_claims(fleet):
     return stale
 
 
+def resource_line(registry):
+    """One status line with fleet-dispatch.py's host resource numbers (checks 6-9, added
+    after the 26 Sep kernel panic). Reuses the registry already read, so no second call."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fleet_dispatch", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-dispatch.py"))
+        fd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fd)
+        return fd.resource_status_line(fd.resource_snapshot(registry))
+    except Exception as e:
+        return f"RESOURCES: unavailable ({e})"
+
+
 MECHANISM_LIVENESS_SCRIPT = os.path.join(REPO, "scripts", "ops", "mechanism-liveness.mjs")
 
 
@@ -287,6 +301,7 @@ def main():
         return
 
     interactive = [a for a in fleet if a.get("kind") == "interactive"]
+    print(resource_line(fleet or None) + "\n")
     print(f"FLEET: {len(fleet)} sessions — {len(interactive)} interactive, "
           f"{sum(1 for a in fleet if a.get('kind') == 'background')} background, "
           f"{len(findings)} blocked and triaged\n")
