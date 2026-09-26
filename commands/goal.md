@@ -231,6 +231,10 @@ use its headings:
   and record the decision under Approach.
 - **Acceptance tests** — runnable tests that prove the promise, each naming the real path it
   drives and the mutation it must catch; none in a quarantined suite (H-D4).
+- **Feature Map entry** (user-facing change only; Shane 2026-09-26) — the same branch adds or
+  updates its entry in `Aestheticc/Product/feature-map.json` and `FEATURE_INVENTORY.md`
+  (sidebar path, expect, pass, roles), so `/check-frontend <feature>` can walk it on prod
+  Demo Clinic after deploy. Backend-only beads write `none`.
 - Bead context — verbatim description quote
 - Affected files — list (this is what Phase 0f re-checks against)
 - Invariant interactions — one line per invariant injected at 0d.1A: respected unmodified /
