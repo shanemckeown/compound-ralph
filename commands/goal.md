@@ -414,6 +414,16 @@ and exit code. For AestheticcNext the default is shown below; for another repo,
 derive runnable validation commands from its project instructions and .goal/PLAN.md.
 If there is no runnable command, the round cannot PASS.
 
+🔴 **Test tiering (LUCY-w6fpi, Shane 25 Sep): builders run targeted suites only, never the
+full pg lane.** `targeted-tests.py` runs jest `--findRelatedTests` on the branch's changed
+files, then only the pg suites that import them (`RUN_PG_TESTS=true --selectProjects pg-tests
+--findRelatedTests`). Never run `npm run test:pg`, `test:cloudbuild` step #2 or a bare
+`--selectProjects pg-tests` from `/goal`: the full pg lane runs once on the combined landing
+tree (`/land-batch`) and again in Cloud Build, serialised laptop-wide by
+`~/.claude/scripts/pg-lane-lock.py` (a second caller waits and logs). `/ship` still runs
+`npm test` (node + dom, no pg). For the Cloud Build tarball check use
+`npm run test:cloudbuild -- --step 0` (`--step 3` too when `mobile/` changed).
+
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
 package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree
@@ -430,7 +440,7 @@ landed on AestheticcNext main as 2ac04210c). Watch mode is interactive only.
 : "${RUN_ID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 EVIDENCE_DIR="$HOME/.claude/evidence/goal/$RUN_ID"
 mkdir -p "$EVIDENCE_DIR"
-QA_COMMAND='python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint && python3 ~/.claude/scripts/gated-test-run.py jest'
+QA_COMMAND='python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit && npm run lint && python3 ~/.claude/scripts/targeted-tests.py'
 printf '%s\n' "$QA_COMMAND" > "$EVIDENCE_DIR/qa-command-round-N.txt"
 set +e
 {

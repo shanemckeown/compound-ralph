@@ -123,6 +123,9 @@ reversal.
     per-candidate ratchet regeneration/attribution gate in Step 2. A manual
     land must use a resolved bead id, preserve baseline evidence, and HOLD
     unrelated growth; the ratchet helper never substitutes for `npm test`.
+    It must also run the FULL pg lane once on the combined tree before
+    pushing (`bash scripts/ci/pg-lane.sh`, serialised by the laptop-wide
+    lock; LUCY-w6fpi) — builders only ran targeted pg suites.
     A manual land bypasses the mechanical content-loss check above entirely, which is exactly how the
     2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
 
@@ -579,7 +582,7 @@ For each merge that passes these checks, run full-project typecheck via
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
 and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
 for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
-narrower and accurate). Never run full Jest in LAND. Save separate command,
+narrower and accurate). Never run full Jest or the full pg lane in LAND (the full pg lane runs once in SHIP Step 4). Save separate command,
 raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
@@ -1046,6 +1049,26 @@ Poll log and exit file; do not foreground-wait. Save command, PID, poll evidence
 full log, and parsed exit. Missing/malformed exit, a dead child without zero, or
 ANY nonzero exit is red.
 Do not deploy. This is the one full Jest run.
+
+🔴 **Then the FULL pg lane, once, on this same combined scratch — mandatory, never
+dropped (LUCY-w6fpi).** Builders no longer run it (they run
+`~/.claude/scripts/targeted-tests.py`), so this run and Cloud Build are the only places
+cross-branch pg breakage is caught (25 Sep: build 1aeebc99). Run it detached exactly like
+full Jest, after full Jest finishes, with `colima start` done first and `$SCRATCH` = the
+Step 4 scratch path:
+
+~~~bash
+nohup bash -o pipefail -c '
+  cd "$2" && bash scripts/ci/pg-lane.sh
+  code=$?; printf "%s\n" "$code" > "$1"; exit "$code"
+' bash "$EVIDENCE_DIR/full-pg.exit" "$SCRATCH" > "$EVIDENCE_DIR/full-pg.log" 2>&1 </dev/null &
+printf '%s\n' "$!" > "$EVIDENCE_DIR/full-pg.pid"
+~~~
+
+`scripts/ci/pg-lane.sh` takes the laptop-wide lock (`~/.claude/fleet/pg-lane.lock`); if
+another full lane holds it, this one waits and the log says who holds it
+(`~/.claude/fleet/pg-lane.log`). Waiting is normal, not red. Same red rules as full Jest,
+and a killed lane is INCOMPLETE, never a pass. This is the one full pg lane.
 
 ### Step 5 — One staging deploy, then full ledger QA
 
