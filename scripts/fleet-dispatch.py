@@ -327,6 +327,94 @@ def check_bead_brief(record):
             f"{' and '.join(fixes)}, then re-run."]
 
 
+CLIENT_LABELS = {"client-reported", "capture-watcher", "client-request"}
+# client-<word> labels that name a product area, not a clinic. Any other client-<slug> /
+# client_<slug> is an older spelling of client:<slug> (client-viso, client-city-medispa).
+NON_CLIENT_SUFFIXES = {"bead", "cache", "comms", "facing", "followup", "onboarding", "portal",
+                       "profile", "promise", "risk", "work"}
+TRIAGE_LINE_RE = re.compile(r"(?im)^[\s>*_#`-]*triage[\s*_`]*:(.*)$")
+# Exactly one verdict, then end or evidence. Rejects the unfilled template
+# ("regression|promise|…"), doubt ("regression?") and longer words ("promised").
+TRIAGE_VERDICT_RE = re.compile(r"(?i)^[\s*_`'\"]*(regression|promise|by[- ]design|own[- ]request)"
+                               r"[*_`'\"]*(?=$|[\s—–:;,.(-])(?![\s*_`'\"]*[|/?])")
+TRIAGE_BUILD = {"regression", "promise"}
+TRIAGE_REPLY = {"by-design", "own-request"}
+
+
+def is_client_reported(record):
+    for label in record.get("labels") or []:
+        m = re.match(r"client[-_](.+)$", label)
+        if label in CLIENT_LABELS or label.startswith("client:") or (
+                m and m.group(1) not in NON_CLIENT_SUFFIXES):
+            return True
+    return False
+
+
+def check_client_triage(record):
+    """Check 10 (LUCY-nzmtr, 2026-09-27): a client 'can't do X' report is triaged before a
+    Worker builds anything. Shane: "we need to be pushing for behaviour change rather than
+    us suddenly building something new". AestheticcNext-f23pd was filed as a P1 regression
+    from one WhatsApp line and dispatched in 40 minutes; it was the one-room rule Viso asked
+    for on 22 Sep. Only 'Triage: regression' (designed behaviour broke) or 'Triage: promise'
+    (a dated promise) may build. The latest Triage line wins, so a comment can re-triage."""
+    if not is_client_reported(record):
+        return []
+    comments = [(c.get("text") or "") for c in (record.get("comments") or []) if isinstance(c, dict)]
+    text = "\n".join([record.get("description") or "", record.get("design") or "",
+                      record.get("notes") or ""] + comments)
+    found = TRIAGE_LINE_RE.findall(text)
+    bead = record.get("id") or "<bead>"
+    if not found:
+        return [f"client-reported bead has no 'Triage:' line. Before building, answer: which "
+                f"rule refuses it, since when, who asked for it, and does an existing setting "
+                f"or workflow cover it? Then `bd comment {bead} \"Triage: <verdict> — <evidence>\"` "
+                f"with one verdict of regression, promise, by-design or own-request. "
+                f"Only regression or promise dispatch."]
+    latest = found[-1].strip()
+    m = TRIAGE_VERDICT_RE.match(latest)
+    if not m:
+        return [f"unrecognised 'Triage: {latest[:60]}' on {bead} — the latest Triage line must "
+                f"start with exactly one of regression, promise, by-design or own-request."]
+    verdict = re.sub(r"[\s-]+", "-", m.group(1).lower())
+    if verdict in TRIAGE_BUILD:
+        return []
+    return [f"Triage: {verdict} — reply, don't build. Send the client a reply that explains "
+            f"the behaviour and points at the setting, then close {bead} without a build. "
+            f"A genuinely new exception is a one-time product question to Shane."]
+
+
+def list_open_children(bead):
+    """Open children as bd list rows, or raises. --limit 0: bd list stops at 50 by default."""
+    code, out, err = sh(f"bd list --parent {bead} --status open --json --limit 0", cwd=REPO, bead=bead)
+    children = json.loads(out) if code == 0 and out else None
+    if not isinstance(children, list):
+        raise RuntimeError(err or out or f"bd list exited {code}")
+    return children
+
+
+def check_client_triage_tree(bead, record=None):
+    """Check 10 over the bead and its open children. Client feedback arrives as bundles
+    (AestheticcNext-6tl2s, 16 client-reported children) and both /goal and /long-goal build
+    every open child without rerunning this gate, so each client-labelled child must pass."""
+    if record is None:
+        record, error = load_bead_record(bead)
+        if error:
+            return [f"cannot verify client triage — {error}"]
+    problems = [f"{bead}: {p}" for p in check_client_triage(record)]
+    try:
+        children = list_open_children(bead)
+    except Exception as exc:
+        return problems + [f"cannot list {bead}'s children to verify client triage: {exc}"]
+    for child in children:
+        if not isinstance(child, dict) or not is_client_reported(child):
+            continue
+        crecord, cerror = load_bead_record(child.get("id"))
+        problems += [f"{child.get('id')}: {p}" for p in
+                     ([f"cannot verify client triage — {cerror}"] if cerror
+                      else check_client_triage(crecord))]
+    return problems
+
+
 def load_bead_record(bead):
     code, out, err = sh(f"bd show {bead} --json", cwd=REPO, bead=bead)
     if code != 0 or not out:
@@ -521,12 +609,15 @@ def run_gate(bead, is_epic):
     }
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
+        results["10 client triage"] = check_client_triage_tree(bead)
     else:
         headless_diagnostics = io.StringIO()
         results["4 headless eligible"] = check_headless_eligible(bead, headless_diagnostics)
         record, load_error = load_bead_record(bead)
         results["5 bead brief complete"] = ([f"cannot verify the bead brief — {load_error}"]
                                             if load_error else check_bead_brief(record))
+        results["10 client triage"] = ([f"cannot verify client triage — {load_error}"]
+                                       if load_error else check_client_triage_tree(bead, record))
     resource_results, resource_warnings, resource_details = check_resources()
     results.update(resource_results)
     failed = False
