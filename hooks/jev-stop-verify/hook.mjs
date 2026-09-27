@@ -9,19 +9,18 @@
 //   2. Worker turns. belay starts a turn at the last typed prompt and skips slash
 //      commands, but a /goal worker's only prompt is "/goal <bead>", so belay alone
 //      never fires on a worker. The turn is found here.
-//   3. Minimum outbound state (Shane, 26 Sep: no patient data to TypeSafe). The task is
-//      synthesised from the bead id, checks are sent as runner names without arguments,
-//      and the final message is cut to its tail and screened. Nothing else leaves.
-//      The screen is best effort, not a guarantee: see README "Privacy".
+//   3. Private by construction (Shane, 26 Sep: no patient data to TypeSafe). A fixed task,
+//      and the closing message and check names through the allow-list vocabulary in
+//      ../jev-common/privacy.mjs. Hard identifiers skip the call outright.
 //   4. Fail open. Any error, HTTP failure (even one later retried to success), missing
 //      key, unwritable state or the 20 s overall deadline lets the stop through.
 // Decision of record: Aestheticc/Intel/JEV_DECISION_2026-09-26.md
 
-import { execFileSync } from "node:child_process";
 import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PrivacySkip, guardedFetch, keychainKey, loadVocab, makeRedact, patientDataReason } from "../jev-common/privacy.mjs";
 import { CHECK_COMMAND, QUESTIONS, ask, decide, evidenceFromTurn, homeOf, needsDoneCheck, nudge, parseJsonl, subagentLines } from "./vendor/belay.mjs";
 
 export const MANIFEST = "/Users/shane/Documents/Obsidian/Aestheticc/Ops/FLEET_MANIFEST.jsonl";
@@ -54,96 +53,6 @@ export function isBackground(records) {
     if (records[i] && "entrypoint" in records[i]) return records[i].sessionKind === "bg";
   }
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// Patient-data screen, on every string value of the outbound state, whitespace
-// collapsed. Over-skipping is safe (nothing is sent, the stop is allowed).
-
-const INTERNAL_EMAIL = /@(?:aestheti\.cc|example\.(?:com|org)|anthropic\.com|users\.noreply\.github\.com)$/i;
-const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-// Any run of 10+ digits with phone punctuation (UK mobile/landline, +44 (0) forms).
-const PHONE = /(?:\+\s?\d|\(?\b0)[\d\s().-]{8,}\d/;
-const digitsIn = (m) => (m.match(/\d/g) || []).length;
-const POSTCODE = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i;
-const NHS_NUMBER = /\b\d{3}[\s-]?\d{3}[\s-]?\d{4}\b/;
-const DOB = /\b(?:dob|date of birth|born)\b[^.]{0,20}\d/i;
-const CLINICAL = /\b(?:botox|toxin|filler|dermal|lips?|units? of|bruis\w*|swelling|reaction|necrosis|occlusion|hyaluronidase|anaphyla\w*|contraindicat\w*|pregnan\w*|allerg\w*|medical history|prescri\w*|adverse|complication|treatment notes?)\b/i;
-const CLINICAL_G = new RegExp(CLINICAL.source, "gi");
-// A named person: an honorific, or client/patient/customer then a capitalised word.
-const HONORIFIC = /\b(?:mr|mrs|ms|miss|mx|dr)\.?\s+\p{L}/iu;
-const PATIENT_WORD = /\bpatients?\b/i;
-
-function strings(value, out = []) {
-  if (typeof value === "string") out.push(value);
-  else if (Array.isArray(value)) value.forEach((v) => strings(v, out));
-  else if (value && typeof value === "object") Object.values(value).forEach((v) => strings(v, out));
-  return out;
-}
-
-export function patientDataReason(input) {
-  let value = input;
-  if (typeof input === "string") { try { value = JSON.parse(input); } catch { value = input; } }
-  // Identifiers on the raw text (link targets included), names on a normalised copy.
-  const raw = strings(value).join(" \n ").replace(/\s+/g, " ");
-  if ((raw.match(EMAIL) || []).some((e) => !INTERNAL_EMAIL.test(e))) return "email address";
-  for (const m of raw.matchAll(new RegExp(PHONE.source, "g"))) if (digitsIn(m[0]) >= 10) return "phone number";
-  if (NHS_NUMBER.test(raw)) return "NHS-number-shaped digits";
-  if (DOB.test(raw)) return "date of birth";
-  if (POSTCODE.test(raw)) return "postcode";
-  const s = raw.replace(/\]\([^)]*\)/g, " ").replace(/[*_`~"'“”‘’[\](){}<>]+/g, " ").replace(/\s+/g, " ");
-  if (HONORIFIC.test(s)) return "named person";
-  if (PATIENT_WORD.test(s)) return "mentions a patient";
-  return null;
-}
-
-// Conservative on purpose (Astra rounds 1-9): any client/patient/customer or honorific
-// cue followed, within two words of the same sentence, by a capitalised word (any
-// script) counts as a name.
-const NAME_CUE = /\b(?:client|patient|customer|mr|mrs|ms|miss|mx|dr)s?(?:['’]s)?\b/giu;
-const NOT_A_NAME = /^(?:Demo|Record|Records|List|Portal|Profile|Id|Card|Page|Tab|Search|Detail|Details|Form|Forms|Notes|Note|Name|Names|Data|Table|Model|Type|Types|Side|Hub|Home|View|Import|Export|Merge|Consent|Consents|Photo|Photos|Timeline|Summary|Flow|API|UI|CRM|The|This|That|Who|Which|And|Or|In|On|At|To|For|With|From|If|When|A|An|Full|Portal|Facing|Level|ID|IDs|SMS|Email|Emails|App|Booking|Bookings|Link|Links|Row|Rows|Field|Fields|Settings|Dashboard|Modal|Button|Screen|Endpoint|Route|Webhook|PR|P1|P2|P3|UX|URL)$/u;
-function roleName(s) {
-  for (const m of s.matchAll(NAME_CUE)) {
-    // The next two words of the same sentence.
-    const rest = s.slice(m.index + m[0].length).replace(/^\./, "").split(/[.!?\n]/u)[0];
-    const next = rest.split(/[\s:,;'’-]+/u).filter((w) => w.length > 1).slice(0, 2);
-    if (next.some((w) => /^\p{Lu}[\p{L}]+$/u.test(w) && !NOT_A_NAME.test(w))) return true;
-  }
-  return false;
-}
-
-export class PrivacySkip extends Error {}
-
-/**
- * The only way out to the network. Screens the body, and latches any HTTP or network
- * failure so a request retried to success after a 429 still fails open.
- */
-export function guardedFetch(realFetch, status) {
-  return async (url, init = {}) => {
-    const reason = patientDataReason(init.body);
-    if (reason) {
-      status.skipped = reason;
-      throw new PrivacySkip("privacy screen");
-    }
-    try {
-      const res = await realFetch(url, init);
-      if (!res.ok) status.failed = `HTTP ${res.status}`;
-      return res;
-    } catch (err) {
-      status.failed = err?.name === "AbortError" || err?.name === "TimeoutError" ? "timeout" : "network error";
-      throw err;
-    }
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Key
-
-export function keychainKey(exec = execFileSync) {
-  try {
-    return exec("security", ["find-generic-password", "-s", "jev-api-key", "-w"],
-      { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
-  } catch { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,29 +230,8 @@ export function workerRecords(transcriptPath) {
   return { records: parseJsonl(text), truncated };
 }
 
-// Private by construction (Astra rounds 1-15 showed any "spot the patient data" screen
-// misses some phrasing). Only words in vocab.json leave the laptop: lowercase words that
-// are in the system dictionary's lowercase entries (so not proper names) AND common in
-// real worker messages, minus clinical and personal vocabulary (eval/build-vocab.mjs).
-// A capitalised word survives only as a common sentence starter. Everything else, including
-// every number, id, date and name, becomes "…". Jev judges status language only.
-const VOCAB = (() => {
-  try { return new Set(JSON.parse(readFileSync(new URL("./vocab.json", import.meta.url), "utf8"))); } catch { return new Set(); }
-})();
-const TECH = new Set(["npm", "npx", "tsc", "jest", "vitest", "eslint", "lint", "typecheck", "qa", "ci", "pg", "api", "ui", "sql", "bash", "node", "git"]);
-const STARTERS = new Set(("done fixed next still now once then also both no nothing yes not all the this that these it we i " +
-  "waiting running tests test branch bead round ready blocked pushed merged left remaining before after when if while " +
-  "because so but and or summary status result evidence warnings note notes none changes step phase verified").split(" "));
-export function redact(text) {
-  const out = String(text || "").replace(/[A-Za-z]+|\n|[.,:;!?()-]|[^A-Za-z\n.,:;!?()-]+/g, (tok) => {
-    if (/^[a-z]+$/.test(tok)) return VOCAB.has(tok) || TECH.has(tok) ? tok : "…";
-    if (/^[A-Z][a-z]+$/.test(tok)) { const l = tok.toLowerCase(); return STARTERS.has(l) && (VOCAB.has(l) || TECH.has(l)) ? tok : "…"; }
-    if (/^[A-Z]+$/.test(tok)) return ["QA", "CI", "PASS", "FAIL", "OK", "API", "UI"].includes(tok) ? tok : "…";
-    if (/^(?:\n|[.,:;!?()-])$/.test(tok)) return tok;
-    return /^\s+$/.test(tok) ? " " : "…";
-  });
-  return out.replace(/…(?:[\s…]*…)?/g, "…").replace(/[ \t]+/g, " ").trim();
-}
+const VOCAB = loadVocab(new URL("./vocab.json", import.meta.url));
+export const redact = makeRedact(VOCAB);
 
 /** The outbound state: belay's shape, minimum content. */
 export function stateOf(evidence) {
@@ -395,6 +283,8 @@ export function recordBlock(id, key) {
     return true;
   } catch { return false; }
 }
+
+export { PrivacySkip, guardedFetch, keychainKey, patientDataReason };
 
 // ---------------------------------------------------------------------------
 // The hook

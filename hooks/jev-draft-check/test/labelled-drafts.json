@@ -1,0 +1,379 @@
+[
+ {
+  "id": "2026-09-10 - Chris Flanagan - The Aesthetics Guy NI - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.06,
+   "buildState": 0.08,
+   "callOffer": 0.04
+  },
+  "sent": "\u2026,\n\nYes, \u2026 now linked \u2026:\u2026booking to their \u2026 course of \u2026, so it\u2026 track as you book each visit. \u2026 session is \u2026 for \u2026, with \u2026 more available to book. The course is set at your agreed\u2026for all \u2026.\n\n\u2026 can see the remaining sessions under \u2026open their record\u2026. \u2026 the next \u2026, book \u2026 and select\u2026 credit\u2026so each booking comes off their course balance.\n\n\u2026 regards,\n\n\u2026"
+ },
+ {
+  "id": "2026-09-10 - Leah and Patrick - Viso - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.08,
+   "buildState": 0.22,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026 and \u2026, \u2026 are now limited to training sessions on your \u2026 booking page, so clients can\u2026 book normal \u2026 that day.\n\n\u2026 the texts, \u2026 checked that rescheduling messages are switched on and use the new appointment date and time. \u2026 also updating cancellation texts to include the cancelled appointment\u2026 date and time, and \u2026 confirm once that\u2026 live."
+ },
+ {
+  "id": "2026-09-10 - Nicole - The Refine Room - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.1,
+   "buildState": 0.43,
+   "callOffer": 0.05
+  },
+  "sent": "\u2026, hope you\u2026re well. Yes, that makes complete sense, and it\u2026 fair policy. \u2026 clinics run exactly what you\u2026 described,\u2026hours notice, and the \u2026 that make it \u2026 are the \u2026 who say it out \u2026 at booking as well as in the consent form.\n\n\u2026 plans \u2026 actually suggest something \u2026 different, which is cleaner and much easier to \u2026. \u2026 already \u2026 for the course, so instead of taking \u2026 separate payment you count the session as used. \u2026 that session from their plan rather than \u2026 you money after the fact. No \u2026, no card \u2026, and it lands the same way \u2026.\n\n\u2026-off appointments the card is the right answer, and we can hold their card at booking so \u2026 late cancel takes the session price automatically.\n\n\u2026 would you rather have on your account? \u2026 for plans and card charged for \u2026-\u2026 is what \u2026 set up, with the wording added to your booking page and \u2026 so nobody can say they \u2026 know."
+ },
+ {
+  "id": "2026-09-10 - Tara - City MediSpa - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.07,
+   "buildState": 0.1,
+   "callOffer": 0.05
+  },
+  "sent": "\u2026, yes, you\u2026re good to go on booking test appointments and checking \u2026.\n\nOnce you\u2026 added your cancellation policy to the default footer, it will appear on client \u2026 and texts automatically, so there\u2026 nothing to update per \u2026. \u2026 just \u2026 you the full instructions along with answers to your other questions from this week, including the review request and voucher \u2026, so have \u2026 look there."
+ },
+ {
+  "id": "2026-09-10 - Tom Welby - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.75,
+   "buildState": 0.05,
+   "callOffer": 0.04
+  },
+  "sent": "\u2026, so sorry to hear about your friend, that\u2026. \u2026 don\u2026 apologise for the \u2026, there\u2026 genuinely no rush on it, send it whenever it makes sense.\n\n\u2026 only just seen this. \u2026 the event happened, or is it still coming up? \u2026 to come if \u2026 can."
+ },
+ {
+  "id": "2026-09-11 - Carley - Allure Medical Aesthetics - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "email address",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-11 - Jodie Corker - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "email address",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-11 - Tara - City MediSpa - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.08,
+   "buildState": 0.18,
+   "callOffer": 0.04
+  },
+  "sent": "\u2026,\n\n\u2026. \u2026. Yes, the \u2026 tab in the booking flow lists everything that\u2026 set to \u2026 under \u2026, \u2026, \u2026, and the price it shows is the \u2026 on that package record. So updating the prices there is exactly the fix and the portal will reflect it straight away. The \u2026 comment was about the \u2026 course entries under \u2026, \u2026, the \u2026 showing\u2026and so on. \u2026 are already inactive so clients never see them, they just sit in your list next to the real package with \u2026 different price.\n\n\u2026 and \u2026 are now built as packages and live on the booking page: \u2026,\u2026,\u2026and\u2026sessions at\u2026.\u2026,\u2026,\u2026,\u2026.\u2026and\u2026,\u2026, and \u2026and\u2026sessions at\u2026and\u2026,\u2026, taken from the prices on your \u2026 list. The separate course entries under \u2026 are switched off so there is \u2026 place to book each course. \u2026 if any of the prices should be different and \u2026 change them.\n\n\u2026 thing to set on each of them: the gap between sessions. When \u2026 client \u2026 course \u2026, the remaining sessions are booked in automatically that many days apart, so it needs to match how \u2026 actually \u2026 them. \u2026re all on\u2026days at the moment, which is what the \u2026 and \u2026 use. If \u2026 or \u2026 run on \u2026 different gap, open the package under \u2026, \u2026, \u2026 and change the \u2026 field. \u2026 doing before the \u2026 real course sale.\n\n\u2026. \u2026 message step. \u2026 the step itself the option is delete, and that\u2026 the \u2026 to use here. \u2026 sits on the \u2026 as \u2026 whole, the Status \u2026 at the top, and it would stop the booking confirmation and form request for that \u2026 too, so it \u2026 what you want. \u2026 the \u2026 message step leaves everything else in the plan as it is, and it can be added back any time under \u2026 step. \u2026 have it on\u2026, so rather than click through each \u2026 can remove it across all of them in \u2026"
+ },
+ {
+  "id": "2026-09-13 - Chris Flanagan - The Aesthetics Guy NI - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.2,
+   "buildState": 0.78,
+   "callOffer": 0.06
+  },
+  "sent": "\u2026,\n\n\u2026, fair enough! \u2026 look anyway as it was \u2026 quick \u2026, and there\u2026 nothing wrong with the booking. \u2026 what\u2026 going on, because it\u2026 to \u2026.\n\n\u2026. The course is tracking properly. \u2026 has\u2026of\u2026sessions left, with \u2026 visit as session\u2026and \u2026 as session\u2026. Nothing is owed on either of those \u2026, the course covers them. When you hit \u2026 on \u2026 of those appointments it will show nothing to pay.\n\n\u2026. The\u2026you saw is the \u2026 list price showing on the booking screen. It \u2026 charged. \u2026 changing that label so it reads as covered by the course instead, so it stops looking like \u2026.\n\n\u2026. The \u2026 thing that does show as outstanding is the\u2026for the course itself. That\u2026 only because no payment has been recorded against it yet. Nothing has been taken through the system since you went live, so anything you\u2026 taken on your card machine or in cash won\u2026 show in \u2026 until it\u2026 recorded. If \u2026 has already \u2026 you the\u2026, tell me how and \u2026 mark it \u2026 on the course. If not, you can send \u2026 payment link for it from the \u2026 tab on \u2026 record.\n\n\u2026 forward, if you take payment through \u2026 on the appointment, it keeps the client\u2026 record and your \u2026 straight, and once the balance is cleared the appointment marks itself as completed for you, so you don\u2026 need to touch the status by hand.\n\n\u2026"
+ },
+ {
+  "id": "2026-09-14 - Omorphia - Kelly - opt-out link and SMS replies - WhatsApp.md",
+  "label": "flag",
+  "phrases": [
+   "blame"
+  ],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-14 - Stripe - Cliff - payout timing - Email.md",
+  "label": "flag",
+  "phrases": [
+   "blame",
+   "callOffer"
+  ],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-14 - Tara Mason - City MediSpa - review requests two switches - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-14 - Tom Welby - Nurturing and Glow - WhatsApp.md",
+  "label": "flag",
+  "phrases": [
+   "blame"
+  ],
+  "risk": null,
+  "jev": {
+   "blame": 0.95,
+   "buildState": 0.16,
+   "callOffer": 0.89
+  },
+  "sent": "\u2026 (\u2026)\u2026 reply\n\n\u2026:\u2026 last message \u2026:\u2026: \u2026 the \u2026 is slow, his \u2026 friend has just been \u2026 with \u2026, \u2026 to\u2026the event next week\u2026(week of\u2026). No reply since (last outbound\u2026, per \u2026 sync\u2026:\u2026).\n\u2026 (\u2026):\u2026over \u2026 weeks late on \u2026 message about \u2026 friend\u2026, so the apology comes \u2026 and is real; then the reason (abroad\u2026), then the \u2026 link.\n\u2026Status:\u2026draft, \u2026 sent. \u2026 from your phone.\n\n---\n\n\u2026, \u2026 really sorry this reply is over \u2026 weeks late. \u2026 was away presenting \u2026 abroad and then buried getting the \u2026 through \u2026, \u2026 should have come back to you the same day. \u2026 sorry to hear about your friend, that\u2026, \u2026 hope you\u2026re holding up \u2026.\n\n\u2026 don\u2026 apologise about the \u2026, there is genuinely no rush - \u2026 get it sorted as \u2026 priority whenever it\u2026 ready. \u2026 missed the event too, \u2026 was \u2026 few too many \u2026 away!\n\n\u2026 bit of good \u2026 in the \u2026, the \u2026 is live if you want it on your phone: \u2026:\u2026.apple.\u2026id\u2026\n\nIf you need help \u2026, or just want \u2026 call to help things run \u2026 let me know."
+ },
+ {
+  "id": "2026-09-14 - Viso - Leah - invoice copy for Simon Firth - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.06,
+   "buildState": 0.31,
+   "callOffer": 0.05
+  },
+  "sent": "\u2026 (\u2026)\u2026how to send \u2026 his invoice\u2026:\u2026 asked \u2026 on \u2026 how to send \u2026 copy of yesterday\u2026 invoice (already \u2026). \u2026 in code\u2026:\u2026components\u2026clients\u2026payments-tab.\u2026 invoice\u2026 invoice\u2026buttons, live on prod\u2026.\n\n\u2026Status:\u2026draft\u2026 sent. \u2026 sends from his phone.\n\n---\n\n\u2026, \u2026go to \u2026, open \u2026, then the \u2026 tab. \u2026 his payment from yesterday you\u2026 see\u2026 invoice\u2026tap that and the \u2026 goes straight to the \u2026 on his record. \u2026 invoice\u2026button next to it if you\u2026 rather send it to him on \u2026 yourself. \u2026 catch: if he \u2026 have an \u2026 saved on his profile, add it \u2026 or just use \u2026. \u2026 if it \u2026 show up."
+ },
+ {
+  "id": "2026-09-15 - Adela - Contour Prive - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "named person",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-15 - Robyn - The Refine Room - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.04,
+   "buildState": 0.59,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026! \u2026 need to make \u2026 payment \u2026. \u2026 this setup, they\u2026 save their card \u2026 when booking and \u2026 to the cancellation charges.\n\nWe could set \u2026 charge of up to\u2026of the \u2026 price for cancellations within\u2026hours, then keep that as \u2026 fee or make it available as credit \u2026 their next booking.\n\nWhen would you want it to stay as \u2026 cancellation fee, and when would you let them use it as credit? \u2026 moving an appointment within\u2026hours follow the same rule?"
+ },
+ {
+  "id": "2026-09-16 - iOS app launch - all clinics - WhatsApp.md",
+  "label": "flag",
+  "phrases": [
+   "buildState"
+  ],
+  "risk": null,
+  "jev": {
+   "blame": 0.3,
+   "buildState": 0.87,
+   "callOffer": 0.12
+  },
+  "sent": "\u2026 launch\u2026message to every live clinic (\u2026, from \u2026 phone)\n\n\u2026:\u2026.\u2026.\u2026is \u2026 on the \u2026 (\u2026 via \u2026). \u2026 The \u2026 has the link so far (\u2026,\u2026:\u2026). \u2026,\u2026:\u2026we generally need \u2026 reminder today to get the \u2026 out to everyone.\u2026:\u2026:\u2026.apple.\u2026id\u2026 to (live, per \u2026this week\u2026 appointments):\u2026 (\u2026), \u2026, \u2026 (\u2026, inside her reply), \u2026, \u2026.\u2026, \u2026, \u2026, \u2026, The \u2026, \u2026(\u2026), \u2026, \u2026 (inside his reply), \u2026 (\u2026, still testing), \u2026, \u2026. \u2026 (frozen), \u2026 dormant sign-ups.\n\u2026Status:\u2026master copy, \u2026 sent. \u2026 the \u2026 line per clinic; keep the rest.\n\n---\n\n\u2026, quick \u2026. The \u2026 is finally live on the \u2026: \u2026:\u2026.apple.\u2026id\u2026 login as the web. \u2026, clients and notes are all there, and you can take card payments on the phone itself. \u2026 to \u2026 is \u2026 couple of weeks behind it.\n\nIf anything looks off on your phone, send me \u2026 and \u2026 sort it."
+ },
+ {
+  "id": "2026-09-17 - All clinics - new calendar - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.07,
+   "buildState": 0.34,
+   "callOffer": 0.04
+  },
+  "sent": "\u2026All clinics\u2026new calendar released (\u2026 broadcast)\n\n\u2026 list: same\u2026-clinic list as the\u2026 launch message. Not sent as of writing.\n\n\u2026 all,\n\nWe\u2026 just released \u2026 new calendar. It\u2026 much more \u2026 layout that works properly across phone, tablet and \u2026, so you get \u2026 view of the day whichever device you\u2026re on.\n\n\u2026 few things you\u2026 notice: there\u2026 now \u2026 button at the top to pick who you\u2026re looking at (All, just you, or any \u2026), the week view shows each practitioner side by side, and to move \u2026 booking you can either drag it or open it and tap \u2026, then tap the new slot.\n\nIt\u2026 live now. \u2026 with it and let me know what you think, and if anything looks off or gets in your way, please let me know.\n\n\u2026"
+ },
+ {
+  "id": "2026-09-17 - Carley - Allure Medical Aesthetics - trial day 14 - Email.md",
+  "label": "flag",
+  "phrases": [
+   "callOffer"
+  ],
+  "risk": null,
+  "jev": {
+   "blame": 0.16,
+   "buildState": 0.28,
+   "callOffer": 0.96
+  },
+  "sent": "\u2026trial day\u2026(\u2026)\n\n\u2026 draft\u2026on thread\u2026(reply to \u2026 message). Not sent.\n\n\u2026,\n\nThe\u2026day trial \u2026 ends today, but \u2026 kept your account open into \u2026, so there\u2026 no rush from our side.\n\n\u2026 my side it looks like \u2026 had \u2026 proper \u2026 to get in beyond \u2026 look, which is completely \u2026 with her clinic days. \u2026 empty system is also \u2026 hard thing to \u2026, so \u2026 suggestion: export what you have from \u2026 (clients at \u2026, \u2026 and prices if it lets you) and send it over, and \u2026 load it in so \u2026 is looking at her own client list and diary rather than \u2026 blank \u2026. That\u2026 the free route we talked about on the call, nothing for you to do beyond the export.\n\nThe staff \u2026 also went live on the \u2026 this week, so she can see it on her phone as well:\n\u2026:\u2026.apple.\u2026id\u2026\n\nIf it\u2026 easier, \u2026 happy to do \u2026 short call with \u2026 on \u2026 of her clinic days and set it up with her live.\n\n\u2026 forward to \u2026 from you.\n\n\u2026 regards,\n\n\u2026"
+ },
+ {
+  "id": "2026-09-17 - Faheema Gani - The Tibb Doctor - demo recap and trial offer - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "phone number",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-17 - Kelly - Omorphia - packages and extra areas - WhatsApp.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-17 - Pratish - City MediSpa - API and terms - Email.md",
+  "label": "flag",
+  "phrases": [
+   "callOffer"
+  ],
+  "risk": "email address",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-18 - Carley - Allure Medical Aesthetics - five clarifications - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "email address",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-19 - Robyn and Nicole - The Refine Room - portal reschedule and cancellation toggle - WhatsApp.md",
+  "label": "flag",
+  "phrases": [
+   "blame",
+   "buildState",
+   "callOffer"
+  ],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-24 - Linzi - Allure Medical Aesthetics - Email.md",
+  "label": "flag",
+  "phrases": [
+   "callOffer"
+  ],
+  "risk": "clinical detail",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "2026-09-25 - Linzi - Allure Medical Aesthetics - Email.md",
+  "label": "clean",
+  "phrases": [],
+  "risk": "mentions a patient",
+  "jev": null,
+  "sent": null
+ },
+ {
+  "id": "para:blame1",
+  "label": "flag",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.89,
+   "buildState": 0.16,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026,\n\n\u2026 this took \u2026 while to sort out, that was an \u2026 on our part. The reminders now go out at\u2026.\n\n\u2026 regards,\n\u2026"
+ },
+ {
+  "id": "para:blame2",
+  "label": "flag",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.82,
+   "buildState": 0.07,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026,\n\nThat slipped through the net on our end, which \u2026 good enough. It\u2026 fixed now and the invoices match.\n\n\u2026"
+ },
+ {
+  "id": "para:build1",
+  "label": "flag",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.12,
+   "buildState": 0.96,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026,\n\nThe \u2026 export is something we\u2026re putting the finishing touches on, so it should land in \u2026 few weeks.\n\n\u2026"
+ },
+ {
+  "id": "para:build2",
+  "label": "flag",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.33,
+   "buildState": 0.98,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026,\n\nThat part is still in the works on our side, so for now you\u2026 need to do it by hand.\n\n\u2026"
+ },
+ {
+  "id": "para:call1",
+  "label": "flag",
+  "phrases": [
+   "callOffer"
+  ],
+  "risk": null,
+  "jev": {
+   "blame": 0.1,
+   "buildState": 0.1,
+   "callOffer": 0.17
+  },
+  "sent": "\u2026,\n\n\u2026 find \u2026 time to \u2026 it through together, it\u2026 be easier than \u2026.\n\n\u2026"
+ },
+ {
+  "id": "para:call2",
+  "label": "flag",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.05,
+   "buildState": 0.1,
+   "callOffer": 0.98
+  },
+  "sent": "\u2026,\n\n\u2026 can show you over video this week if you\u2026 like, just let me know \u2026 time that suits.\n\n\u2026"
+ },
+ {
+  "id": "para:clean1",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.07,
+   "buildState": 0.08,
+   "callOffer": 0.03
+  },
+  "sent": "\u2026,\n\nThe reminders now go out at\u2026 the day before. \u2026 find the setting under \u2026, then \u2026.\n\n\u2026 regards,\n\u2026"
+ },
+ {
+  "id": "para:clean2",
+  "label": "clean",
+  "phrases": [],
+  "risk": null,
+  "jev": {
+   "blame": 0.06,
+   "buildState": 0.07,
+   "callOffer": 0.04
+  },
+  "sent": "\u2026,\n\n\u2026 booking page now shows all \u2026 practitioners, and each has their own hours.\n\n\u2026"
+ }
+]
