@@ -28,7 +28,7 @@ CRAWL_EMAIL=… CRAWL_PASSWORD=… npx tsx scripts/app-crawl/crawl.ts --role <ro
 
 ## 2. With a feature name: walk it
 1. Find the feature's path in the Feature Map (`Sidebar → X → Y`, expect, pass, roles).
-2. Walk it as each role in `roles`: text snapshot (URL + excerpt + safe element list, unsafe elements removed by code) → LLM picks the next click → code clicks → code checks the Feature Map's **pass** line. Jev only for narrow page judgments, not as the chooser (policy table).
+2. Walk it as each role in `roles`: text snapshot (URL + excerpt + safe element list, unsafe elements removed by code) → LLM picks the next click → code clicks → code checks the Feature Map's **pass** line. Chooser per the policy table: Jev for short flows (≤ ~3 clicks, trial basis), LLM for longer ones; code always verifies the goal, never the chooser's own DONE.
 3. Patient-facing feature (booking, forms, pay links, aftercare, portal): run on **iPhone 13 and 1440px**, headless, GET-only guard; mint test links directly in the DB (Demo only, tagged) instead of triggering a send.
 4. A "does nothing" result must be confirmed with a real coordinate click before it's reported.
 
