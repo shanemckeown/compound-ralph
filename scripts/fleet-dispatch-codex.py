@@ -11,7 +11,7 @@ the wrapper boundary makes the launch safe when this dispatcher is invoked from
 Claude Code and lets the worker outlive the dispatcher.
 
 Usage:
-  fleet-dispatch-codex.py dispatch <bead-id> [--dry-run] [--force]
+  fleet-dispatch-codex.py dispatch <bead-id> [--dry-run] [--force [--force-reason=<why>]]
                                   [--pre-claimed <codex-slot-token>]
   fleet-dispatch-codex.py status [<bead-id>]
   fleet-dispatch-codex.py list
@@ -380,9 +380,16 @@ def release_codex_slot(slot_token):
     sh([sys.executable, SLOTS, "release-codex-glm", slot_token])
 
 
-def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None):
+def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None, force_reason=None):
     validate_bead_id(bead)
-    failed, _failures = DISPATCHER.run_gate(bead, False)
+    failed, failures = DISPATCHER.run_gate(bead, False)
+    refusal = DISPATCHER.force_refusal(failures, force, force_reason)
+    if refusal:
+        print(f"\nREFUSED. {refusal}")
+        if pre_claimed:
+            release_codex_slot(pre_claimed)
+            print("Released pre-claimed codex_glm slot after gate refusal.")
+        return 1
     if failed and not force:
         print(f"\nREFUSED. {bead} is not dispatchable.")
         print("Fix the failed pre-dispatch checks, or re-run with --force.")
@@ -433,6 +440,9 @@ def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None):
         "started_at": utc_now(),
         "status": "running",
     }
+    if failed and force:
+        row["forced"] = True
+        row["force_reason"] = force_reason or None
     append_manifest(row)
     status_path = os.path.join(WORKERS_ROOT, bead, "status.txt")
     print(
@@ -678,6 +688,7 @@ def main(argv=None):
         dry_run = False
         force = False
         pre_claimed = None
+        force_reason = None
         operands = []
         index = 1
         while index < len(argv):
@@ -686,6 +697,8 @@ def main(argv=None):
                 dry_run = True
             elif arg == "--force":
                 force = True
+            elif arg.startswith("--force-reason="):
+                force_reason = arg.split("=", 1)[1]
             elif (
                 arg == "--pre-claimed"
                 and index + 1 < len(argv)
@@ -703,7 +716,8 @@ def main(argv=None):
             usage()
             return 2
         return dispatch_command(
-            operands[0], dry_run=dry_run, force=force, pre_claimed=pre_claimed
+            operands[0], dry_run=dry_run, force=force, pre_claimed=pre_claimed,
+            force_reason=force_reason,
         )
     if command == "status":
         if len(argv) > 2 or (len(argv) == 2 and argv[1].startswith("--")):

@@ -26,6 +26,7 @@ Usage:
   fleet-dispatch.py <epic-id> --epic       # /long-goal <epic-id>
   fleet-dispatch.py <bead-id> --dry-run    # run the gate, dispatch nothing
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
+  fleet-dispatch.py <bead-id> --force --force-reason="…"  # required to force past check 11
   fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
 """
 import io, json, os, re, subprocess, sys, time, datetime
@@ -415,6 +416,145 @@ def check_client_triage_tree(bead, record=None):
     return problems
 
 
+PREMISE_LABELS = {"qa-followup", "sweep-found"}
+# Beads filed before check 11 shipped are exempt only if they already carry a REFLECTION or a
+# passed review: in-flight rework keeps moving, untouched old bug beads still need a premise.
+PREMISE_CUTOVER = "2026-09-27T18:00:00+00:00"
+PREMISE_LINE_RE = re.compile(r"(?im)^[\s>*_#`-]*premise[\s*_`]+verified[\s*_`]*:(.*)$")
+# The evidence must name where it came from, not just assert the bug is real.
+PREMISE_SOURCE_RE = re.compile(
+    r"(?i)\b(select|query|sql|prod|staging|logs?|sentry|drove|drive|driving|browsed?|"
+    r"screenshot|screen ?share|repro(?:duced|duces)?|tests?|jest|curl|transcript|capture|"
+    r"stack ?trace|error|console|request|webhook|rows?)\b")
+DISPROVED_RE = re.compile(r"(?i)^[\s*_`'\"]*disproved?\b")
+# Evidence still to be gathered is not evidence: "TODO run prod SELECT", "result pending".
+# Not a bare "pending": it is an ordinary payment/booking status in real SELECT results
+# (22qtw: "pending 1 (tap_to_pay …)").
+PENDING_RE = re.compile(r"(?i)\b(?:todo|tbd|tbc|not yet|to be (?:run|checked|done)"
+                        r"|will (?:run|check|verify)|placeholder|(?:results?|still|check) pending"
+                        r"|pending (?:verification|check|confirmation|run|a run))\b"
+                        r"|^\W*pending\b")
+REVIEW_HEAD_RE = re.compile(r"(?i)^\W*review\s*:\s*(pass|fail)\b")
+VERDICT_WORD_RE = re.compile(r"\b(PASS|FAIL)\b")
+
+
+# Real independent-review headers: "INDEPENDENT REVIEW …", "ASTRA XHIGH REVIEW …",
+# "ASTRA XHIGH, 24 Sep (tip …): PASS", "OPUS HEAD-TO-HEAD REVIEW …".
+# The header must OPEN the comment: a note that mentions a review later ("MEASUREMENT … passed
+# their first independent review") is not one.
+REVIEW_HEADER_RE = re.compile(r"(?i)^\W*(?:[\w-]+\W+){0,4}independent\b"
+                              r"|^\W*(?:astra|opus|codex)\b[^\n]{0,40}(?:review|head[- ]to[- ]head|xhigh)")
+# The builder's own reviews say so: "OWN-GATE REVIEW (… NOT the independent review)",
+# "BUILDER IN-SESSION REVIEW", "BUILDER REVIEW RECORD … NOT the orchestrator's independent
+# review". REFLECTION / started lines quote reviews, they aren't one.
+NOT_INDEPENDENT_RE = re.compile(r"(?i)own[- ]gate|builder|in[- ]session"
+                                r"|not the (?:orchestrator's )?independent"
+                                r"|^\W*(?:reflection|started|attempt)\b")
+
+
+def review_verdict(text):
+    """PASS/FAIL of an independent review comment, or None if it isn't one: 'Review: PASS|FAIL
+    …', or a reviewer-named header, decided by its first verdict word."""
+    text = text or ""
+    m = REVIEW_HEAD_RE.match(text)
+    if m:
+        return m.group(1).upper()
+    head = text[:160]
+    if not REVIEW_HEADER_RE.search(head) or NOT_INDEPENDENT_RE.search(head):
+        return None
+    v = VERDICT_WORD_RE.search(text[:400])
+    return v.group(1) if v else None
+
+
+def _parse_ts(value):
+    try:
+        stamp = datetime.datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=datetime.timezone.utc)
+
+
+def needs_premise(record):
+    if record.get("issue_type") == "bug" and (record.get("id") or "").startswith("AestheticcNext-"):
+        return True
+    return bool(PREMISE_LABELS & set(record.get("labels") or []))
+
+
+def check_premise(record):
+    """Check 11 (LUCY-o7otj, 2026-09-27): a bug brief needs its premise verified before a
+    builder starts. 27 Sep's worst waste was wrong premises, not code errors: s68do (agency
+    seat taken for reception), f23pd (by design), 1a0jt (false alarm), tiy3q (two-device
+    sync nobody has). Applies to AestheticcNext bugs and any qa-followup / sweep-found bead.
+    Needs a comment 'Premise verified: <evidence>' newer than the bead, naming its source.
+    The latest such comment wins; 'Premise verified: disproved' closes the path."""
+    if not needs_premise(record):
+        return []
+    bead = record.get("id") or "<bead>"
+    created = _parse_ts(record.get("created_at"))
+    comments = [c for c in (record.get("comments") or []) if isinstance(c, dict)]
+    how = (f"Verify it first: a read-only prod SELECT and its result, a log or Sentry line, a "
+           f"live app drive (what you pressed, what happened), or a reproduced failing test. "
+           f"Then `bd comment {bead} \"Premise verified: <source> — <what it showed>\"`. "
+           f"If the evidence says the bug isn't real, comment 'Premise verified: disproved — "
+           f"<evidence>' and close it FALSE-ALARM.")
+    if created is None:
+        return [f"cannot read {bead}'s created_at ({record.get('created_at')!r}) to date its "
+                f"premise — refusing rather than guessing. {how}"]
+    latest = None
+    for c in comments:
+        stamp = _parse_ts(c.get("created_at"))
+        found = PREMISE_LINE_RE.findall(c.get("text") or "")
+        if found and stamp is not None and stamp > created and (latest is None or stamp >= latest[0]):
+            latest = (stamp, found[-1].strip())
+    evidence = latest[1] if latest else ""
+    if latest and DISPROVED_RE.match(evidence):  # a disproval refuses even an exempt bead
+        return [f"premise disproved ('Premise verified: {evidence[:80]}') — don't build. "
+                f"Close {bead} as FALSE-ALARM with that evidence in the close reason."]
+    if created < _parse_ts(PREMISE_CUTOVER) and any(
+            re.match(r"(?i)^\W*reflection\b", c.get("text") or "")
+            or review_verdict(c.get("text")) == "PASS" for c in comments):
+        return []
+    if latest is None:
+        return [f"bug brief has no 'Premise verified:' comment newer than the bead. {how}"]
+    if PENDING_RE.search(evidence):
+        return [f"'Premise verified: {evidence[:80]}' is still pending — run the check first. {how}"]
+    if (len(evidence.split()) < 3 or PLACEHOLDER_RE.match(evidence)
+            or not PREMISE_SOURCE_RE.search(evidence)):
+        return [f"'Premise verified: {evidence[:80]}' doesn't name a concrete source. {how}"]
+    return []
+
+
+def check_premise_tree(bead, record=None):
+    """Check 11 over the bead and its open children (both /goal and /long-goal build them)."""
+    if record is None:
+        record, error = load_bead_record(bead)
+        if error:
+            return [f"cannot verify the premise — {error}"]
+    problems = [f"{bead}: {p}" for p in check_premise(record)]
+    try:
+        children = list_open_children(bead)
+    except Exception as exc:
+        return problems + [f"cannot list {bead}'s children to verify premises: {exc}"]
+    for child in children:
+        if not isinstance(child, dict) or not needs_premise(child):
+            continue
+        crecord, cerror = load_bead_record(child.get("id"))
+        problems += [f"{child.get('id')}: {p}" for p in
+                     ([f"cannot verify the premise — {cerror}"] if cerror else check_premise(crecord))]
+    return problems
+
+
+PREMISE_CHECK = "11 premise verified"
+
+
+def force_refusal(failures, force, force_reason):
+    """--force past check 11 needs a written reason, recorded in the manifest row."""
+    if force and PREMISE_CHECK in failures and not (force_reason or "").strip():
+        return ("--force past check 11 needs a written reason: re-run with "
+                "--force-reason=\"<why this is being built without a verified premise>\".")
+    return None
+
+
 def load_bead_record(bead):
     code, out, err = sh(f"bd show {bead} --json", cwd=REPO, bead=bead)
     if code != 0 or not out:
@@ -610,6 +750,7 @@ def run_gate(bead, is_epic):
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
         results["10 client triage"] = check_client_triage_tree(bead)
+        results[PREMISE_CHECK] = check_premise_tree(bead)
     else:
         headless_diagnostics = io.StringIO()
         results["4 headless eligible"] = check_headless_eligible(bead, headless_diagnostics)
@@ -618,6 +759,8 @@ def run_gate(bead, is_epic):
                                             if load_error else check_bead_brief(record))
         results["10 client triage"] = ([f"cannot verify client triage — {load_error}"]
                                        if load_error else check_client_triage_tree(bead, record))
+        results[PREMISE_CHECK] = ([f"cannot verify the premise — {load_error}"]
+                                  if load_error else check_premise_tree(bead, record))
     resource_results, resource_warnings, resource_details = check_resources()
     results.update(resource_results)
     failed = False
@@ -696,7 +839,7 @@ def dispatch(bead, is_epic, dispatched_by):
     return session
 
 
-def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by):
+def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by, force_reason=None):
     os.makedirs(os.path.dirname(MANIFEST), exist_ok=True)
     row = {
         "dispatched_at": datetime.datetime.now(datetime.timezone.utc)
@@ -719,6 +862,7 @@ def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by)
         "dispatched_by": dispatched_by,
         "gate_failures": gate_failures or None,
         "forced": bool(forced),
+        "force_reason": force_reason or None,
     }
     with open(MANIFEST, "a") as fh:
         fh.write(json.dumps(row) + "\n")
@@ -739,8 +883,17 @@ def main():
     dry = "--dry-run" in flags
     pre_claimed = "--pre-claimed" in flags
     dispatched_by = os.environ.get("CLAUDE_SESSION_NAME", "unknown")
+    force_reason = next((a.split("=", 1)[1] for a in sys.argv[1:]
+                         if a.startswith("--force-reason=")), None)
 
     failed, failures = run_gate(bead, is_epic)
+    refusal = force_refusal(failures, force, force_reason)
+    if refusal:
+        print(f"\n🔴 REFUSED. {refusal}")
+        if pre_claimed:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print("   ✓ released pre-claimed Agent View slot after gate refusal.")
+        sys.exit(1)
 
     if failed and not force:
         print(f"\n🔴 REFUSED. {bead} is not dispatchable.")
@@ -785,7 +938,7 @@ def main():
     else:
         # dispatch itself failed -- don't let a phantom slot sit claimed forever.
         sh(f"python3 {SLOTS} release-agent-view {bead}")
-    write_manifest(bead, is_epic, session, failures, force, dispatched_by)
+    write_manifest(bead, is_epic, session, failures, force, dispatched_by, force_reason)
     if not session:
         sys.exit(1)
 

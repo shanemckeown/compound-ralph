@@ -127,7 +127,8 @@ def test_probes_are_fast():
 
 def _stub_bead_checks(mp):
     for name in ("check_bead_is_dispatchable", "check_no_inflight_work",
-                 "check_dependencies", "check_epic_has_children", "check_client_triage_tree"):
+                 "check_dependencies", "check_epic_has_children", "check_client_triage_tree",
+                 "check_premise_tree"):
         mp.setattr(fd, name, lambda b: [])
 
 
