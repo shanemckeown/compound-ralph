@@ -505,3 +505,7 @@ test("round 16: number words and body words are masked; node --import x --test i
 test("scripts under any tmp/ directory are not code", () => {
   assert.equal(isCodeChange({ file_path: `${CWD}/.claude/worktrees/goal-x/scripts/ops/tmp/fleet-release.sh` }, CWD), false);
 });
+
+test("round 17: spelled-out dates are masked", () => {
+  assert.doesNotMatch(redact("Corrected her DOB to the first of may, and the third of March"), /first|may|third|march/i);
+});
