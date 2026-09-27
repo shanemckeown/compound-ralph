@@ -1,0 +1,5 @@
+decisions.log
+sessions/
+eval/*.json
+!eval/belay-*.jsonl
+eval/*.txt
