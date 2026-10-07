@@ -18,13 +18,24 @@ Refuses (exit 1, reasons on stderr) when:
   - scope lock is on and an act_on item lacks in_scope, or an out-of-scope / consider item lacks
     a follow_up title;
   - more than 5 blocking act_on items without act_on_over_cap_reason;
-  - round >= 2 and no premise block.
+  - round >= 2 and no premise block;
+  - a pre_existing act_on / consider item lacks a follow_up bead title.
+Ordinary-use triage (LUCY-r1lyy, Shane 7 Oct 2026, CLINIC_REALITY "The ordinary-use test"):
+  - every finding states `ordinary_use` (how ONE person using the app normally triggers it with
+    one or two ordinary actions, or "none: <why>") and `carve_out` (true when it touches money,
+    patient data, auth, cross-tenancy, or what a user sees or is told);
+  - an act_on / consider finding with no ordinary-use path that is not in the carve-out is
+    auto-demoted to a P4 note: no fix, no follow-up bead, no re-review;
+  - a carve-out finding (lead says so, protected category, user_facing category, or a protected
+    keyword) is never demoted, however rare;
+  - a `pre_existing: true` finding never blocks the branch under review: it goes to a filed
+    follow-up bead (or to escalate when protected), with or without scope lock.
 On success (exit 0) writes, into --out-dir:
   lead-actions-round-N.txt     the blocking Act-on findings: the builder's whole input
   lead-escalate-round-N.txt    protected-area Consider items: orchestrator decides, blocks push
   lead-followups-round-N.txt   follow-up bead titles (non-blocking)
   lead-dismissals-round-N.md   every non-Act-on decision with its reason (the audit trail)
-and prints `BLOCKING=n ESCALATE=n FOLLOWUPS=n DISMISSED=n NOTED=n`.
+and prints `BLOCKING=n ESCALATE=n FOLLOWUPS=n DISMISSED=n NOTED=n P4=n`.
 """
 import argparse
 import json
@@ -40,8 +51,14 @@ ACT_ON_CAP = 5
 # Noted; the keyword regex below is a second, independent backstop in case the lead mislabels.
 PROTECTED_CATEGORIES = {"money", "booking", "sends", "webhooks", "tenancy_auth", "patient_data_exposure",
                         "gdpr", "prescribing", "single_device_data_loss"}
-OPEN_CATEGORIES = {"clinical_record_concurrency", "timing_window", "crafted_request", "style", "other"}
+OPEN_CATEGORIES = {"clinical_record_concurrency", "timing_window", "crafted_request", "style", "other",
+                   # what a user sees or is told (broken promise, wrong screen): carve-out from the
+                   # ordinary-use demotion, but the lead may still dismiss a hypothetical one.
+                   "user_facing"}
 CATEGORIES = PROTECTED_CATEGORIES | OPEN_CATEGORIES
+CARVE_OUT_CATEGORIES = PROTECTED_CATEGORIES | {"user_facing"}
+# An ordinary_use value that says there is no ordinary path counts as absent.
+NO_ORDINARY_USE = re.compile(r"^\s*(none|n/?a|no\b|not (an )?ordinary|unknown|-+)\b", re.I)
 
 # Findings in these areas are real concurrency / real harm in a clinic (CLINIC_REALITY
 # "never dismiss"). Narrow on purpose: words like "delete" or "authorize" alone are not here,
@@ -99,6 +116,30 @@ def pattern_names():
     return {norm(m.group(1)).lower() for m in re.finditer(r"(?m)^###\s+(.+)$", PATTERNS.read_text())}
 
 
+def has_ordinary_use(f):
+    text = norm(f.get("ordinary_use") or "")
+    return len(text) >= 12 and not NO_ORDINARY_USE.match(text)
+
+
+def is_carve_out(f, protected):
+    return protected or f.get("carve_out") is True or f.get("category") in CARVE_OUT_CATEGORIES
+
+
+def triage_ordinary_use(f, protected):
+    """Mark an act_on / consider finding `_demoted` (P4 note) when it has no ordinary-use path
+    and is not in the carve-out. Dismissed / noted items are already non-blocking."""
+    f["_carve_out"] = is_carve_out(f, protected)
+    f["_demoted"] = (f.get("verdict") in ("act_on", "consider") and not f["_carve_out"]
+                     and not has_ordinary_use(f))
+    return f["_demoted"]
+
+
+def routed_out(f, scope_lock):
+    """An act_on item that leaves this branch: out of scope under the lock, or pre-existing."""
+    return f.get("verdict") == "act_on" and not f.get("_demoted") and (
+        f.get("pre_existing") is True or (scope_lock and f.get("in_scope") is False))
+
+
 def check(lead, reviewer_lines, round_no, scope_lock):
     errs = []
     items = lead.get("findings")
@@ -122,7 +163,9 @@ def check(lead, reviewer_lines, round_no, scope_lock):
             errs.append(f"{tag}: category {cat!r} is not one of {sorted(CATEGORIES)}")
         protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
         f["_protected"] = protected
-        if v == "act_on":
+        if triage_ordinary_use(f, protected):
+            pass  # P4 note: no scenario, demonstration, reason or follow-up demanded
+        elif v == "act_on":
             if not norm(f.get("clinic_scenario", "")):
                 errs.append(f"{tag}: act_on needs a clinic_scenario (who, which device, what moment)")
             if not norm(f.get("demonstrated", "")):
@@ -132,6 +175,9 @@ def check(lead, reviewer_lines, round_no, scope_lock):
                     errs.append(f"{tag}: scope lock is on, act_on needs in_scope true/false")
                 elif f["in_scope"] is False and not norm(f.get("follow_up", "")):
                     errs.append(f"{tag}: out-of-scope act_on needs a follow_up bead title")
+            if f.get("pre_existing") is True and not norm(f.get("follow_up", "")):
+                errs.append(f"{tag}: pre_existing act_on needs a follow_up bead title (it goes to a new "
+                            "bead, not this branch)")
         else:
             if len(norm(f.get("reason", ""))) < 12:
                 errs.append(f"{tag}: {v} needs a written reason")
@@ -157,7 +203,8 @@ def check(lead, reviewer_lines, round_no, scope_lock):
     for line in seen:
         if line not in want:
             errs.append(f"lead lists a finding no reviewer made: {line[:100]}")
-    blocking = [f for f in items if f.get("verdict") == "act_on" and (not scope_lock or f.get("in_scope") is True)]
+    blocking = [f for f in items if f.get("verdict") == "act_on" and not f.get("_demoted")
+                and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True)]
     if len(blocking) > ACT_ON_CAP and not norm(lead.get("act_on_over_cap_reason") or ""):
         errs.append(f"{len(blocking)} blocking act_on items (> {ACT_ON_CAP}): not filtering; filter harder "
                     "or give act_on_over_cap_reason")
@@ -194,11 +241,13 @@ def main(argv=None):
             print(f"  - {e}", file=sys.stderr)
         return 1
     items = lead["findings"]
-    out_of_scope = [f for f in items if f["verdict"] == "act_on" and a.scope_lock and f.get("in_scope") is False]
+    out_of_scope = [f for f in items if routed_out(f, a.scope_lock)]
+    demoted = [f for f in items if f.get("_demoted")]
+    consider = [f for f in items if f["verdict"] == "consider" and not f.get("_demoted")]
     # Protected items not fixed on this branch go to the orchestrator, never silently into a bead.
-    escalate = [f for f in items if f["verdict"] == "consider" and f.get("_protected")] + \
+    escalate = [f for f in consider if f.get("_protected")] + \
                [f for f in out_of_scope if f.get("_protected")]
-    follow = [f for f in items if f["verdict"] == "consider" and not f.get("_protected")] + \
+    follow = [f for f in consider if not f.get("_protected")] + \
              [f for f in out_of_scope if not f.get("_protected")]
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -219,14 +268,22 @@ def main(argv=None):
     for f in items:
         if f["verdict"] == "act_on" and f in blocking:
             continue
-        label = "act_on (out of scope)" if f["verdict"] == "act_on" else f["verdict"]
-        why = f.get("reason") or f"scope lock: {f.get('follow_up')}"
+        if f.get("_demoted"):
+            rows.append(f"- **p4 note** (was {f['verdict']}; no ordinary-use path, not carve-out; no fix, "
+                        f"no re-review): {f['source_line']}\n  - reason: {f.get('reason') or 'ordinary-use test'}")
+            continue
+        if f["verdict"] == "act_on":
+            label = "act_on (pre-existing)" if f.get("pre_existing") is True else "act_on (out of scope)"
+        else:
+            label = f["verdict"]
+        why = f.get("reason") or f"{'pre-existing' if f.get('pre_existing') is True else 'scope lock'}: " \
+                                 f"{f.get('follow_up')}"
         pat = f" [pattern: {f['pattern']}]" if f.get("pattern") else ""
         rows.append(f"- **{label}**{pat}: {f['source_line']}\n  - reason: {why}")
     (out / f"lead-dismissals-round-{n}.md").write_text("\n".join(rows) + "\n")
     counts = {k: sum(1 for f in items if f["verdict"] == k) for k in ("dismissed", "noted")}
     print(f"BLOCKING={len(blocking)} ESCALATE={len(escalate)} FOLLOWUPS={len(follow)} "
-          f"DISMISSED={counts['dismissed']} NOTED={counts['noted']}")
+          f"DISMISSED={counts['dismissed']} NOTED={counts['noted']} P4={len(demoted)}")
     return 0
 
 

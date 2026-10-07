@@ -203,6 +203,7 @@ class CheckerRules(unittest.TestCase):
         lead = base_lead(); lead["scope_lock"] = True
         lead["findings"].append({"id": "F6", "source_line": v.splitlines()[-1], "verdict": "act_on",
                                  "category": "other", "clinic_scenario": "reception scrolling the day list",
+                                 "ordinary_use": "reception refreshes the day list once while scrolled down",
                                  "demonstrated": "repro", "in_scope": False, "follow_up": "Keep list scroll"})
         code, out, files = run_check(lead, v, scope_lock=True)
         self.assertEqual(code, 0, out)
@@ -223,7 +224,8 @@ class CheckerRules(unittest.TestCase):
         lead = base_lead()
         for i, line in enumerate(extra.splitlines()):
             lead["findings"].append({"id": f"X{i}", "source_line": line, "verdict": "act_on", "category": "other",
-                                     "clinic_scenario": "reception at check-in", "demonstrated": "repro"})
+                                     "clinic_scenario": "reception at check-in", "demonstrated": "repro",
+                                     "ordinary_use": "reception checks a client in with one tap"})
         code, out, _ = run_check(lead, v)
         self.assertEqual(code, 1, out)
         self.assertIn("not filtering", out)
@@ -293,6 +295,120 @@ class CheckerRules(unittest.TestCase):
     def test_every_seed_pattern_parses(self):
         names = chk.pattern_names()
         self.assertIn("multi-device concurrent edit of one clinical record", names)
+
+
+class OrdinaryUseTriage(unittest.TestCase):
+    """LUCY-r1lyy (Shane, 7 Oct 2026): a finding blocks only if one person using the app normally
+    can trigger it; money, patient data, auth, tenancy and what a user sees stay strict however rare."""
+    RARE = "P2 lib/notes/save.ts:30 — Two receptionists edit one client's notes in the same second; last write wins. — merge"
+    SEND = "P2 lib/sms/compose.ts:12 — Second quick click on Send queues a duplicate reminder SMS to the client. — debounce"
+    SCREEN = "P3 components/client/header.tsx:8 — After two unusual tab switches the header shows the previous client's name. — key by id"
+    OLD = "P2 lib/export/csv.ts:4 — pre-existing: CSV export drops the last row (not touched by this branch). Reproduced. — fix loop"
+
+    def lead_with(self, *extra):
+        v = VERDICT + "".join(line + "\n" for line, _ in extra)
+        lead = base_lead()
+        lead["findings"] += [f for _, f in extra]
+        return lead, v
+
+    def test_no_ordinary_use_path_is_demoted_to_p4(self):
+        lead, v = self.lead_with((self.RARE, {
+            "id": "R1", "source_line": self.RARE, "verdict": "act_on", "category": "clinical_record_concurrency",
+            "clinic_scenario": "two receptionists, two PCs, same client, same second",
+            "demonstrated": "reviewer traced it", "carve_out": False,
+            "ordinary_use": "none: needs two people editing the same record at the same moment"}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("notes/save.ts:30", files["lead-actions-round-1.txt"])
+        self.assertNotIn("notes/save.ts:30", files["lead-followups-round-1.txt"])
+        self.assertNotIn("notes/save.ts:30", files["lead-escalate-round-1.txt"])
+        self.assertIn("p4 note", files["lead-dismissals-round-1.md"])
+        self.assertIn("notes/save.ts:30", files["lead-dismissals-round-1.md"])
+        self.assertIn("P4=1", out)
+
+    def test_missing_both_fields_is_demoted(self):
+        lead, v = self.lead_with((self.RARE, {
+            "id": "R1", "source_line": self.RARE, "verdict": "consider", "category": "other",
+            "reason": "might matter one day", "follow_up": "Merge note edits"}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("Merge note edits", files["lead-followups-round-1.txt"])
+        self.assertIn("P4=1", out)
+
+    def test_carve_out_is_never_demoted_however_rare(self):
+        # user-facing (what the user is told), flagged by the lead and by category
+        lead, v = self.lead_with((self.SCREEN, {
+            "id": "S1", "source_line": self.SCREEN, "verdict": "act_on", "category": "user_facing",
+            "clinic_scenario": "practitioner flips between two client tabs on the room laptop",
+            "demonstrated": "repro", "carve_out": True,
+            "ordinary_use": "none: needs an unusual sequence of tab switches"}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("header.tsx:8", files["lead-actions-round-1.txt"])
+        self.assertIn("P4=0", out)
+
+    def test_carve_out_by_keyword_not_demoted_even_if_lead_says_no(self):
+        # SMS send is protected by keyword: the lead's carve_out=false and missing path can't demote it.
+        lead, v = self.lead_with((self.SEND, {
+            "id": "D1", "source_line": self.SEND, "verdict": "act_on", "category": "other",
+            "clinic_scenario": "receptionist double-clicks Send on a reminder",
+            "demonstrated": "repro", "carve_out": False}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("compose.ts:12", files["lead-actions-round-1.txt"])
+
+    def test_ordinary_use_path_keeps_a_non_carve_out_finding(self):
+        lead, v = self.lead_with((self.RARE, {
+            "id": "R1", "source_line": self.RARE, "verdict": "act_on", "category": "other",
+            "clinic_scenario": "practitioner saves a note then edits again", "demonstrated": "repro",
+            "carve_out": False, "ordinary_use": "one practitioner saves a note twice in a row on one device"}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("notes/save.ts:30", files["lead-actions-round-1.txt"])
+        self.assertIn("P4=0", out)
+
+    def test_pre_existing_finding_goes_to_a_new_bead_not_the_branch(self):
+        lead, v = self.lead_with((self.OLD, {
+            "id": "O1", "source_line": self.OLD, "verdict": "act_on", "category": "other",
+            "clinic_scenario": "owner exports clients at month end", "demonstrated": "reproduced",
+            "ordinary_use": "owner presses Export once", "carve_out": False,
+            "pre_existing": True, "follow_up": "CSV export drops the last row"}))
+        code, out, files = run_check(lead, v)  # no scope lock: still routed out
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("csv.ts:4", files["lead-actions-round-1.txt"])
+        self.assertIn("CSV export drops the last row", files["lead-followups-round-1.txt"])
+        self.assertIn("act_on (pre-existing)", files["lead-dismissals-round-1.md"])
+
+    def test_pre_existing_protected_finding_escalates(self):
+        old = "P2 lib/pos/refund.ts:9 — pre-existing: refund records twice on webhook retry. Reproduced. — idempotency"
+        lead, v = self.lead_with((old, {
+            "id": "O2", "source_line": old, "verdict": "act_on", "category": "money",
+            "clinic_scenario": "reception refunds a client", "demonstrated": "reproduced",
+            "pre_existing": True, "follow_up": "Refund idempotency on webhook retry"}))
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("refund.ts:9", files["lead-actions-round-1.txt"])
+        self.assertIn("refund.ts:9", files["lead-escalate-round-1.txt"])
+
+    def test_pre_existing_without_follow_up_refused(self):
+        lead, v = self.lead_with((self.OLD, {
+            "id": "O1", "source_line": self.OLD, "verdict": "act_on", "category": "other",
+            "clinic_scenario": "owner exports clients", "demonstrated": "reproduced",
+            "ordinary_use": "owner presses Export once", "pre_existing": True}))
+        code, out, _ = run_check(lead, v)
+        self.assertEqual(code, 1, out)
+        self.assertIn("pre_existing act_on needs a follow_up", out)
+
+    def test_demotion_does_not_reopen_never_dismiss(self):
+        # A protected finding the lead tries to Note is still refused; demotion is not a back door.
+        v = VERDICT + "P2 lib/pos/checkout.ts:9 — Terminal retry charges twice. — idempotency key\n"
+        lead = base_lead()
+        lead["findings"].append({"id": "F5", "source_line": v.splitlines()[-1], "verdict": "noted",
+                                 "category": "other", "carve_out": False,
+                                 "ordinary_use": "none: rare", "reason": "rare double charge, ignore"})
+        code, out, _ = run_check(lead, v)
+        self.assertEqual(code, 1, out)
+        self.assertIn("never-dismiss area", out)
 
 
 if __name__ == "__main__":

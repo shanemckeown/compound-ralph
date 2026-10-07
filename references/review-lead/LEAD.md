@@ -25,6 +25,10 @@ Adversarial reviewers are useful because they're aggressive. But aggression with
 - **Noted.** True but trivial: a P3 non-user-facing nit, or a style note. One line, no action.
 - **Dismissed.** Hypothetical, not reachable, contradicts a Shane decision, or "I'd have done it differently". **Every dismissal has a written reason.** Cite a pattern from DISMISSAL_PATTERNS.md by its exact heading when one fits.
 
+## Ordinary-use test (LUCY-r1lyy, Shane 7 Oct 2026)
+
+Read "The ordinary-use test" in CLINIC_REALITY. For **every** finding write `ordinary_use`: how one person using the app normally triggers it with one or two ordinary actions (a quick second click on Send counts), or `"none: <why>"`. And write `carve_out`: true if it touches money, patient data, auth, cross-tenancy, or what a user sees or is told. A finding with no ordinary-use path that is not carve-out is **auto-demoted by the checker to a P4 note**: no fix, no follow-up bead, no re-review. Don't fight that by inventing a path; a rare one is fine to park. A carve-out finding is never demoted however rare. A finding against code this branch didn't cause gets `pre_existing: true` and a `follow_up` title: it becomes its own bead and never blocks this branch.
+
 ## Filtering principles (from pstack lead-judgment, clinic-adapted)
 
 - **Hypothetical vs actual.** "What if two devices save at once?" only counts if a clinic does that. Check CLINIC_REALITY: one practitioner, one client, one record, one device. Phone to iPad is sequential and only needs the record current on open. "What if null is passed?" only counts if a caller can pass null, so trace the call site.
@@ -37,7 +41,7 @@ Adversarial reviewers are useful because they're aggressive. But aggression with
 ## Category: every finding gets exactly one
 
 Protected (never Dismissed or Noted): `money` · `booking` · `sends` · `webhooks` · `tenancy_auth` · `patient_data_exposure` · `gdpr` · `prescribing` · `single_device_data_loss` (one practitioner on one device loses, overwrites or misfiles their own work).
-Open: `clinical_record_concurrency` (two devices or users on one record at once) · `timing_window` · `crafted_request` · `style` · `other`.
+Open: `clinical_record_concurrency` (two devices or users on one record at once) · `timing_window` · `crafted_request` · `style` · `user_facing` (changes what a user sees or is told; carve-out from P4 demotion, still dismissable if hypothetical) · `other`.
 Pick by the **trigger**. "Erases another device's point" is `clinical_record_concurrency`. "Photo switch while the queued save is still retrying writes B's map onto A" is `single_device_data_loss`. "Draws before the opening load returns" is `timing_window` (a human racing a load). The checker also scans the text for protected keywords, so a mislabel can't slip a money or booking finding through.
 
 ## Never dismiss (the shared "Do not skip when")
@@ -77,6 +81,9 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
       "verdict": "act_on | consider | noted | dismissed",
       "category": "one of the categories above",
       "clinic_scenario": "who, which device, what moment (act_on: required; others: the scenario or 'none: <why>')",
+      "ordinary_use": "one person, normal use, one or two ordinary actions that trigger it, or 'none: <why>'",
+      "carve_out": false,
+      "pre_existing": false,
       "demonstrated": "act_on only: the red test / repro / traced path",
       "in_scope": true,
       "follow_up": "consider, and act_on with in_scope false: follow-up bead title",

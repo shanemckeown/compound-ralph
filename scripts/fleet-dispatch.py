@@ -28,6 +28,12 @@ Usage:
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
   fleet-dispatch.py <bead-id> --force --force-reason="…"  # required to force past check 11
   fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
+  fleet-dispatch.py <bead-id> --force --force-reason="…"  # also required to force past check 12
+
+Check 12 (credit pace, LUCY-r1lyy): when Claude weekly usage runs ahead of elapsed time
+(used_pct / elapsed_pct > 1.25, read from Aestheticc/Ops/CREDIT_PACE.json), P2/P3/P4 beads are
+refused; P0/P1 and dated client commitments still pass. Fails OPEN: a missing, unreadable or stale
+(> 24h) file never blocks. Override: --force --force-reason="<why this can't wait for the pace>".
 """
 import io, json, os, re, subprocess, sys, time, datetime
 
@@ -552,7 +558,98 @@ def force_refusal(failures, force, force_reason):
     if force and PREMISE_CHECK in failures and not (force_reason or "").strip():
         return ("--force past check 11 needs a written reason: re-run with "
                 "--force-reason=\"<why this is being built without a verified premise>\".")
+    if force and CREDIT_PACE_CHECK in failures and not (force_reason or "").strip():
+        return ("--force past check 12 needs a written reason: re-run with "
+                "--force-reason=\"<why this can't wait for the credit pace>\".")
     return None
+
+
+# ------------------------------------------------------------ credit pace ---
+# Check 12 (LUCY-r1lyy, Shane 7 Oct 2026). Claude weekly usage has no API on this machine, so the
+# orchestrator writes it by hand into CREDIT_PACE.json: {"window_start": ISO, "window_hours": 168,
+# "used_pct": 22, "updated": ISO}. When use runs ahead of the clock, only P0/P1 and dated client
+# commitments dispatch. FAIL OPEN on purpose: this is a spend governor, not a safety gate, and a
+# stale hand-written number must never stall urgent work.
+CREDIT_PACE_FILE = os.environ.get("FLEET_CREDIT_PACE_FILE",
+                                  "/Users/shane/Documents/Obsidian/Aestheticc/Ops/CREDIT_PACE.json")
+CREDIT_PACE_CHECK = "12 credit pace"
+PACE_LIMIT = 1.25          # used_pct / elapsed_pct above this refuses P2+
+PACE_MIN_USED_PCT = 10     # below this the ratio is early-window noise: never refuse
+PACE_STALE_HOURS = 24
+PACE_EXEMPT_MAX_PRIORITY = 1   # P0 and P1 always pass
+
+
+def _aware(ts):
+    stamp = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError(f"timestamp {ts!r} has no timezone")
+    return stamp
+
+
+def credit_pace(path=None, now=None):
+    """(pace, note). pace is a dict with used_pct, elapsed_pct, ratio when the file is usable,
+    else None with the reason in note (the caller warns and does not refuse)."""
+    path = path or CREDIT_PACE_FILE
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        start = _aware(data["window_start"])
+        hours = float(data.get("window_hours") or 168)
+        used = float(data["used_pct"])
+        updated = _aware(data["updated"])
+    except FileNotFoundError:
+        return None, f"no {path}: pace not enforced"
+    except Exception as exc:
+        return None, f"cannot read {path} ({exc}): pace not enforced"
+    age_h = (now - updated).total_seconds() / 3600
+    if age_h > PACE_STALE_HOURS:
+        return None, f"{path} last updated {age_h:.0f}h ago (> {PACE_STALE_HOURS}h): pace not enforced"
+    elapsed_pct = (now - start).total_seconds() / 3600 / hours * 100 if hours > 0 else -1
+    if not 0 < elapsed_pct < 100:
+        return None, f"now is outside the window in {path}: pace not enforced"
+    return {"used_pct": used, "elapsed_pct": elapsed_pct, "ratio": used / elapsed_pct}, None
+
+
+def is_dated_client_commitment(record):
+    """A client promise with a date: client-labelled and (Triage: promise, or a due date)."""
+    if not is_client_reported(record):
+        return False
+    if record.get("due_at") or record.get("due"):
+        return True
+    comments = [(c.get("text") or "") for c in (record.get("comments") or []) if isinstance(c, dict)]
+    text = "\n".join([record.get("description") or "", record.get("notes") or ""] + comments)
+    found = TRIAGE_LINE_RE.findall(text)
+    m = TRIAGE_VERDICT_RE.match(found[-1].strip()) if found else None
+    return bool(m) and m.group(1).lower() == "promise"
+
+
+def check_credit_pace(bead, record=None, pace_path=None, now=None):
+    """Check 12. Returns (problems, warning, detail). Only ever refuses when the file is fresh,
+    the pace is over PACE_LIMIT, and the bead is P2 or lower and not a dated client commitment."""
+    pace, note = credit_pace(pace_path, now)
+    if pace is None:
+        return [], note, None
+    detail = (f"Claude weekly use {pace['used_pct']:.0f}% at {pace['elapsed_pct']:.0f}% of the window "
+              f"= {pace['ratio']:.2f}x pace (limit {PACE_LIMIT}x)")
+    if pace["ratio"] <= PACE_LIMIT or pace["used_pct"] < PACE_MIN_USED_PCT:
+        return [], None, detail
+    if record is None:
+        record, err = load_bead_record(bead)
+        if err:
+            return [], f"over pace but cannot read {bead}'s priority ({err}): not refusing", detail
+    try:
+        priority = int(record.get("priority"))
+    except (TypeError, ValueError):
+        return [], f"over pace but {bead} has no readable priority: not refusing", detail
+    if priority <= PACE_EXEMPT_MAX_PRIORITY:
+        return [], None, detail + f"; P{priority} passes"
+    if is_dated_client_commitment(record):
+        return [], None, detail + "; dated client commitment passes"
+    return [f"credit pace: {detail}. P{priority} work waits until the pace settles; "
+            f"P0/P1 and dated client commitments still dispatch.",
+            f"update the number: edit {pace_path or CREDIT_PACE_FILE} (used_pct, updated). "
+            "Override: --force --force-reason=\"<why this can't wait>\" (recorded)."], None, detail
 
 
 def load_bead_record(bead):
@@ -747,6 +844,7 @@ def run_gate(bead, is_epic):
         "1 no in-flight work": check_no_inflight_work(bead),
         "2 dependencies closed": check_dependencies(bead),
     }
+    record = None
     if is_epic:
         results["3 epic has children"] = check_epic_has_children(bead)
         results["10 client triage"] = check_client_triage_tree(bead)
@@ -763,6 +861,12 @@ def run_gate(bead, is_epic):
                                   if load_error else check_premise_tree(bead, record))
     resource_results, resource_warnings, resource_details = check_resources()
     results.update(resource_results)
+    pace_problems, pace_warning, pace_detail = check_credit_pace(bead, record)
+    results[CREDIT_PACE_CHECK] = pace_problems
+    if pace_warning:
+        resource_warnings[CREDIT_PACE_CHECK] = pace_warning
+    if pace_detail:
+        resource_details[CREDIT_PACE_CHECK] = pace_detail
     failed = False
     for name, problems in results.items():
         detail = f" — {resource_details[name]}" if name in resource_details else ""
