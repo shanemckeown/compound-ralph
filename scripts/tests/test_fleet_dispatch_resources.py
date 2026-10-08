@@ -130,6 +130,7 @@ def _stub_bead_checks(mp):
                  "check_dependencies", "check_epic_has_children", "check_client_triage_tree",
                  "check_premise_tree"):
         mp.setattr(fd, name, lambda b: [])
+    mp.setattr(fd, "check_wip", lambda: ([], None, "0 pushed-not-landed goal/* branches (cap 10)"))
 
 
 def test_run_gate_refuses_on_resource_failure(healthy, capsys):
@@ -148,3 +149,47 @@ def test_run_gate_agents_timeout_is_a_warning_line(healthy, capsys):
     failed_, _ = fd.run_gate("AestheticcNext-epic1", is_epic=True)
     assert not failed_
     assert "⚠ 8 resident bg sessions — WARN (not refusing)" in capsys.readouterr().out
+
+
+# ---- --force never overrides checks 6-9 (7 Oct 2026 crash: 11 resident sessions after forcing) ----
+@pytest.mark.parametrize("check", fd.RESOURCE_CHECKS)
+def test_force_cannot_override_a_resource_check(check):
+    refusal = fd.force_refusal({check: ["x"]}, True, "Shane: dated client promise")
+    assert refusal and "resource checks can't be forced" in refusal and check in refusal
+    assert "claude rm idle sessions, prune worktrees" in refusal
+
+
+def test_resource_refusal_without_force_has_same_message():
+    assert "can't be forced" in fd.force_refusal({"9 memory free": ["x"]}, False, None)
+
+
+def test_force_still_overrides_non_resource_checks():
+    for check in ("4 headless eligible", "5 bead brief complete", "10 client triage"):
+        assert fd.force_refusal({check: ["x"]}, True, None) is None
+    assert fd.force_refusal({fd.PREMISE_CHECK: ["x"]}, True, "why") is None
+
+
+def test_main_refuses_forced_dispatch_past_resources(monkeypatch, capsys):
+    monkeypatch.setattr(fd, "run_gate", lambda b, e: (True, {"8 resident bg sessions": ["11 resident"],
+                                                          "5 bead brief complete": ["x"]}))
+    monkeypatch.setattr(fd, "dispatch", lambda *a: pytest.fail("dispatched past a resource check"))
+    monkeypatch.setattr(fd, "write_manifest", lambda *a, **k: pytest.fail("manifest written"))
+    monkeypatch.setattr(fd, "sh", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(fd.sys, "argv", ["fleet-dispatch.py", "AestheticcNext-x", "--force",
+                                         "--force-reason=Shane said so"])
+    with pytest.raises(SystemExit) as exc:
+        fd.main()
+    assert exc.value.code == 1
+    assert "resource checks can't be forced; free capacity first" in capsys.readouterr().out
+
+
+def test_main_force_with_reason_still_dispatches_past_brief(monkeypatch):
+    calls = []
+    monkeypatch.setattr(fd, "run_gate", lambda b, e: (True, {"5 bead brief complete": ["x"]}))
+    monkeypatch.setattr(fd, "dispatch", lambda *a: calls.append("dispatch") or {"sessionId": "s", "id": "i"})
+    monkeypatch.setattr(fd, "write_manifest", lambda *a, **k: calls.append(("manifest", a[4], a[6])))
+    monkeypatch.setattr(fd, "sh", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(fd.sys, "argv", ["fleet-dispatch.py", "AestheticcNext-x", "--force",
+                                         "--force-reason=Shane: clinic live Monday"])
+    fd.main()
+    assert calls == ["dispatch", ("manifest", True, "Shane: clinic live Monday")]

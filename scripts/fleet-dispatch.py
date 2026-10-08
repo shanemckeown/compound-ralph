@@ -28,7 +28,14 @@ Usage:
   fleet-dispatch.py <bead-id> --force      # dispatch despite a failed check (recorded)
   fleet-dispatch.py <bead-id> --force --force-reason="…"  # required to force past check 11
   fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
-  fleet-dispatch.py <bead-id> --force --force-reason="…"  # also required to force past check 12
+  fleet-dispatch.py <bead-id> --force --force-reason="…"  # also required to force past checks 12 and 13
+
+--force NEVER overrides the resource checks 6–9 (disk, worktrees, resident sessions, memory):
+the 7 Oct 2026 laptop crash came at 11 resident sessions after sessions were forced past them.
+
+Check 13 (WIP cap, CLAUDE.md "never expand the pile"): refuses when >= 10 origin goal/* branches
+are pushed-not-landed (bead status pushed or in_progress, tip not on origin/main by the same
+test unlanded-sweep.py uses). Override: --force --force-reason="<the dated client promise>".
 
 Check 12 (credit pace, LUCY-r1lyy): when Claude weekly usage runs ahead of elapsed time
 (used_pct / elapsed_pct > 1.25, read from Aestheticc/Ops/CREDIT_PACE.json), P2/P3/P4 beads are
@@ -553,14 +560,27 @@ def check_premise_tree(bead, record=None):
 PREMISE_CHECK = "11 premise verified"
 
 
+RESOURCE_CHECKS = ("6 disk free", "7 worktree count", "8 resident bg sessions", "9 memory free")
+RESOURCE_UNFORCEABLE = ("resource checks can't be forced; free capacity first "
+                        "(claude rm idle sessions, prune worktrees)")
+
+
 def force_refusal(failures, force, force_reason):
-    """--force past check 11 needs a written reason, recorded in the manifest row."""
+    """Resource checks 6–9 refuse even with --force (the 7 Oct crash: 11 resident sessions after
+    forcing past the caps). --force past checks 11, 12 and 13 needs a written reason, recorded
+    in the manifest row."""
+    failed_resources = [c for c in RESOURCE_CHECKS if failures.get(c)]
+    if failed_resources:
+        return f"{', '.join(failed_resources)} failed — {RESOURCE_UNFORCEABLE}."
     if force and PREMISE_CHECK in failures and not (force_reason or "").strip():
         return ("--force past check 11 needs a written reason: re-run with "
                 "--force-reason=\"<why this is being built without a verified premise>\".")
     if force and CREDIT_PACE_CHECK in failures and not (force_reason or "").strip():
         return ("--force past check 12 needs a written reason: re-run with "
                 "--force-reason=\"<why this can't wait for the credit pace>\".")
+    if force and WIP_CHECK in failures and not (force_reason or "").strip():
+        return ("--force past check 13 needs a written reason: re-run with "
+                "--force-reason=\"<the dated client promise this can't wait past>\".")
     return None
 
 
@@ -576,6 +596,7 @@ CREDIT_PACE_CHECK = "12 credit pace"
 PACE_LIMIT = 1.25          # used_pct / elapsed_pct above this refuses P2+
 PACE_MIN_USED_PCT = 10     # below this the ratio is early-window noise: never refuse
 PACE_STALE_HOURS = 24
+PACE_BLIND = "the credit pace guard is blind"
 PACE_EXEMPT_MAX_PRIORITY = 1   # P0 and P1 always pass
 
 
@@ -604,7 +625,8 @@ def credit_pace(path=None, now=None):
         return None, f"cannot read {path} ({exc}): pace not enforced"
     age_h = (now - updated).total_seconds() / 3600
     if age_h > PACE_STALE_HOURS:
-        return None, f"{path} last updated {age_h:.0f}h ago (> {PACE_STALE_HOURS}h): pace not enforced"
+        return None, (f"{path} last updated {age_h:.0f}h ago (> {PACE_STALE_HOURS}h): {PACE_BLIND}, "
+                      f"pace not enforced — update used_pct and updated")
     elapsed_pct = (now - start).total_seconds() / 3600 / hours * 100 if hours > 0 else -1
     if not 0 < elapsed_pct < 100:
         return None, f"now is outside the window in {path}: pace not enforced"
@@ -836,6 +858,104 @@ def check_resources(snap=None):
     return results, warnings, details
 
 
+# ---------------------------------------------------------------- WIP cap ---
+# Check 13 (CLAUDE.md "never expand the pile", Shane 2026-09-14): 61 finished branches sat
+# unlanded because intake outran landing. Refuse a dispatch while >= WIP_CAP goal/* branches are
+# pushed-not-landed. "Unlanded" is unlanded-sweep.py's own test (not an ancestor of origin/main,
+# no land commit naming the tip or the bead, not patch-equivalent), imported, not re-invented.
+# Policy cap, not a safety gate: an unreadable count warns and does not refuse; --force with a
+# written reason overrides (Shane's dated client promises must still dispatch).
+WIP_CHECK = "13 WIP cap"
+WIP_CAP = 10
+WIP_STATUSES = ("pushed", "in_progress")
+UNLANDED_SWEEP = os.path.expanduser("~/.claude/scripts/unlanded-sweep.py")
+WIP_KEY_RE = re.compile(r"^(?:(?:aestheticcnext|lucy)-)?([a-z0-9]+(?:\.\d+)*)", re.I)
+
+
+def _load_unlanded_sweep():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("unlanded_sweep", UNLANDED_SWEEP)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def wip_bead_statuses():
+    """{lowercased key after the prefix: (bead id, status)} for code beads pushed/in_progress."""
+    out = {}
+    for status in WIP_STATUSES:
+        code, raw, err = sh(f"bd list --status {status} --json --limit 0", cwd=REPO, timeout=30)
+        rows = json.loads(raw) if code == 0 and raw else None
+        if not isinstance(rows, list):
+            raise RuntimeError(f"bd list --status {status} failed: {err or raw or code}")
+        for r in rows:
+            if isinstance(r, dict) and r.get("id") and "-" in r["id"]:
+                out[r["id"].split("-", 1)[1].lower()] = (r["id"], status, r)
+    return out
+
+
+def probe_wip_branches(fetch=True):
+    """[{branch, tip, bead, status}] for origin goal/* branches that are pushed-not-landed."""
+    us = _load_unlanded_sweep()
+    if fetch:
+        sh(f"git -C {REPO} fetch -q origin", timeout=60)
+    beads = wip_bead_statuses()
+    code, refs, err = sh(f"git -C {REPO} for-each-ref --format='%(refname:short)\t%(objectname)"
+                         f"\t%(committerdate:unix)' refs/remotes/origin/goal", timeout=20)
+    if code != 0:
+        raise RuntimeError(err or f"git for-each-ref exited {code}")
+    candidates = []
+    for line in refs.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        ref, tip, ct = parts
+        m = WIP_KEY_RE.match(ref[len("origin/goal/"):])
+        hit = beads.get(m.group(1).lower()) if m else None
+        if hit:
+            candidates.append((ref[len("origin/"):], tip, int(ct), m.group(1).lower(), hit))
+    if not candidates:
+        return []
+    land = us.land_commits()
+    land_subjects = "\n".join(subj for _, _, subj in land)
+
+    def unlanded(cand):
+        branch, tip, ct, key, (bead_id, status, record) = cand
+        if sh(f"git -C {REPO} merge-base --is-ancestor {tip} origin/main", timeout=20)[0] == 0:
+            return None
+        if us.sha_landed_in_text(us.bead_text(record), key):
+            return None
+        if us.landed_elsewhere(branch, tip, ct, key, land, land_subjects):
+            return None
+        return {"branch": branch, "tip": tip[:9], "bead": bead_id, "status": status, "ct": ct}
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = [w for w in pool.map(unlanded, candidates) if w]
+    # One bead, several unlanded siblings (-r2 …): the newest carries it, as in unlanded-sweep.
+    newest = {}
+    for w in found:
+        if w["bead"] not in newest or w["ct"] > newest[w["bead"]]["ct"]:
+            newest[w["bead"]] = w
+    return sorted(newest.values(), key=lambda w: w["branch"])
+
+
+def check_wip(probe=None):
+    """Check 13. Returns (problems, warning, detail)."""
+    try:
+        wip = (probe or probe_wip_branches)()
+    except Exception as exc:
+        return [], f"cannot count pushed-not-landed branches ({exc}): WIP cap not enforced", None
+    detail = f"{len(wip)} pushed-not-landed goal/* branches (cap {WIP_CAP})"
+    if len(wip) < WIP_CAP:
+        return [], None, detail
+    listing = [f"  {w['branch']} @ {w['tip']}  {w['bead']} [{w['status']}]" for w in wip]
+    return ([f"WIP cap: {len(wip)} pushed-not-landed branches (>= {WIP_CAP}). Land something "
+             f"first (/land-batch; unlanded-sweep.py ranks them).",
+             "Override for a dated client promise: --force --force-reason=\"<client, date>\" "
+             "(recorded). Unlanded now:"] + listing), None, detail
+
+
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
     headless_diagnostics = None
@@ -867,6 +987,15 @@ def run_gate(bead, is_epic):
         resource_warnings[CREDIT_PACE_CHECK] = pace_warning
     if pace_detail:
         resource_details[CREDIT_PACE_CHECK] = pace_detail
+    if pace_warning and PACE_BLIND in pace_warning:
+        print(f"   WARNING: {PACE_BLIND} — {pace_warning}")
+    wip_problems, wip_warning, wip_detail = check_wip()
+    results[WIP_CHECK] = wip_problems
+    if wip_warning:
+        resource_warnings[WIP_CHECK] = wip_warning
+    if wip_detail:
+        resource_details[WIP_CHECK] = wip_detail
+    print(f"   WIP: {wip_detail or 'unknown — ' + (wip_warning or '')}")
     failed = False
     for name, problems in results.items():
         detail = f" — {resource_details[name]}" if name in resource_details else ""

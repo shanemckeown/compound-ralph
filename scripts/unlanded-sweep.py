@@ -58,6 +58,19 @@ def land_commits():
     return rows
 
 
+def landed_elsewhere(branch, tip, ct, key, land, land_subjects):
+    """Why a branch whose tip is not an ancestor of origin/main is landed anyway, or None.
+    Shared with fleet-dispatch.py's WIP cap so both count "unlanded" the same way."""
+    if tip[:9] in land_subjects:
+        return "a land commit names this exact tip"
+    if key and any(t >= ct and has_key(s, key) for _, t, s in land):
+        return "landed via a later -rN / sibling land commit"
+    rc, cherry = git("cherry", "origin/main", f"origin/{branch}")  # slowest test last
+    if rc == 0 and cherry.strip() and "+" not in cherry:
+        return "every commit patch-equivalent on main"
+    return None
+
+
 def bead(key, env):
     if not key:
         return None
@@ -212,13 +225,8 @@ def sweep(days, fetch=True):
         r = {"branch": b, "tip": tip[:9], "age_days": round((time.time() - c["ct"]) / 86400, 1),
              "key": key, "bead": None, "review": None, "owner": None, "status": None, "why": ""}
         # --- is it really unlanded? ---
-        if tip[:9] in land_subjects:
-            continue  # a land commit names this exact tip
-        rc, cherry = git("cherry", "origin/main", f"origin/{b}")
-        if rc == 0 and cherry.strip() and "+" not in cherry:
-            continue  # every commit patch-equivalent on main
-        if key and any(t >= c["ct"] and has_key(s, key) for _, t, s in land):
-            continue  # landed via a later -rN / sibling land commit
+        if landed_elsewhere(b, tip, c["ct"], key, land, land_subjects):
+            continue
         d = bead(key, env)
         if d:
             r["bead"] = {"id": d.get("id"), "title": (d.get("title") or "")[:90],

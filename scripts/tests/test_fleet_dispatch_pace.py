@@ -121,6 +121,22 @@ class Pace(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertIn("25h ago", warning)
 
+    def test_stale_file_says_the_guard_is_blind(self):
+        self.write(used_pct=90, updated=NOW - datetime.timedelta(hours=25))
+        _, warning, _ = self.check(bead(priority=3))
+        self.assertIn(fd.PACE_BLIND, warning)
+
+    def test_run_gate_prints_blind_warning_line_when_stale(self):
+        self.write(used_pct=90, updated=NOW - datetime.timedelta(hours=30))
+        failed, _, printed = self.run_gate(bead(priority=3))
+        self.assertFalse(failed)
+        self.assertIn(f"WARNING: {fd.PACE_BLIND}", printed)
+
+    def test_fresh_file_prints_no_blind_warning(self):
+        self.write()
+        _, _, printed = self.run_gate(bead(priority=1))
+        self.assertNotIn("WARNING:", printed)
+
     def test_window_over_fails_open(self):
         self.write(used_pct=99, updated=START + datetime.timedelta(hours=170))
         problems, warning, _ = self.check(bead(priority=3), now=START + datetime.timedelta(hours=170))
@@ -159,7 +175,8 @@ class Pace(unittest.TestCase):
                      check_client_triage_tree=lambda *a: [], check_headless_eligible=lambda *a: [],
                      check_bead_brief=lambda r: [], check_premise_tree=lambda *a: [],
                      load_bead_record=lambda b: (record, None), list_open_children=lambda b: [],
-                     check_resources=lambda: ({}, {}, {}), CREDIT_PACE_FILE=self.path)
+                     check_resources=lambda: ({}, {}, {}), CREDIT_PACE_FILE=self.path,
+                     check_wip=lambda: ([], None, "0 pushed-not-landed goal/* branches (cap 10)"))
         with mock.patch.multiple(fd, **stubs), mock.patch("builtins.print") as out, \
              mock.patch.object(fd.datetime, "datetime", wraps=datetime.datetime) as dt:
             dt.now.return_value = NOW

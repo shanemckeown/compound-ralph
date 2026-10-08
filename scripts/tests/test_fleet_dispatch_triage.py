@@ -139,6 +139,7 @@ class ClientTriageCheck(unittest.TestCase):
                                            else {"id": b, "labels": []}, None),
             "list_open_children": lambda b: [dict(bead(["client-reported"]), id="E.2")],
             "check_resources": lambda snap=None: ({}, {}, {}),
+            "check_wip": lambda: ([], None, None),  # check 13: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:
@@ -162,6 +163,7 @@ class ClientTriageCheck(unittest.TestCase):
                                            next(c for c in children if c["id"] == b), None),
             "list_open_children": lambda b: list(children),
             "check_resources": lambda snap=None: ({}, {}, {}),
+            "check_wip": lambda: ([], None, None),  # check 13: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:

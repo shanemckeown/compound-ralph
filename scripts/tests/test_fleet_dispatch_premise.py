@@ -163,7 +163,8 @@ class ForceReason(unittest.TestCase):
                                  check_bead_brief=lambda r: [],
                                  load_bead_record=lambda b: (bead(), None),
                                  list_open_children=lambda b: [],
-                                 check_resources=lambda: ({}, {}, {})), \
+                                 check_resources=lambda: ({}, {}, {}),
+                                 check_wip=lambda: ([], None, None)), \
              mock.patch("builtins.print"):
             for is_epic in (False, True):
                 failed, failures = fd.run_gate("AestheticcNext-t1", is_epic)

@@ -78,6 +78,7 @@ class BeadBriefCheck(unittest.TestCase):
             "load_bead_record": lambda b: ({"id": b, "description": "fix it"}, None),
             "list_open_children": lambda b: [],  # check 10: own test file
             "check_resources": lambda snap=None: ({}, {}, {}),  # host checks 6-9: own test file
+            "check_wip": lambda: ([], None, None),  # check 13: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:
@@ -205,6 +206,7 @@ class BeadBriefCheck(unittest.TestCase):
             "check_client_triage_tree": lambda b: [],  # check 10: own test file
             "check_premise_tree": lambda b: [],  # check 11: own test file
             "check_resources": lambda snap=None: ({}, {}, {}),  # host checks 6-9: own test file
+            "check_wip": lambda: ([], None, None),  # check 13: own test file
         }
         saved = {name: getattr(fd, name) for name in stubs}
         try:
