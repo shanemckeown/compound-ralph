@@ -93,23 +93,27 @@ def derived(now=NOW):
     return gw.land_items([land_row()], now)
 
 
+def sens_derived(now=NOW):
+    return gw.land_items([land_row(sensitive=True)], now)
+
+
 def test_overdue_boundary():
-    _, recs = gw.evaluate({}, derived(), True, True, NOW)
-    items, _ = gw.evaluate(recs, derived(), True, True, NOW + 60 * 60)          # exactly 60 min: not overdue
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 60 * 60)          # exactly 60 min: not overdue
     assert not items[0]["overdue"]
-    items, _ = gw.evaluate(recs, derived(), True, True, NOW + 60 * 60 + 1)      # 60 min + 1s
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 60 * 60 + 1)      # 60 min + 1s
     assert items[0]["overdue"]
 
 
 def test_ask_resets_clock():
-    _, recs = gw.evaluate({}, derived(), True, True, NOW)
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
     later = NOW + 2 * 3600
-    items, recs = gw.evaluate(recs, derived(), True, True, later)
+    items, recs = gw.evaluate(recs, sens_derived(), True, True, later)
     assert items[0]["overdue"]
     recs["land:goal/x-1"]["last_asked_at"] = gw.iso(later)
-    items, _ = gw.evaluate(recs, derived(), True, True, later + 30 * 60)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, later + 30 * 60)
     assert not items[0]["overdue"]
-    items, _ = gw.evaluate(recs, derived(), True, True, later + 61 * 60)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, later + 61 * 60)
     assert items[0]["overdue"]
 
 
@@ -136,12 +140,12 @@ def test_manual_item_overdue_from_first_seen():
 
 
 def test_render_block_text_and_empty():
-    _, recs = gw.evaluate({}, derived(), True, True, NOW)
-    items, _ = gw.evaluate(recs, derived(), True, True, NOW + 7200)
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 7200)
     block = gw.render_block(items)
     assert block.startswith("RE-ASK SHANE NOW") and "PushNotification" in block and "AskUserQuestion" in block
     assert "gate-watch.py ask <id>" in block and "Ask: " in block
-    items, _ = gw.evaluate(recs, derived(), True, True, NOW + 5)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 5)
     assert gw.render_block(items) == ""
 
 
@@ -153,6 +157,107 @@ def test_shift_item():
     svc["status"]["traffic"][0]["revisionName"] = "r2"
     assert gw.shift_item(svc, created, NOW) is None                          # already shifted
     assert gw.shift_item({}, created, NOW) is None                           # garbage: fail open
+
+
+# ---- false-ask fix (8 Oct 2026): land is the lander's job, never a Shane ask ----
+def test_passed_land_is_orchestrator_todo_never_reask_shane():
+    _, recs = gw.evaluate({}, derived(), True, True, NOW)
+    items, _ = gw.evaluate(recs, derived(), True, True, NOW + 7200)
+    assert items[0]["audience"] == "orchestrator" and not items[0]["overdue"] and items[0]["todo_due"]
+    block = gw.render_block(items)
+    assert "RE-ASK SHANE" not in block and block.startswith("ORCHESTRATOR TO-DO")
+    assert "Land it now (yes/hold)" not in block
+
+
+def test_opted_in_sensitive_land_is_also_orchestrator():
+    it = gw.land_items([land_row(sensitive=True, opt_in_recorded=True)], NOW)[0]
+    assert it["audience"] == "orchestrator"
+
+
+def test_sensitive_without_opt_in_stays_shane_ask():
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 7200)
+    assert items[0]["audience"] == "shane" and items[0]["overdue"]
+    assert gw.render_block(items).startswith("RE-ASK SHANE NOW")
+
+
+def test_legacy_land_row_without_audience_is_orchestrator():
+    recs = {"land:goal/x-9": {"id": "land:goal/x-9", "kind": "land", "derived": True,
+                              "what": "goal/x-9 (B) review PASS at abc, not landed",
+                              "first_seen_at": gw.iso(NOW)}}
+    items, _ = gw.evaluate(recs, [], False, False, NOW + 7200)
+    assert items[0]["audience"] == "orchestrator" and not items[0]["overdue"]
+
+
+def test_tip_on_main_auto_resolves_even_if_sweep_still_lists_it():
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
+    items, recs2 = gw.evaluate(recs, sens_derived(), True, True, NOW + 7200, is_landed=lambda t: t == "abc1234")
+    assert items == []
+    r = recs2["land:goal/x-1"]
+    assert r["resolved_at"] and "ancestor of origin/main" in r["resolved_reason"]
+    items, _ = gw.evaluate(recs2, sens_derived(), True, True, NOW + 9000, is_landed=lambda t: True)
+    assert items == []                                   # stale cache re-listing it does not reopen
+
+
+def test_landed_check_failure_keeps_item():
+    _, recs = gw.evaluate({}, sens_derived(), True, True, NOW)
+    items, _ = gw.evaluate(recs, sens_derived(), True, True, NOW + 10, is_landed=lambda t: False)
+    assert len(items) == 1
+
+
+def test_manual_resolve_sticks_until_new_tip():
+    _, recs = gw.evaluate({}, derived(), True, True, NOW)
+    recs["land:goal/x-1"]["resolved_at"] = gw.iso(NOW + 1)
+    items, recs = gw.evaluate(recs, derived(), True, True, NOW + 100)
+    assert items == []                                   # same tip: stays resolved
+    newtip = gw.land_items([land_row(tip="def5678")], NOW)
+    items, _ = gw.evaluate(recs, newtip, True, True, NOW + 200)
+    assert [i["id"] for i in items] == ["land:goal/x-1"]  # new push reopens
+
+
+def shift_d(rev, now=NOW):
+    return {"id": f"shift:{rev}", "kind": "shift", "audience": "shane", "rev": rev, "what": "w",
+            "question": "q", "waiting_since": gw.iso(now)}
+
+
+def test_shift_superseded_and_serving_auto_resolve():
+    recs = {"shift:r1": {"id": "shift:r1", "kind": "shift", "first_seen_at": gw.iso(NOW)},      # manual-ish row
+            "shift:r2": {"id": "shift:r2", "kind": "shift", "first_seen_at": gw.iso(NOW)}}
+    items, recs2 = gw.evaluate(recs, [shift_d("r3")], True, True, NOW + 7200,
+                               shift_state={"latest": "r3", "serving": "r1"})
+    assert [i["id"] for i in items] == ["shift:r3"]
+    assert "already serving" in recs2["shift:r1"]["resolved_reason"]
+    assert "superseded by r3" in recs2["shift:r2"]["resolved_reason"]
+
+
+def test_resolved_shift_stays_resolved():
+    recs = {"shift:r3": {"id": "shift:r3", "kind": "shift", "derived": True, "first_seen_at": gw.iso(NOW),
+                         "resolved_at": gw.iso(NOW + 1)}}
+    items, _ = gw.evaluate(recs, [shift_d("r3")], True, True, NOW + 7200)
+    assert items == []
+
+
+def test_defer_silences_until_then(tmp_env):
+    gw.cmd_mutate("add", "shift:r9", "w", "Shift?", now=NOW)
+    assert gw.cmd_mutate("defer", "shift:r9", now=NOW, until="bad") == 2
+    assert gw.cmd_mutate("defer", "shift:r9", now=NOW, until=gw.iso(NOW + 5 * 3600), reason="tonight") == 0
+    gw.write_cache([], True, True, now=NOW)
+    items = gw.compute(use_cache=True, now=NOW + 2 * 3600)
+    assert items and not items[0]["overdue"]
+    items = gw.compute(use_cache=True, now=NOW + 6 * 3600)
+    assert items[0]["overdue"]
+
+
+def test_resolve_records_reason(tmp_env):
+    gw.cmd_mutate("add", "g2", "w", "q", now=NOW)
+    gw.cmd_mutate("resolve", "g2", now=NOW + 1, reason="not Shane's")
+    recs, _ = gw.read_ledger()
+    assert recs["g2"]["resolved_reason"] == "not Shane's"
+
+
+def test_tip_on_main_fails_closed_to_false(tmp_path):
+    assert gw.tip_on_main("abc", repo=str(tmp_path)) is False   # not a repo
+    assert gw.tip_on_main(None) is False
 
 
 # ---- commands against a temp ledger ----
