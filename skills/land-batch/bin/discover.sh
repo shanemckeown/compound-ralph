@@ -31,6 +31,8 @@ sys.path.insert(0, os.environ["LAND_BATCH_LIB_DIR"])
 from land_batch_safety import (  # noqa: E402
     SENSITIVE_PREFIXES,
     sensitive_paths as configured_sensitive_paths,
+    review_pass_for,
+    REQUIRE_REVIEW_PASS_FOR_ALL,
     validate_sensitive_prefixes,
 )
 from migration_batch import scan_candidate_migrations  # noqa: E402
@@ -645,10 +647,14 @@ def merge_tree_write_tree(repo, left_ref, right_ref, merge_base=None):
             ]
         name_proc = run_git_bytes(name_args, timeout=120)
         if name_proc.returncode != 0 and name_proc.stdout:
-            # -z output leads with the written tree OID, then conflicted file
-            # names, then informational messages ("Auto-merging …"). Skip the
-            # leading OID and keep only tokens that look like real paths.
+            # -z output: the written tree OID, the conflicted file names, an
+            # EMPTY entry, then informational messages. Each message record
+            # carries the paths it mentions ("1\0clean.ts\0Auto-merging\0…"),
+            # so files that merged cleanly appear there too. Stop at the empty
+            # separator: only the section before it is the conflict list.
             for raw in name_proc.stdout.split(b"\0")[1:]:
+                if raw == b"":
+                    break
                 token = raw.decode("utf-8", errors="replace").strip()
                 if looks_like_path(token):
                     paths.append(token)
@@ -930,8 +936,6 @@ def finish_gate(
     Branch-only completion evidence is reported but never grants auto-land in
     this release. Returns (auto_land: bool, finish_signal: str, finished: bool).
     """
-    if recommendation == "review-sensitive":
-        return False, "held-sensitive", bool(finish_evidence.get("qualified"))
     if recommendation != "land":
         return False, recommendation, bool(finish_evidence.get("qualified"))
     if session and session.get("active"):
@@ -1105,6 +1109,9 @@ def main():
         sensitive_paths = []
         touches_sensitive = False
         hold_reasons = []
+        report_notes = []
+        review_pass = None
+        review_evidence = None
 
         if retired_by_pattern:
             recommendation = "skip-retired"
@@ -1133,16 +1140,24 @@ def main():
                     hold_reasons.append("held-conflict")
                 if stale:
                     hold_reasons.append("held-stale")
-                if touches_sensitive:
-                    hold_reasons.append("held-sensitive")
+                review_ok = None
+                if touches_sensitive or REQUIRE_REVIEW_PASS_FOR_ALL:
+                    review_ok, review_evidence = review_pass_for(bead_id, tip_sha)
+                    review_pass = review_ok
+                if review_ok is False:
+                    hold_reasons.append("held-no-review-pass")
                 if stale:
                     recommendation = "held-stale"
                 elif conflicts_with_base and not baseline_regeneration_required:
                     recommendation = "held-conflict"
-                elif touches_sensitive:
-                    recommendation = "review-sensitive"
+                elif review_ok is False:
+                    recommendation = "held-no-review-pass"
                 else:
                     recommendation = "land"
+                    if touches_sensitive:
+                        report_notes.append(
+                            "auto-landed sensitive paths on recorded independent review PASS: "
+                            + review_evidence)
 
         if worktree_path is not None:
             try:
@@ -1212,6 +1227,8 @@ def main():
             held_labels.append("HELD — branch-only source; completion evidence incomplete")
         if conflicts_with_base and not baseline_regeneration_required:
             held_labels.append("HELD — conflicts with main; rebase required")
+        if recommendation == "held-no-review-pass":
+            held_labels.append("HELD — no recorded independent review PASS for this tip: " + str(review_evidence))
         if stale:
             held_labels.append("HELD — stale branch; premise review required")
         if bead["bead_resolution"] == "ambiguous":
@@ -1247,6 +1264,9 @@ def main():
                 "touches_sensitive": touches_sensitive,
                 "sensitive_paths": sensitive_paths,
                 "hold_reasons": hold_reasons,
+                "review_pass": review_pass,
+                "review_evidence": review_evidence,
+                "report_notes": report_notes,
                 "held_labels": held_labels,
                 "retired": retired,
                 "retired_by_pattern": retired_by_pattern,

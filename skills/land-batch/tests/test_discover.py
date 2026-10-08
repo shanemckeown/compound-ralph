@@ -498,7 +498,7 @@ def test_auto_land_blocked_by_sensitive_files(tmp_path):
 
     assert candidate["touches_sensitive"] is True
     assert candidate["auto_land"] is False
-    assert candidate["finish_signal"] == "held-sensitive"
+    assert candidate["finish_signal"] == "held-no-review-pass"
 
 
 def test_three_different_0240_migrations_are_first_class_sibling_blockers(tmp_path):
@@ -823,3 +823,24 @@ def test_generated_baseline_sibling_pair_is_labelled_not_authored_conflict(tmp_p
     assert report['sibling_conflicts'] == [{
         'kind': 'generated-baseline', 'branch_a': branches[0],
         'branch_b': branches[1], 'files': [path]}]
+
+
+def test_cleanly_auto_merged_file_is_not_reported_as_conflicting(tmp_path):
+    # 3z7mu (8 Oct): gateway.ts / stripe.ts merged cleanly but were listed as
+    # conflicts because merge-tree -z's informational "Auto-merging" records
+    # name them too. Only the file with a real content conflict may be listed.
+    repo = _init_repo(tmp_path)
+    _write(repo / "lib" / "gateway.ts", "".join(f"line {i}\n" for i in range(20)))
+    _commit_all(repo, "add gateway")
+    wt = _add_worktree(repo, tmp_path, "fix/AestheticcNext-amrg1")
+    _write(wt / "app.txt", "branch change\n")
+    _write(wt / "lib" / "gateway.ts", "branch top\n" + "".join(f"line {i}\n" for i in range(1, 20)))
+    _commit_all(wt, "branch change")
+    _write(repo / "app.txt", "main change\n")
+    _write(repo / "lib" / "gateway.ts", "".join(f"line {i}\n" for i in range(19)) + "main bottom\n")
+    _commit_all(repo, "main change")
+
+    candidate = _candidate(_discover(repo, tmp_path / "home"), "fix/AestheticcNext-amrg1")
+
+    assert candidate["conflicts_with_base"] is True
+    assert candidate["conflicting_files"] == ["app.txt"]

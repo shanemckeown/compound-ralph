@@ -1,0 +1,25 @@
+
+Comments on AestheticcNext-uynmv:
+
+[Encrypted-S] at 2026-10-07 08:01
+  Premise: prod evidence 2026-10-07 (Ops/SMS_CAP_LEAK/PART_E_DEMO_TEST.md, PART_D_ROOT_CAUSE.md): on the Demo Clinic the 80% dashboard banner and the 100% block work, and a server-side over-cap send was skipped with monthly_cap_reached_marketing; but no email reaches a clinic at any threshold (grep lib/email on origin/main shows no cap email), and Viso and City MediSpa are projected to hit 500 in October with only a dashboard banner as warning.
+
+[Encrypted-S] at 2026-10-07 08:02
+  started /goal 2026-10-07T09:02:38+01:00
+
+[Encrypted-S] at 2026-10-07 08:59
+  OWN-GATE review (3 rounds, aestheticc-review code: Astra xhigh + Opus h2h + review lead): ESCALATED 3 sends-area items, none fixed on this branch, no premise-break: (1) per-recipient retry for a co-owner whose send failed (az2fk), (2) DB outage between claim and send can suppress that month's warning (new follow-up: expiring lease), (3) Resend idempotency key vs changed body (oa4l3). Rationale: the email is an extra nudge on top of the 80% banner, point-of-send row and Settings usage; the cap still blocks correctly. Orchestrator to clear before landing. Evidence: ~/.claude/evidence/goal/uynmv-r1/ (lead-escalate-round-3.txt).
+
+[Encrypted-S] at 2026-10-07 15:24
+  HELD 2026-10-07 16:10 BST: Shane said stop all work. No dispatch, review or landing until Shane ranks the work. State and unsaved-work locations: Aestheticc/Ops/WORK_IN_FLIGHT_2026-10-07_CRASH.md
+
+[Encrypted-S] at 2026-10-07 19:17
+  PASS @a920dd5701e1243dafb5ca428f73d05aac3b65f6
+  INDEPENDENT REVIEW 2026-10-07: Astra xhigh (raw FAIL 4 P2) + fresh Sonnet (PASS) on fce41d996; review lead BLOCKING=1 (Settings copy vs 90%->100% jump) fixed in a920dd570 as copy-only, Sol 6.1 delta read confirms. Core aim achieved: yes. Remaining ranked for Shane (not blocking, not built): P3 az2fk co-owner failed send not retried (1 of 48 clinics has >1 owner email); P4 5otl5 DB outage between claim and send; P4 oa4l3 Resend idempotency vs changed body. Tests: jest (lockf) sms-settings-page-usage, sms-settings-topup-meter, sms-template-editor-credits, sms-compose-surface-counters, meta file-length + toast-error ratchets: 6 suites / 82 tests pass, exit 0; eslint pages/dashboard/settings/sms/index.tsx exit 0; tsc --noEmit (12 GB) exit 0. No test asserted the old string. Evidence: lead files /private/tmp/claude-502/-Users-shane-Documents-Obsidian-Aestheticc/7885b52b-f4f1-4ce6-b508-5ee3d6e3ff38/scratchpad/lead-uynmv/, /private/tmp/claude-502/-Users-shane-Documents-Obsidian-Aestheticc/7885b52b-f4f1-4ce6-b508-5ee3d6e3ff38/scratchpad/astra-uynmv.txt, /private/tmp/claude-502/-Users-shane-Documents-Obsidian-Aestheticc/7885b52b-f4f1-4ce6-b508-5ee3d6e3ff38/scratchpad/sol-uynmv.txt (VERDICT: RESOLVED, NEW FINDINGS: none).
+
+[Encrypted-S] at 2026-10-07 19:21
+  LAND 20261007T191844Z-69628: discover.sh flagged held-no-review-pass because the regex vetoes on the word FAIL inside the 19:17 comment ('Astra xhigh (raw FAIL 4 P2)', a pre-re-grade note); the actual verdict line is 'PASS @a920dd570...'. Lander treats that as recorded PASS. Sensitive-path opt-in: Shane standing word 7 Oct 'if it is tested, land it'.
+
+[Encrypted-S] at 2026-10-07 20:20
+  Landed 7 Oct: main 1de3a6340 (feature merge 442463ea3, ratchet 25588e7b5, migration reconcile). Session 93361e82 not removed: worktree has uncommitted issues.jsonl churn only. Discovery false-held it because of "FAIL" in the Astra comment line; review_pass_for regex should be tightened.
+
