@@ -128,7 +128,7 @@ class Pace(unittest.TestCase):
 
     def test_run_gate_prints_blind_warning_line_when_stale(self):
         self.write(used_pct=90, updated=NOW - datetime.timedelta(hours=30))
-        failed, _, printed = self.run_gate(bead(priority=3))
+        failed, _, printed = self.run_gate(bead(priority=3, labels=["area:product"]))
         self.assertFalse(failed)
         self.assertIn(f"WARNING: {fd.PACE_BLIND}", printed)
 
@@ -193,11 +193,11 @@ class Pace(unittest.TestCase):
 
     def test_run_gate_passes_p1_and_missing_file(self):
         self.write()
-        failed, _, printed = self.run_gate(bead(priority=1))
+        failed, _, printed = self.run_gate(bead(priority=1, labels=["area:product"]))
         self.assertFalse(failed)
         self.assertIn("✓ 12 credit pace", printed)
         os.remove(self.path)
-        failed, _, printed = self.run_gate(bead(priority=3))
+        failed, _, printed = self.run_gate(bead(priority=3, labels=["area:product"]))
         self.assertFalse(failed)
         self.assertIn("⚠ 12 credit pace — WARN (not refusing)", printed)
 

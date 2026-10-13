@@ -250,6 +250,27 @@ def check_headless_eligible(bead, diagnostic_output=None):
     ]
 
 
+AREA_LABELS = {"area:marketing", "area:sales", "area:client-success", "area:finance", "area:security",
+               "area:data-protection", "area:platform-reliability", "area:product", "area:company"}
+
+
+def check_area_label(record):
+    """Check 14 (vault-reorg Phase 3, 2026-10): a single bead must carry exactly one `area:<slug>` label
+    from Areas/INDEX.md so the area front door lists it and a Manager can find it. Add-only hygiene ran
+    first (Ops/vault-reorg/bead-labels.py); a bead that still has none was matched by no rule and needs a
+    human to pick the area — that is a one-line `bd label add`, never a dispatch-time guess."""
+    labels = [l for l in (record.get("labels") or []) if l.startswith("area:")]
+    if len(labels) == 1 and labels[0] in AREA_LABELS:
+        return []
+    if not labels:
+        return [f"bead has no area: label — add one with `bd label add {record.get('id')} area:<slug>` "
+                f"(slugs: {', '.join(sorted(AREA_LABELS))}; see Aestheticc/Areas/INDEX.md), then re-run"]
+    bad = [l for l in labels if l not in AREA_LABELS]
+    if bad:
+        return [f"unknown area label(s) {bad} — valid: {', '.join(sorted(AREA_LABELS))}"]
+    return [f"bead has {len(labels)} area labels {labels} — keep exactly one"]
+
+
 # A labelled field, tolerant of markdown decoration and numbering: "Outcome: …",
 # "**Outcome promise:** …", "1. Premise check (prod): …", or a heading ("## Premise") whose
 # value is the next non-blank line. The value must be substantive, not just the label.
@@ -697,8 +718,8 @@ def load_bead_record(bead):
 # nowhere to go. Every probe here is cheap (statvfs, one git plumbing call, one registry
 # read with a 5s timeout): no `du` walks, under 2s total.
 DATA_VOLUME = "/System/Volumes/Data"
-MIN_FREE_DISK_GB = 120
-MAX_WORKTREES = 40
+MIN_FREE_DISK_GB = 100  # Shane, 12 Oct 2026: lowered from 120
+MAX_WORKTREES = 50  # Shane, 10 Oct 01:25: raised from 40 for the Dhunna sprint (225 GB free; disk check 6 still guards). Revisit with LUCY-5n9qc.
 MAX_RESIDENT_BG_SESSIONS = 8
 MIN_MEMORY_FREE_PCT = 25
 AGENTS_TIMEOUT_S = 5
@@ -975,6 +996,8 @@ def run_gate(bead, is_epic):
         record, load_error = load_bead_record(bead)
         results["5 bead brief complete"] = ([f"cannot verify the bead brief — {load_error}"]
                                             if load_error else check_bead_brief(record))
+        results["14 area label"] = ([f"cannot verify the area label — {load_error}"]
+                                    if load_error else check_area_label(record))
         results["10 client triage"] = ([f"cannot verify client triage — {load_error}"]
                                        if load_error else check_client_triage_tree(bead, record))
         results[PREMISE_CHECK] = ([f"cannot verify the premise — {load_error}"]
@@ -1157,13 +1180,23 @@ def main():
     if not pre_claimed:
         claim = sh(f"python3 {SLOTS} claim-agent-view {bead}")
         if claim[0] != 0:
-            sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
+            queued = sh(f"python3 {SLOTS} enqueue {bead} {'long-goal' if is_epic else 'goal'}")
+            if queued[0] != 0:
+                print(f"\n⏸ AT CAPACITY — {bead} was not queued.")
+                print(queued[2] or queued[1])
+                sys.exit(3)
             print(f"\n⏸ AT CAPACITY — {bead} queued, not dispatched.")
             print(f"   Run `python3 {SLOTS} status` to see current load.")
             print(f"   A slot frees when a running session finishes (goal.md/long-goal.md's")
             print(f"   closing phase releases its own slot and dispatches the next queued")
             print(f"   bead automatically — no polling needed).")
             sys.exit(3)
+        cleanup = sh(f"python3 {SLOTS} dequeue-by-bead {bead}")
+        if cleanup[0] != 0:
+            sh(f"python3 {SLOTS} release-agent-view {bead}")
+            print(f"\n🔴 Queue cleanup failed for {bead}; released slot, not dispatched.")
+            print(cleanup[2] or cleanup[1])
+            sys.exit(1)
 
     session = dispatch(bead, is_epic, dispatched_by)
     if session:

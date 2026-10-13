@@ -103,8 +103,14 @@ def pid_start_time(pid: int | str | None) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    value = proc.stdout.strip()
-    return value or None
+    return norm_start(proc.stdout)
+
+
+def norm_start(value: Any) -> str | None:
+    """Trim a stored/passed pid_start_time; padding must never read as pid-reuse."""
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
 def pid_alive(pid: int | str | None) -> bool:
@@ -125,7 +131,7 @@ def liveness(record: dict[str, Any] | None) -> dict[str, Any]:
     """Use sessions.py's kill-0 philosophy, strengthened against PID reuse."""
     record = record or {}
     pid = record.get("claude_pid", record.get("pid"))
-    expected_start = record.get("pid_start_time")
+    expected_start = norm_start(record.get("pid_start_time"))
     if not pid_alive(pid):
         return {"state": "dead", "alive": False, "pid": pid}
     actual_start = pid_start_time(pid)
@@ -268,7 +274,7 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
             "run_id": run_id,
             "mode": identity["mode"],
             "claude_pid": identity.get("claude_pid"),
-            "pid_start_time": identity.get("pid_start_time"),
+            "pid_start_time": norm_start(identity.get("pid_start_time")),
             "queued_at": utc_now(),
             "order": order,
         }
@@ -791,7 +797,7 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
         "run_id": identity["run_id"],
         "mode": identity["mode"],
         "claude_pid": identity.get("claude_pid"),
-        "pid_start_time": identity.get("pid_start_time"),
+        "pid_start_time": norm_start(identity.get("pid_start_time")),
         "session_id": identity.get("session_id"),
         "agent_view_name": identity.get("agent_view_name"),
         "started_at": utc_now(),
@@ -957,7 +963,7 @@ def _identity_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "run_id": args.run_id,
         "mode": args.mode,
         "claude_pid": pid,
-        "pid_start_time": args.pid_start_time or pid_start_time(pid),
+        "pid_start_time": norm_start(args.pid_start_time) or pid_start_time(pid),
         "session_id": args.session_id,
         "agent_view_name": args.agent_view_name,
         "stage": args.stage,

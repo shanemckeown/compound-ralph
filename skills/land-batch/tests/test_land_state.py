@@ -141,6 +141,33 @@ def test_dead_holder_is_forensically_taken_over_and_recorded_in_ledger(tmp_path)
     assert land_state.read_ledger(state_dir)["takeovers"][0]["dead_run"]["stage"] == "scoped-gate"
 
 
+def test_padded_pid_start_time_does_not_read_as_pid_reused(tmp_path):
+    live_start = land_state.pid_start_time(os.getpid())
+    assert land_state.liveness(
+        {"claude_pid": os.getpid(), "pid_start_time": f"  {live_start}   "}
+    )["state"] == "live"
+
+    state_dir = tmp_path / "state"
+    p = land_state.ensure_state_dir(state_dir)
+    p["lock"].mkdir()
+    land_state.atomic_write_json(
+        p["holder"],
+        {
+            "run_id": "live-padded-run",
+            "mode": "land",
+            "claude_pid": os.getpid(),
+            "pid_start_time": f"{live_start}   ",
+            "stage": "pg-lane",
+            "heartbeat_at": land_state.utc_now(),
+        },
+    )
+
+    result = land_state.try_acquire_lock(state_dir, _identity("intruder-run"))
+
+    assert result["acquired"] is False
+    assert land_state.holder_record(state_dir)["run_id"] == "live-padded-run"
+
+
 def test_queue_tickets_are_fifo_across_simulated_sessions(tmp_path):
     state_dir = tmp_path / "state"
     first = _identity("first-run")

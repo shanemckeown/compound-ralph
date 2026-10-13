@@ -25,7 +25,7 @@ browser narration, or deploy-agent narration is input, never evidence.
 
 Modes:
 
-- **/land-batch** — LAND: discover, multiSelect curation, scoped gate, merge and
+- **/land-batch** — LAND: discover, automatic curation (no question), scoped gate, merge and
   fast-forward-push to main, then harvest QA checks to a cross-run ledger. Never
   deploy staging or prod.
 - **/land-batch --ship** — attended SHIP: full gate, one staging deployment,
@@ -48,7 +48,7 @@ reversal.
 ## Hard guardrails
 
 1. **Attendance.** LAND is safe in background Agent View because it never
-   deploys, but its multiSelect gate still needs Shane's selection. SHIP is
+   deploys, and selects automatically; it never asks about landing. SHIP is
    interactive/attended only. Refuse SHIP for SPAWNED_SESSION, OPENCLAW_SESSION,
    claude -p, cron, or a background agent: it deploys and holds a human prod gate.
 2. **Source repo:** /Users/shane/Documents/GitReBase/AestheticcNext. Never
@@ -68,11 +68,18 @@ reversal.
    `tests/meta/file-length-baseline.json` is the other generated exception:
    keep the integration side, then regenerate via the Step 2 helper. Never
    hand-merge JSON or take the incoming baseline as the regeneration input.
-6. **Sensitive paths never auto-land.** Require explicit Shane opt-in and exclude
-   a candidate depending on a held sensitive branch.
+6. **LAND never asks Shane whether to land (2026-10-03).** No AskUserQuestion in
+   LAND: merging to main makes nothing live. A branch with a recorded independent
+   review PASS for its exact tip (Ops/reviews or a bead comment) lands automatically,
+   INCLUDING sensitive paths (money, tenancy, consent, auth); it gets a one-line
+   "auto-landed sensitive paths" entry in the landing report. Stops that remain, each
+   a report entry and never a question: red gate (tsc, lint, jest, pg lane, ratchet),
+   no recorded review PASS (or a FAIL) for the tip, authored conflict, dependency on a
+   held branch, no force-push. Landing never applies migrations, builds or shifts
+   traffic. The prod gate (guardrail 4) is unchanged.
 7. **Worktree finish gate preserved; branch-only completion quarantined.** A
    worktree source still requires effectively_clean, ahead >=1, non-active
-   session, premise OK, non-sensitive, non-conflicting (except the generated
+   session, premise OK, non-conflicting, sensitive only with a recorded review PASS (except the generated
    baseline), and non-retired.
    A remote-only source is discoverable but never auto-landable in this release,
    even when exact bead CLOSED + pinned patch-unique tip proves it finished.
@@ -299,7 +306,7 @@ reads kickbacks.json through that state and adds only a presentation label:
   matches a lineage is "KICKBACK FIX — <original branch> (bead <id>)".
 
 That is presentation, not a rewrite of candidate facts. Do not offer a
-presentation.role == kicked-back-original candidate in multiSelect even if its
+presentation.role == kicked-back-original candidate for landing even if its
 Git facts would otherwise make it auto-landable. A KICKBACK FIX remains a
 normal candidate once it independently satisfies the usual gate.
 
@@ -325,17 +332,19 @@ python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-fix-branch \
   --fix-branch "<candidate.branch>"
 ~~~
 
-Keep the multiSelect curation gate exactly:
+Curate automatically. LAND never asks: select every auto_land=true candidate and
+record the selection in the report.
 
-- Offer auto_land=true candidates only, with recognisable labels and honest
+- Select auto_land=true candidates only, with recognisable labels and honest
   one-line safety/caveat descriptions.
 - Render the kickback presentation labels above before normal candidate labels;
   KICKED BACK originals are surfaced, never selected. KICKBACK FIX candidates
   identify their original branch but otherwise follow normal curation.
 - At most four options/question and four questions/call. Chunk >4; above 16,
   offer the highest-confidence 16 and visibly log every remainder.
-- Print HELD/BLOCKED/SKIP beside the selector. Deselection is held by Shane.
-- Sensitive candidates require separate explicit opt-in. A `generated-baseline`
+- Print HELD/BLOCKED/SKIP in the landing report; anything not auto_land is HELD.
+- Sensitive candidates land on a recorded review PASS for the exact tip (no opt-in,
+  no question; `report_notes` carries the report line). A `generated-baseline`
   sibling pair may both land with mandatory per-candidate regeneration. Choose at most one of
   an authored/Git sibling-conflict pair. A `migration-number-collision` pair may
   be jointly selected only through the all-or-nothing migration transaction in
@@ -621,8 +630,8 @@ baseline is available:
    is not safe to blame or dispatch against this branch.
 2. Use the exact sensitive-path list in Hard guardrail 5 against both the
    feature's changed files and files named by the gate failure. A candidate
-   selected through explicit sensitive-path opt-in is categorically ineligible
-   for autonomous dispatch, even if the apparent failure is elsewhere.
+   touching sensitive paths is ineligible for autonomous dispatch (reported in
+   HELD/BLOCKED, never asked about), even if the apparent failure is elsewhere.
 3. A normal TypeScript/lint diagnostic or Jest assertion is eligible only after
    a green baseline. Exit 134/137, heap-out-of-memory text, SIGABRT-style
    crashes, or missing/malformed gate evidence are not code failures. For an
@@ -764,8 +773,8 @@ All retry mutations stay in scratch worktrees, never the trunk checkout.
 #### Mandatory migration-batch transaction
 
 Selected candidates with any `migration_claims` are a single integration
-transaction and run after ordinary candidates. Sensitive-path opt-in still
-applies to each one. Do not push the first migration feature while another
+transaction and run after ordinary candidates. The recorded-review-PASS
+requirement still applies to each one. Do not push the first migration feature while another
 selected migration feature is still unintegrated: parallel branches commonly
 claim the same next number, and only the complete selected set can be safely
 numbered.
@@ -1258,6 +1267,8 @@ conflict, malformed, infra-after-retry, same-signature, cap-exceeded, stalled,
 launch-failure, main-baseline-red, and every ratchet HOLD category above.
 Cite each candidate’s ratchet result, baseline summary/diff, command triples,
 and ratchet commit SHA (or explicit no-change), plus the migration final check.
+Add a **SENSITIVE AUTO-LANDED** section: one line per candidate (branch, sensitive
+paths, review evidence from `report_notes`).
 Do not send Slack/Hermes or other proactive notices;
 the report, discovery label, and --status are the brief.
 

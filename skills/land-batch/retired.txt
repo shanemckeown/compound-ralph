@@ -6,3 +6,84 @@ feature/LUCY-RECS-001-treatment-recommendations
 # zombie — re-implements the revoked --no-traffic tag cost-leak (land-batch first live run, 2026-05-28)
 4r92w
 feature/auto-complete-and-nudge
+# superseded — u8es0's formatAppointmentTime fully subsumes this fix (same root cause,
+# plus 2 more bugs found in u8es0's QA) and conflicts with it on the same function.
+# Landing u8es0 instead. 2026-08-18, run 20260818T193751Z-38249.
+aestheticcnext-ocz70
+
+# fleet backlog cleanup triage — 2026-08-29, run FLEET_BACKLOG_CLEANUP_HANDOFF_2026-08-29
+# verified via investigation agents (bead close-reason + git ancestry / content diff against origin/main)
+# Variant D redesign already shipped on main (AttentionRail.tsx deleted, "Release back to AI" text present)
+goal/9z6d6-2
+# rebooking-candidates-query.ts on main already excludes disabled per-treatment rules from fallback, matching comment confirms
+goal/aestheticcnext-0622k
+# slot-bookability.ts already uses practitionerId-fallback fix, landed via sibling bead AestheticcNext-vpv77
+goal/aestheticcnext-2ossz
+# promise-debt.ts/promises.ts byte-identical to main tip; migration landed as drizzle/0236 under different numbering
+goal/aestheticcnext-3dof9
+# checklist-step.tsx already restores checkedItems from step.data.completedItems
+goal/aestheticcnext-cvtqj
+# same fix landed via separate commit e60678959 (PR #334, same bead id) mounting NewBookingNotificationSection
+goal/aestheticcnext-epny2
+# overview-tab.tsx already consolidated to single referral surface using opaque code, comment confirms
+goal/aestheticcnext-gac5j
+# clinic-voice-service/index.js already has full receptionist relocation with Claude/book_appointment tooling, far beyond this branch's 29-line diff
+goal/aestheticcnext-gs6nl
+# concierge inbound-SMS idempotency work byte-identical to origin/main
+goal/aestheticcnext-6lvz7
+# closed as superseded by 7kv3w.22; main now calls resolveBrandRenderOptions() via follow-up bead 7kv3w.24
+goal/aestheticcnext-7kv3w.18
+# bead close reason states landed as a567b2bac/c54ed31f7, remoteAsyncBookable toggle confirmed live in treatment-form.tsx
+goal/aestheticcnext-8iybs
+# bead's own description calls this branch "stale, never merged, do NOT merge"; rebuilt via goal/aestheticcnext-8uidb-rebuild (f8be60f7c)
+goal/aestheticcnext-8uidb
+# speed-to-lead.ts byte-identical between branch and origin/main, schema field exists in main
+goal/aestheticcnext-9disp.11
+# landed via commits b3b79528f/7d0a78e63 (front-desk mobile list view Variant D)
+goal/aestheticcnext-9z6d6.3
+# booking-claim-guard.ts present on main with only later cosmetic rewording
+goal/aestheticcnext-aqz7x
+# pg-integration/slot-bookability.test.ts exists on main with all branch's cases plus more, landed and extended
+goal/aestheticcnext-b57nf
+# comms-plan wiring completed live in prod via follow-up work (k9kmz.1) and direct DB writes, not by landing this one-off script branch
+goal/aestheticcnext-k9kmz
+# crash already fixed on main via different branch (88d1cca8a, AestheticcNext-x3vlc)
+goal/aestheticcnext-kjg2u
+# read-only adversarial review bead, close reason "CONFIRMED CLEAN, no fix needed" — deliverable is the review itself
+goal/aestheticcnext-kqzr7
+# ~233-client import completed directly against prod via a differently-named one-off script, this branch's script never run
+goal/aestheticcnext-l5zat
+# same fix shipped on main via P0 hotfix branch vpv77
+goal/aestheticcnext-lqe0y
+# closed as duplicate of AestheticcNext-dxowu; tiered memberships feature fully shipped via different implementation
+goal/aestheticcnext-lrwzw
+# LAND kickback already resolved directly on main via commit e99e8cb13
+goal/aestheticcnext-mdr1d
+# closed explicitly as superseded by AestheticcNext-x4x06, same feature independently built and deployed live (Shane-confirmed)
+goal/aestheticcnext-n7ol1
+# bead close notes say "Landed to main 7a1d2d595", confirmed present (isLocked FormTemplateList, jsonb_set migration, active-only filter)
+goal/aestheticcnext-o6pb7
+# bead close notes say "Landed to main 7a1d2d595", confirmed present (conditional-visibility.ts, pattern-validation)
+goal/aestheticcnext-pnv3b
+# same NY Skin Phorest package importer landed via different commit 5029c081b, 37-purchase import executed per close notes
+goal/aestheticcnext-q4vud
+# landed to main as e432fa6c8 (enforce active-clinic on business-studio route set)
+goal/aestheticcnext-sj5mb
+# bead notes confirm "LANDED 2026-06-17, squash-merged as f024d2f4e", columns confirmed present
+goal/aestheticcnext-wcr8e
+# substance landed via sibling bead AestheticcNext-u5n66 plus parent ylj7t
+goal/aestheticcnext-ylj7t.2
+# superseded: main already has Marcellus/Armata fonts + arbitrary theming (21effa6ed) and Chris Flanagan v2 rebuild (ca0c79982)
+goal/aestheticnext-ylsw4
+# all 3 items already fixed on main via other beads (6644b.4.2.x, n7ani.12, c0xos) and existing checkout.ts logic
+goal/f9dnj-1-4
+# VAT-label bug fixed on main via AestheticcNext-x0urv (986ab213c)
+goal/lucy-4jgr.21
+# pre-appointment queueing bug fixed on main via AestheticcNext-541gn/3p8kq
+goal/lucy-4jgr.22
+# all referenced child work (7ezn.1/.3/.4/.5-U1, PR #320, PR #324) confirmed merged; branch is a stale multi-merge-base snapshot
+goal/lucy-7ezn-comms
+# literally landed via /land-batch, commit 903fc79c1 confirmed ancestor of origin/main
+goal/lucy-w888i
+# epic's 3 children (3mc1/gcr6/gg6e) already merged via PR #309 (4c7f2af2b); open status is leftover tracking for unrelated follow-ups
+goal/lucy-wzim

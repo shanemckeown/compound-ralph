@@ -179,8 +179,14 @@ class ClientTriageCheck(unittest.TestCase):
         failed, failures = self._gate(bead(["client-reported"]))
         self.assertTrue(failed)
         self.assertIn("10 client triage", failures)
-        failed, failures = self._gate(bead(["client-reported"], "Triage: regression — x"))
+        failed, failures = self._gate(bead(["client-reported", "area:client-success"], "Triage: regression — x"))
         self.assertFalse(failed, failures)
+
+    def test_gate_refuses_bead_with_no_area_label(self):
+        # Mutation guard: if run_gate stops calling check 14, this goes red.
+        failed, failures = self._gate(bead(["client-reported"], "Triage: regression — x"))
+        self.assertTrue(failed)
+        self.assertEqual(list(failures), ["14 area label"])
 
     def test_single_bead_goal_checks_its_children(self):
         # /goal also expands an epic's open children when dispatched without --epic.
