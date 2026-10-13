@@ -15,7 +15,7 @@ spec.loader.exec_module(rt)
 
 
 @pytest.mark.parametrize("paths", [
-    ["components/booking/SlotPicker.tsx"],
+    ["components/help/Article.tsx"],
     ["components/ui/button.tsx", "styles/globals.css", "content/blog/botox-aftercare.mdx"],
     ["components/ui/__tests__/button.test.tsx", "tests/components/hero.test.tsx"],
     ["public/images/hero.webp", "app/landing.module.css"],
@@ -77,6 +77,48 @@ def test_mixed_ui_and_lib_is_full_and_names_only_the_culprit():
     tier, reasons = rt.classify(["components/ui/button.tsx", "lib/booking/slots.ts"])
     assert tier == "full"
     assert reasons == ["lib/booking/slots.ts: not UI/style/copy (default full)"]
+
+
+@pytest.mark.parametrize("path", [
+    # LUCY-z3ykz.6: Codex round 3, saves patient-photo data through a queue helper.
+    "components/face-mapping/FaceMappingViewer.tsx",
+    "components/prescriptions/X.tsx",
+    "components/glp1/CheckInCard.tsx",
+    "components/forms/FormRenderer.tsx",
+    "components/kiosk/KioskShell.tsx",
+    "components/portal/PortalHome.tsx",
+    "components/clients/medical-history/Summary.tsx",
+    "components/appointments/client-record-notes.tsx",
+    "components/calendar/new-appointment-form.tsx",
+    # Astra own-gate round 1.
+    "components/booking/customer-form.tsx",
+    "components/booking/SlotPicker.tsx",
+    "components/plan-builder/timing-control.tsx",
+    "components/voice/VoiceInput.tsx",
+    "components/command-center/UnifiedTimeline.tsx",
+    "components/rebooking/rebooking-dashboard-widget.tsx",
+    "components/marketing/UnifiedLibrary.tsx",
+    # Round 2.
+    "components/advisory/advisory-card.tsx",
+    "components/clinic-iq/suggestion-card.tsx",
+    "components/reports/ReportTable.tsx",
+    "components/content/BALibrary.tsx",
+    "components/reviews/ClientFeedbackList.tsx",
+])
+def test_patient_domain_is_full_whatever_the_name(path):
+    tier, reasons = rt.classify([path])
+    assert tier == "full" and "patient-data domain" in reasons[0]
+
+
+@pytest.mark.parametrize("path", ["components/landing/Hero.tsx", "components/blog/Post.tsx"])
+def test_non_patient_presentation_stays_light(path):
+    assert rt.classify([path]) == ("light", [])
+
+
+def test_patient_domain_is_full_even_when_source_looks_presentational(tmp_path):
+    path = _component(tmp_path, "face-mapping/Legend.tsx", "export const L = () => <p>Key</p>")
+    tier, reasons = rt.classify([path], repo=str(tmp_path))
+    assert tier == "full" and "patient-data domain" in reasons[0]
 
 
 @pytest.mark.parametrize("paths", [[], [""], ["  ", "\n"]])

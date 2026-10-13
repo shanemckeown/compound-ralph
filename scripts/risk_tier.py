@@ -62,6 +62,42 @@ SENSITIVE = re.compile(
     re.IGNORECASE,
 )
 
+# Patient-data domains (LUCY-z3ykz.6): any file under these is full whatever its name or
+# source, because writes reach patient records indirectly (Codex round 3:
+# FaceMappingViewer.tsx saves through a queue helper that neither rule above sees).
+# Picked by listing AestheticcNext/components/ on 13 Oct 2026.
+PATIENT_DOMAINS = (
+    "components/face-mapping/",  # face maps, injection points and patient photos
+    "components/photos/",  # before/after patient photos
+    "components/photo-import/",  # bulk import of patient photos
+    "components/dialogs/",  # only EditPhotoDialog.tsx, which edits a patient photo
+    "components/prescriptions/",  # prescribing pathway
+    "components/glp1/",  # GLP-1 programmes: BMI, dosing, check-ins
+    "components/forms/",  # consent and medical-history forms
+    "components/kiosk/",  # in-clinic patient form completion
+    "components/portal/",  # client portal: the patient's own records
+    "components/clients/",  # client record, medical history, notes
+    "components/appointments/",  # treatment notes, contraindication checker
+    "components/calendar/",  # creates and edits appointments for clients
+    "components/batch-tracking/",  # which product batch went into which patient
+    "components/csv-import/",  # bulk import of client records
+    # Astra own-gate round 1: these also carry patient data under innocent file names.
+    "components/booking/",  # customer-form.tsx takes patient details and booking notes
+    "components/plan-builder/",  # a client's care-plan timing
+    "components/voice/",  # VoiceInput.tsx records and transcribes dictation
+    "components/command-center/",  # UnifiedTimeline.tsx shows client conversation transcripts
+    "components/rebooking/",  # lists named patients and their treatments
+    "components/marketing/",  # UnifiedLibrary.tsx composes posts from clinical photos
+    # Round 2: render-only, but they show patient records.
+    "components/advisory/",  # morning briefing names overdue patients
+    "components/clinic-iq/",  # suggestion cards quote clinical notes
+    "components/reports/",  # report tables list patient names and visits
+    "components/content/",  # BALibrary.tsx groups patient before/after photos by client
+    "components/reviews/",  # ClientFeedbackList.tsx lists each client's feedback
+)
+# Not listed: leads/ (prospects, not patients), audio/ (no consumers). Landing, blog, ui
+# and help stay light.
+
 
 def component_source_reason(path, repo):
     try:
@@ -79,6 +115,8 @@ def path_reason(path, repo=None):
     hit = SENSITIVE.search(path)
     if hit:
         return f"{path}: names a sensitive surface ({hit.group(0)})"
+    if path.startswith(PATIENT_DOMAINS):
+        return f"{path}: patient-data domain ({path.split('/')[1]})"
     if path.startswith(COMPONENT_PREFIX):
         if path.endswith(COMPONENT_LIGHT_SUFFIXES):
             return component_source_reason(path, repo) if repo and path.endswith((".tsx", ".jsx")) else None
