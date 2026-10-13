@@ -103,3 +103,9 @@ def test_fresh_scratch_has_node_modules_before_commit(tmp_path):
     # Idempotent: a second call (replay attempt) neither fails nor re-points the link.
     tg.link_node_modules(scratch, tmp_path / "elsewhere")
     assert (scratch / "node_modules").resolve() == (trunk / "node_modules").resolve()
+
+
+def test_cloudbuild_gate_cannot_inherit_skip_pg_tests():
+    # Astra round 2: SKIP_PG_TESTS=1 in the lander's shell would drop step #2 and still exit 0.
+    cmd = tg.plan(FULL)["gates"][-1]["cmd"]
+    assert "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh" in cmd

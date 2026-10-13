@@ -42,7 +42,8 @@ TSC = {"name": "tsc", "cmd": f"{GATED} tsc-heavy --noEmit"}
 BEADS_SUITE = {"name": "beads-config-effect",
                "cmd": f"{GATED} jest --runTestsByPath tests/config-effect/coverage.config-effect.test.ts"}
 CLOUDBUILD = {"name": "cloudbuild-full",
-              "cmd": f"{PG_LOCK} bash scripts/ci/simulate-cloudbuild-test.sh"}
+              # env -u: an inherited SKIP_PG_TESTS=1 would silently drop step #2 (the pg lane).
+              "cmd": f"{PG_LOCK} env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
 
 
 def gates_for(tier, paths=()):
@@ -55,8 +56,8 @@ def gates_for(tier, paths=()):
     return [dict(g) for g in gates]
 
 
-def plan(paths):
-    tier, reasons = risk_tier.classify(paths)
+def plan(paths, repo=None):
+    tier, reasons = risk_tier.classify(paths, repo)
     return {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths)}
 
 
@@ -83,7 +84,7 @@ def main(argv=None):
     if args.cmd == "link-node-modules":
         print(link_node_modules(args.scratch, args.repo))
         return 0
-    result = plan(risk_tier.diff_paths(args.scratch, args.base))
+    result = plan(risk_tier.diff_paths(args.scratch, args.base), args.scratch)
     result["base"] = args.base
     result["head"] = subprocess.run(["git", "-C", args.scratch, "rev-parse", "HEAD"],
                                     check=True, capture_output=True, text=True).stdout.strip()
