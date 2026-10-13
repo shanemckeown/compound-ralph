@@ -23,6 +23,14 @@ def _identity(run_id):
             "pid_start_time": land_state.pid_start_time(os.getpid())}
 
 
+def _ident(path):
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def _holder_run(state_dir):
     record = land_state.holder_record(state_dir)
     return record.get("run_id") if isinstance(record, dict) else None
@@ -124,6 +132,50 @@ def test_concurrent_acquirers_with_a_slow_holder_write_admit_exactly_one(tmp_pat
     winners = [o["holder"]["run_id"] for o in outcomes if o["acquired"]]
     assert len(winners) == 1, winners
     assert _holder_run(tmp_path) == winners[0]
+
+
+def test_recoverer_never_retires_a_fresh_lock_made_after_a_release(tmp_path, monkeypatch):
+    # Astra .8 round 1: B passes recover_stale_lock's unlocked is_dir check on A's lock; A
+    # releases; B takes the recovery lock and finds no LOCK.d; A2 mkdirs a fresh holder-less
+    # one; B's retire matched holder None == None and deleted A2's dir, so both were admitted.
+    # Here A2's mkdir lands at B's first look inside the recovery lock.
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-a"))["acquired"] is True
+    lock = tmp_path / "LOCK.d"
+    real_acquire, real_init = land_state._acquire_recovery_lock, land_state._initialising
+    real_dir_id = getattr(land_state, "_dir_id", None) or (lambda path: _ident(path))
+    state = {"releasing": False, "released": False, "a2": None}
+
+    def acquire(p):
+        if not state["releasing"]:
+            state["releasing"] = True
+            assert land_state.release_lock(tmp_path, "run-a") is True
+            state["released"] = True
+        return real_acquire(p)
+
+    def a2_arrives():
+        if state["released"] and state["a2"] is None:
+            lock.mkdir()
+            state["a2"] = real_dir_id(lock)
+
+    def dir_id(path):  # the new code's first look under the recovery lock
+        found = real_dir_id(path)
+        if Path(path) == lock:
+            a2_arrives()
+        return found
+
+    def initialising(path):  # the old code's first look at a missing LOCK.d
+        found = real_init(path)
+        if Path(path) == lock:
+            a2_arrives()
+        return found
+
+    monkeypatch.setattr(land_state, "_acquire_recovery_lock", acquire)
+    monkeypatch.setattr(land_state, "_dir_id", dir_id, raising=False)
+    monkeypatch.setattr(land_state, "_initialising", initialising)
+    b = land_state.try_acquire_lock(tmp_path, _identity("run-b"))
+    assert state["a2"] is not None
+    assert b["acquired"] is False  # A2 made LOCK.d first; B must not take it from under it
+    assert real_dir_id(lock) == state["a2"]
 
 
 def test_holderless_lock_past_the_grace_is_recovered(tmp_path):

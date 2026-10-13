@@ -225,6 +225,15 @@ def _remove_directory(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _dir_id(path: Path) -> tuple[int, int] | None:
+    """Which directory instance this is: a removed-and-recreated LOCK.d gets a new identity."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def _initialising(path: Path) -> bool:
     """True while a holder-less lock dir is young enough to be a live acquirer mid-write."""
     try:
@@ -823,12 +832,14 @@ def _log_lock_anomaly(p: dict[str, Path], entry: dict[str, Any]) -> None:
         handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
 
 
-def _retire_lock_dir(p: dict[str, Path], expected_holder: Any) -> bool:
-    """Remove LOCK.d iff it still carries ``expected_holder``. Caller holds RECOVERY-LOCK.d.
+def _retire_lock_dir(p: dict[str, Path], expected_holder: Any, expected_id: tuple[int, int]) -> bool:
+    """Remove LOCK.d iff it is still the instance ``expected_id`` carrying ``expected_holder``.
 
-    LOCK.d is renamed to a unique tombstone first, so it vanishes in one step and the slow
-    rmtree can never reach a successor's LOCK.d. The holder is re-read from the tombstone; on
-    a mismatch the dir goes back (or, if a new LOCK.d already exists, stays aside and is logged).
+    Caller holds RECOVERY-LOCK.d. LOCK.d is renamed to a unique tombstone first, so it vanishes
+    in one step and the slow rmtree can never reach a successor's LOCK.d. Identity and holder
+    are re-read from the tombstone (two holder-less dirs compare equal by content, so the
+    identity is what tells a fresh acquirer's dir from the dead one: Astra .8 round 1). On a
+    mismatch the dir goes back (or, if a new LOCK.d already exists, stays aside and is logged).
     """
     tombstone = p["root"] / f"LOCK.released.{os.getpid()}.{time.time_ns()}"
     try:
@@ -836,7 +847,7 @@ def _retire_lock_dir(p: dict[str, Path], expected_holder: Any) -> bool:
     except FileNotFoundError:
         return False
     found = read_json(tombstone / "holder.json", default=None)
-    if found != expected_holder:
+    if found != expected_holder or _dir_id(tombstone) != expected_id:
         restored = False
         if not p["lock"].exists():
             try:
@@ -859,6 +870,11 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
     if not _acquire_recovery_lock(p):
         return None
     try:
+        # Re-check inside the recovery lock: LOCK.d may have been released while we waited, and
+        # a missing dir must never read as "holder-less, dead" (Astra .8 round 1).
+        lock_id = _dir_id(p["lock"])
+        if lock_id is None:
+            return None
         holder = read_json(p["holder"], default=None)
         if not isinstance(holder, dict) and _initialising(p["lock"]):
             return None  # an acquirer between mkdir and its holder write (LUCY-z3ykz.8)
@@ -871,7 +887,7 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
             "dead_run": _orphan_forensics(holder if isinstance(holder, dict) else None, repo),
         }
         takeover["cleanup"] = _cleanup_orphan_worktree(holder if isinstance(holder, dict) else None, repo)
-        if not _retire_lock_dir(p, holder):
+        if not _retire_lock_dir(p, holder, lock_id):
             return None  # it changed under us: not the dead lock we judged
         record_takeover(p["root"], takeover)
         return takeover
@@ -906,6 +922,7 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
         p["lock"].mkdir(mode=0o700)
     except FileExistsError:
         return {"acquired": False, "reason": "raced", "takeover": takeover}
+    my_lock_id = _dir_id(p["lock"])
     holder = {
         "run_id": identity["run_id"],
         "mode": identity["mode"],
@@ -935,6 +952,12 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
         # run acquired, LOCK.d is theirs now (Astra round 3).
         release_lock(p["root"], identity["run_id"])
         return {"acquired": False, "reason": "withdrawn"}
+    # Belt and braces (.8): admitted only if LOCK.d is still the dir we made and names us. If it
+    # was swapped, it is someone else's: back off without touching it.
+    current = holder_record(p["root"])
+    if _dir_id(p["lock"]) != my_lock_id or not isinstance(current, dict) or current.get("run_id") != identity["run_id"]:
+        _log_lock_anomaly(p, {"event": "admission-lost", "run_id": identity["run_id"], "found": current})
+        return {"acquired": False, "reason": "raced", "takeover": takeover}
     return {"acquired": True, "holder": holder, "takeover": takeover}
 
 
@@ -991,10 +1014,11 @@ def release_lock(state_dir: Path | None, run_id: str) -> bool:
         return False
     _wait_for_recovery_lock(p)
     try:
+        lock_id = _dir_id(p["lock"])
         holder = holder_record(p["root"])
-        if not isinstance(holder, dict) or holder.get("run_id") != run_id:
+        if lock_id is None or not isinstance(holder, dict) or holder.get("run_id") != run_id:
             return False
-        return _retire_lock_dir(p, holder)
+        return _retire_lock_dir(p, holder, lock_id)
     finally:
         _remove_directory(p["recovery_lock"])
 
