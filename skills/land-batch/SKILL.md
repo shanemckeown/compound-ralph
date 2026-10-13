@@ -168,8 +168,10 @@ Finished branches wait for the next train instead of each taking the lock on its
 (12 Oct: one lander per bead, 60-90 min each, serialised on one lock). Trains are in
 `~/.claude/skills/land-batch/TRAINS.json`: 12:30 midday and 18:30 pre-deploy, Europe/London;
 the window is when a LAND run may start, and the pre-deploy window closes 30+ min before
-the 19:30 evening deploy. `com.aestheticc.land-train` (launchd, under `~/.claude/launchd/`)
-tells the orchestrator when one opens. Before admission, for a non-dry LAND run only
+the 19:30 evening deploy, and a SHIP queues behind a running LAND in the same FIFO, so
+the deploy never starts before the pre-deploy train has landed. `com.aestheticc.land-train` (launchd, under `~/.claude/launchd/`)
+checks every 15 min against TRAINS.json's own timezone and tells the orchestrator once
+per train per day when one opens. Before admission, for a non-dry LAND run only
 (SHIP, `--status` and `--dry-run` are not gated):
 
 ~~~bash
@@ -614,11 +616,11 @@ without `merge --abort`. Preserve their artifacts for Shane; these
 are not scoped-gate kickback candidates. The helper restores its baseline
 working file on pre-commit failure but never resets authored files or pushes.
 
-For each merge that passes these checks, run full-project typecheck via
-`python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
+For each merge that passes these checks, run scoped lint
 and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
 for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
-narrower and accurate). Never run full Jest in LAND outside the full tier's Cloud Build simulation. The tier's push-time gates run once per LAND push, on the combined tree (below). Save separate command,
+narrower and accurate). Full-project tsc is not per merge: it is a push-time gate, run
+once on the combined tree for every tier (below; LUCY-z3ykz.2). Never run full Jest in LAND outside the full tier's Cloud Build simulation. Save separate command,
 raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
@@ -693,14 +695,17 @@ LAND until the batch's push-time gates have passed on the exact tree being pushe
 Which gates run is decided by `~/.claude/scripts/risk_tier.py` from the combined batch
 diff, never by the agent: one full candidate makes the batch full.
 
-- **light** (every path UI/style/copy, no sensitive keyword): no push-time gates. The
-  per-merge scoped tsc + lint + related Jest above already ran once per candidate.
+- **light** (every path UI/style/copy presentation, no sensitive keyword; CHANGELOG,
+  VERSION, the ratchet baseline and beads exports are neutral): full-project tsc once,
+  plus `tests/config-effect` when a beads export changed. Scoped lint + related Jest
+  already ran per candidate.
 - **full** (anything else, including lib/, app/api, pages/api, drizzle/, migrations,
-  money/Stripe, patient data, consent, tenancy, comms/sending, auth, scripts, test infra,
-  package files, unknown paths): the full pg lane, then the Cloud Build simulation steps
-  #0 and #3 (`test:cloudbuild` minus step #2, which IS the pg lane). Strictly in that
-  order, never in parallel, each under the laptop-wide pg-lane lock: run concurrently on
-  12 Oct they gave 9 false pg failures that passed solo.
+  money/Stripe/prices, patient data/photos, consent, tenancy, comms/sending, auth,
+  component logic files, scripts, test infra, package files, unknown paths): the same,
+  then the whole Cloud Build simulation (`test:cloudbuild`: steps #0, #2 = the full pg
+  lane inside the upload tarball, and #3) as one command under the laptop-wide pg-lane
+  lock. Never beside another pg lane: run concurrently on 12 Oct they gave 9 false pg
+  failures that passed solo.
 
 It runs once after the ordinary loop (on all of `GREEN_PENDING`), and once more on the
 migration transaction's final tree before that push (always full: it touches drizzle/).
@@ -715,7 +720,7 @@ jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
 GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
 ~~~
 
-For a full tier run `colima start` first. Then run each gate in list order, detached,
+For a full tier run `colima start` first (step #2 needs Docker). Then run each gate in list order, detached,
 waiting for its exit file before starting the next (never two at once). Each gate's
 command already takes the pg-lane lock, so a full lane anywhere else on the laptop
 makes it wait:
@@ -759,7 +764,7 @@ Then run the B-1 close and B-2 blocks below once per `GREEN_PENDING` entry, with
 entry's `BEAD_ID` and `MERGE_SHA`.
 
 Missing/malformed exit, a dead pid without an exit file, or any nonzero exit pushes
-nothing. The rest of this paragraph applies to every full-tier gate ("lane" = gate). Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
+nothing. The rest of this paragraph applies to every push-time gate, tsc included ("lane" = gate). Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
 a pass and never a reason to run the lane without the lock. Infra-shaped red (exit
 3/134/137, Docker/Colima or container start errors, killed) reruns once with separate
 retry evidence, then HOLDs the whole batch as **pg-lane-infra**. A red assertion

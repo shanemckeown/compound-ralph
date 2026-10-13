@@ -19,30 +19,34 @@ def names(result):
     return [g["name"] for g in result["gates"]]
 
 
-def test_light_diff_skips_pg_lane_and_cloudbuild():
+def test_light_diff_runs_tsc_once_and_skips_pg_lane_and_cloudbuild():
     result = tg.plan(LIGHT)
-    assert result["tier"] == "light" and result["gates"] == []
+    assert result["tier"] == "light" and names(result) == ["tsc"]
     joined = json.dumps(result)
     assert "pg-tests" not in joined and "simulate-cloudbuild" not in joined
 
 
-def test_full_diff_runs_pg_lane_then_cloudbuild_in_order():
+def test_full_diff_runs_tsc_then_the_whole_cloudbuild_simulation():
     result = tg.plan(FULL)
-    assert result["tier"] == "full"
-    assert names(result) == ["full-pg-lane", "cloudbuild-step0", "cloudbuild-step3"]
-    assert "--selectProjects pg-tests" in result["gates"][0]["cmd"]
-    assert any("simulate-cloudbuild-test.sh" in g["cmd"] for g in result["gates"])
+    assert result["tier"] == "full" and names(result) == ["tsc", "cloudbuild-full"]
+    # The whole simulation (no --step) includes step #2, the pg lane inside the tarball.
+    assert result["gates"][1]["cmd"].endswith("simulate-cloudbuild-test.sh")
 
 
-def test_full_gates_are_sequential_and_each_holds_the_pg_lock():
+def test_full_gates_are_sequential_and_pg_work_holds_the_lock():
     # 12 Oct: pg lane + test:cloudbuild run concurrently gave 9 false pg failures.
     result = tg.plan(FULL)
     assert result["sequential"] is True
+    pg = [g for g in result["gates"] if "cloudbuild" in g["name"] or "pg" in g["cmd"]]
+    assert len(pg) == 1 and pg[0]["cmd"].startswith('python3 "$HOME/.claude/scripts/pg-lane-lock.py" --')
     for gate in result["gates"]:
-        assert gate["cmd"].startswith('python3 "$HOME/.claude/scripts/pg-lane-lock.py" --')
         assert "&" not in gate["cmd"].replace("&&", "")
-    # The simulation never re-runs step #2 (the pg lane) a second time.
-    assert not any("--step 2" in g["cmd"] for g in result["gates"])
+
+
+def test_beads_export_adds_the_config_effect_suite():
+    result = tg.plan(LIGHT + [".beads/issues.jsonl"])
+    assert result["tier"] == "light" and names(result) == ["tsc", "beads-config-effect"]
+    assert "tests/config-effect/coverage.config-effect.test.ts" in result["gates"][1]["cmd"]
 
 
 def test_one_full_candidate_makes_the_batch_full():
