@@ -109,3 +109,35 @@ def test_cli_diffs_a_repo_against_base(tmp_path):
     out = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(tmp_path), "--base", "main"],
                          capture_output=True, text=True, check=True).stdout
     assert out.strip() == "tier=light"
+
+
+def _component(tmp_path, name, body):
+    f = tmp_path / "components" / name
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(body)
+    return f"components/{name}"
+
+
+@pytest.mark.parametrize("body", [
+    "const r = await fetch('/api/clients/1/prefs', {method: 'PATCH'})",
+    "const m = useMutation({mutationFn: save})",
+    "import { createIntent } from '@/lib/payments/terminal'",
+    "apiClient.post(url, body)",
+])
+def test_component_that_writes_data_is_full_when_repo_given(tmp_path, body):
+    # Astra round 2: mobile-terminal-bridge.tsx (payment intents), CommunicationPreferences.tsx
+    # (marketing consent) had innocent names.
+    path = _component(tmp_path, "terminal/bridge.tsx", f"export function B() {{ {body} }}")
+    tier, reasons = rt.classify([path], repo=str(tmp_path))
+    assert tier == "full" and "writes data" in reasons[0]
+    assert rt.classify([path]) == ("light", [])  # stdin mode: path rules only
+
+
+def test_presentational_component_stays_light_with_repo(tmp_path):
+    path = _component(tmp_path, "ui/Hero.tsx", "export const Hero = () => <h1>Book now</h1>")
+    assert rt.classify([path], repo=str(tmp_path)) == ("light", [])
+
+
+def test_deleted_component_is_full_with_repo(tmp_path):
+    tier, reasons = rt.classify(["components/ui/Gone.tsx"], repo=str(tmp_path))
+    assert tier == "full" and "not readable" in reasons[0]

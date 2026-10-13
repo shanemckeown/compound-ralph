@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 # UI / styling / copy, plus the test trees that cover them. Under components/ only
 # presentation files count: a components/**/*.ts helper is logic (upload-helper.ts uploads
@@ -45,6 +46,15 @@ BEADS_EXPORTS = {".beads/issues.jsonl", ".beads/export-state.json", "issues.json
 # Regenerated and verified by /land-batch's ratchet helper on every land that moves a line.
 NEUTRAL_EXACT = {"CHANGELOG.md", "VERSION", "tests/meta/file-length-baseline.json"} | BEADS_EXPORTS
 
+# A component whose source writes data or reaches money/auth code is full whatever its name
+# (Astra round 2: components/terminal/mobile-terminal-bridge.tsx creates payment intents,
+# components/clients/CommunicationPreferences.tsx writes marketing consent). Checked on the
+# file at HEAD when classify() is given the repo; a file it cannot read there is full.
+WRITES_DATA = re.compile(
+    r"fetch\(|useMutation|axios|mutate\(|apiClient|['\"`]/api/"
+    r"|@/lib/(?:payments|stripe|services|auth|db)\b"
+)
+
 # Any path naming one of these is full, even under components/ (components/payments/X.tsx).
 SENSITIVE = re.compile(
     r"stripe|payment|billing|consent|patient|clinical|tenant|business_id|sms|email|send|comms|auth"
@@ -53,7 +63,16 @@ SENSITIVE = re.compile(
 )
 
 
-def path_reason(path):
+def component_source_reason(path, repo):
+    try:
+        text = (Path(repo) / path).read_text(errors="replace")
+    except OSError:
+        return f"{path}: component not readable at HEAD (deleted?) (default full)"
+    hit = WRITES_DATA.search(text)
+    return f"{path}: component writes data or reaches money/auth code ({hit.group(0)})" if hit else None
+
+
+def path_reason(path, repo=None):
     """None if this path is light, else why it forces full."""
     if path in NEUTRAL_EXACT:
         return None
@@ -62,7 +81,7 @@ def path_reason(path):
         return f"{path}: names a sensitive surface ({hit.group(0)})"
     if path.startswith(COMPONENT_PREFIX):
         if path.endswith(COMPONENT_LIGHT_SUFFIXES):
-            return None
+            return component_source_reason(path, repo) if repo and path.endswith((".tsx", ".jsx")) else None
         return f"{path}: component logic, not presentation (default full)"
     if path.startswith(LIGHT_PREFIXES) or path.endswith(LIGHT_SUFFIXES):
         return None
@@ -71,12 +90,14 @@ def path_reason(path):
     return f"{path}: not UI/style/copy (default full)"
 
 
-def classify(paths):
-    """Return (tier, reasons). tier is 'light' or 'full'; reasons lists what forced full."""
+def classify(paths, repo=None):
+    """Return (tier, reasons). tier is 'light' or 'full'; reasons lists what forced full.
+    With repo (a checkout at the tree being landed), component sources are read too;
+    without it (paths on stdin) only path rules apply."""
     paths = [p.strip() for p in paths if p and p.strip()]
     if not paths:
         return "full", ["empty diff: nothing to classify (fail closed)"]
-    reasons = [r for r in (path_reason(p) for p in paths) if r]
+    reasons = [r for r in (path_reason(p, repo) for p in paths) if r]
     return ("full", reasons) if reasons else ("light", [])
 
 
@@ -96,7 +117,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     paths = diff_paths(args.repo, args.base) if args.repo else sys.stdin.read().split("\n")
-    tier, reasons = classify(paths)
+    tier, reasons = classify(paths, args.repo)
     if args.json:
         print(json.dumps({"tier": tier, "reasons": reasons,
                           "path_count": len([p for p in paths if p.strip()])}))
