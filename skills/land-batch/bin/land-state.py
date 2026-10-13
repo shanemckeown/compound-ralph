@@ -866,7 +866,9 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
     # Re-check after the holder is visible. withdraw marks first and reads the holder second,
     # so either this sees the mark and backs out, or withdraw sees this holder (lock_held).
     if is_withdrawn(p, identity["run_id"]):
-        _remove_directory(p["lock"])
+        # Only ever drop our OWN lock: if withdraw's caller already released it and another
+        # run acquired, LOCK.d is theirs now (Astra round 3).
+        release_lock(p["root"], identity["run_id"])
         return {"acquired": False, "reason": "withdrawn"}
     return {"acquired": True, "holder": holder, "takeover": takeover}
 
