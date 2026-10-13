@@ -1,0 +1,8 @@
+{
+  "timezone": "Europe/London",
+  "deploy_not_before": "19:30",
+  "trains": [
+    {"name": "midday", "start": "12:30", "window_minutes": 60},
+    {"name": "pre-deploy", "start": "18:30", "window_minutes": 30}
+  ]
+}

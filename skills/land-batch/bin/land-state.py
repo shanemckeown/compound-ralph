@@ -287,6 +287,35 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
         _release_counter_lock(p)
 
 
+def withdraw_ticket(state_dir: Path | None, ticket: str, run_id: str) -> dict[str, Any]:
+    """Remove the caller's OWN queue ticket so a queued lander can yield (LUCY-z3ykz.4).
+
+    ``ticket`` is the ticket file name or its run id. A ticket belonging to another run is
+    refused, never removed: yielding is for yourself, not for clearing someone else's place.
+    The holder of LOCK.d releases instead. Every withdrawal is logged to withdrawals.jsonl.
+    """
+    p = ensure_state_dir(state_dir)
+    for path in _ticket_paths(p):
+        record = read_json(path, default=None)
+        if not isinstance(record, dict) or ticket not in (path.name, record.get("run_id")):
+            continue
+        if record.get("run_id") != run_id:
+            return {"withdrawn": False, "reason": "not-own-ticket", "ticket_file": path.name,
+                    "owner_run_id": record.get("run_id")}
+        holder = holder_record(p["root"])
+        if isinstance(holder, dict) and holder.get("run_id") == run_id:
+            return {"withdrawn": False, "reason": "holds-lock-use-release", "ticket_file": path.name}
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            break
+        entry = {"withdrawn_at": utc_now(), "run_id": run_id, "ticket_file": path.name, "ticket": record}
+        with open(p["root"] / "withdrawals.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        return {"withdrawn": True, "ticket_file": path.name}
+    return {"withdrawn": False, "reason": "no-such-ticket", "ticket": ticket}
+
+
 def _run_git(repo: str | None, args: list[str]) -> tuple[int, str, str]:
     if not repo:
         return 1, "", "repo not supplied"
@@ -999,6 +1028,9 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--poll-max", type=float, default=POLL_MAX_SECONDS)
     release = sub.add_parser("release")
     release.add_argument("--run-id", required=True)
+    withdraw = sub.add_parser("withdraw")
+    withdraw.add_argument("ticket", help="ticket file name or run id")
+    withdraw.add_argument("--run-id", required=True, help="the caller's own run id")
     beat = sub.add_parser("heartbeat")
     beat.add_argument("--run-id", required=True)
     beat.add_argument("--stage", required=True)
@@ -1054,6 +1086,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "release":
         return 0 if release_lock(state_dir, args.run_id) else 1
+    if args.command == "withdraw":
+        result = withdraw_ticket(state_dir, args.ticket, args.run_id)
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["withdrawn"] else 1
     if args.command == "heartbeat":
         try:
             result = heartbeat(

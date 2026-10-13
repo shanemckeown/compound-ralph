@@ -31,6 +31,8 @@ Modes:
 - **/land-batch --ship** — attended SHIP: full gate, one staging deployment,
   QA all ledger checks, Codex fix/revert loop, then one human production gate.
 - **/land-batch --status** — read-only lock/queue/ledger dashboard; no lock.
+- **/land-batch --now --reason='<P0 / dated client promise>'** — LAND outside a land
+  train window (see Step 0).
 - **--dry-run** — discovery and full plan only; preserve the precedent that it
   mutates nothing: no ticket, lock, scratch, ledger, merge, or deployment.
 
@@ -159,7 +161,29 @@ evidence in history so a repeated signature can be surfaced with both evidence
 sets. Read/write it only through land-state.py, whose atomic write matches
 ledger.json.
 
-### Step 0 — Admission
+### Step 0 — Land train, then admission
+
+🔴 **LAND rides a land train (LUCY-z3ykz.4, Shane 12 Oct "landing batches, yes").**
+Finished branches wait for the next train instead of each taking the lock on its own
+(12 Oct: one lander per bead, 60-90 min each, serialised on one lock). Trains are in
+`~/.claude/skills/land-batch/TRAINS.json`: 12:30 midday and 18:30 pre-deploy, Europe/London;
+the window is when a LAND run may start, and the pre-deploy window closes 30+ min before
+the 19:30 evening deploy. `com.aestheticc.land-train` (launchd, under `~/.claude/launchd/`)
+tells the orchestrator when one opens. Before admission, for a non-dry LAND run only
+(SHIP, `--status` and `--dry-run` are not gated):
+
+~~~bash
+TRAIN_ARGS=()   # add: --now --reason "<P0 or dated client promise>" when Shane passed --now
+python3 ~/.claude/skills/land-batch/bin/trains.py check "${TRAIN_ARGS[@]}" \
+  || { echo "Not a land train window: queue for the next train (named above) or rerun with --now --reason."; exit 1; }
+~~~
+
+Record the printed JSON (train, or `now` + reason) in the run evidence and the final
+report. `--now` without a written reason is refused. A run already queued that should give
+way (a P0 lander behind it, or Shane says stop) yields with
+`python3 ~/.claude/skills/land-batch/bin/land-state.py withdraw <ticket-file-or-run-id> --run-id "$RUN_ID"`:
+it removes only that run's own ticket and logs it to `withdrawals.jsonl`. Never `rm` a
+QUEUE.d ticket by hand; the lock holder releases instead.
 
 For a non-dry run, create a stable run/evidence identity and acquire admission.
 Dry-run runs read-only discovery/plan first and skips this admission step. The
