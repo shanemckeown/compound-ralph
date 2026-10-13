@@ -130,9 +130,10 @@ reversal.
     per-candidate ratchet regeneration/attribution gate in Step 2. A manual
     land must use a resolved bead id, preserve baseline evidence, and HOLD
     unrelated growth; the ratchet helper never substitutes for `npm test`.
-    It must also run the FULL pg lane once on the combined tree before
-    pushing (the Step 2 full-pg-lane block, serialised by the laptop-wide
-    lock; LUCY-w6fpi) — builders only ran targeted pg suites.
+    It must also run the Step 2 risk-tiered push gate once on the combined
+    tree before pushing (`tier_gates.py plan`; a full tier runs the pg lane
+    then the Cloud Build simulation, serially under the laptop-wide lock;
+    LUCY-w6fpi, LUCY-z3ykz.2) — builders only ran targeted suites.
     A manual land bypasses the mechanical content-loss check above entirely, which is exactly how the
     2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
 
@@ -372,16 +373,18 @@ LAND_ATTEMPT=$((${LAND_ATTEMPT:-0} + 1))
 INT="land-batch/$RUN_ID-attempt-$LAND_ATTEMPT"
 SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-attempt-$LAND_ATTEMPT"
 git -C "$REPO" worktree add "$SCRATCH" -b "$INT" "$BASE_SHA"
+# Every land scratch gets node_modules before ANY commit: without it the prettier
+# pre-commit hook dies ENOENT on the first merge commit (LUCY-z3ykz.2).
+python3 ~/.claude/skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$SCRATCH" --repo "$REPO"
 ~~~
 
 Before the first merge, prove the pinned main baseline is green. Dependency
-setup links the installed dependencies below (ignored path, never committed);
+setup linked the installed dependencies above (ignored path, never committed);
 all source must be tracked and the scratch clean. The helper runs
 from the scratch root and strips inherited UPDATE_BASELINE/FILE_LENGTH_GROW_OK
 in check mode, so this cannot accidentally repair main drift:
 
 ~~~bash
-[ -e "$SCRATCH/node_modules" ] || ln -s "$REPO/node_modules" "$SCRATCH/node_modules"
 RATCHET_HELPER="$HOME/.claude/skills/land-batch/bin/file_length_ratchet.py"
 RATCHET_EXIT=0
 RATCHET_RESULT="$(python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
@@ -591,7 +594,7 @@ For each merge that passes these checks, run full-project typecheck via
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit`, scoped lint,
 and `python3 ~/.claude/scripts/gated-test-run.py jest --findRelatedTests <files>`
 for **that feature's changed files** (or `python3 ~/.claude/scripts/gated-test-run.py jest --changedSince=origin/main` when
-narrower and accurate). Never run full Jest in LAND. The full pg lane runs once per LAND push, on the combined tree (below). Save separate command,
+narrower and accurate). Never run full Jest in LAND outside the full tier's Cloud Build simulation. The tier's push-time gates run once per LAND push, on the combined tree (below). Save separate command,
 raw output, and numeric exit-code artifacts under scoped-gate-<branch>-*.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
@@ -657,54 +660,89 @@ For a green feature, **do not push yet** (LUCY-w6fpi). Append `BR`, `BEAD_ID` an
 `MERGE_SHA` to `GREEN_PENDING` and continue the loop; the next candidate merges on
 top of it in the same scratch. "Earlier green merges" above means these pending ones.
 
-#### Mandatory full pg lane before every LAND push to main (LUCY-w6fpi)
+#### Risk-tiered push gate before every LAND push to main (LUCY-z3ykz.2, LUCY-w6fpi)
 
-Builders no longer run the full pg lane (`/goal` runs `~/.claude/scripts/targeted-tests.py`:
-related suites only). This default LAND run is therefore where cross-branch pg breakage
-is caught before main moves (25 Sep: build 1aeebc99), so **nothing is pushed to main from
-LAND until the full pg lane has passed on the exact tree being pushed.** It runs once
-after the ordinary loop (on all of `GREEN_PENDING`), and once more on the migration
-transaction's final tree before that push. Run `colima start` first. The command calls
-the laptop-wide lock directly (not the repo's `scripts/ci/pg-lane.sh`, which older mains
-lack), so a second full lane anywhere on the laptop waits for this one:
+Builders and reviewers run targeted tests only (`/goal` runs `~/.claude/scripts/targeted-tests.py`:
+related suites only). This default LAND run is therefore where cross-branch breakage is
+caught before main moves (25 Sep: build 1aeebc99), so **nothing is pushed to main from
+LAND until the batch's push-time gates have passed on the exact tree being pushed.**
+Which gates run is decided by `~/.claude/scripts/risk_tier.py` from the combined batch
+diff, never by the agent: one full candidate makes the batch full.
+
+- **light** (every path UI/style/copy, no sensitive keyword): no push-time gates. The
+  per-merge scoped tsc + lint + related Jest above already ran once per candidate.
+- **full** (anything else, including lib/, app/api, pages/api, drizzle/, migrations,
+  money/Stripe, patient data, consent, tenancy, comms/sending, auth, scripts, test infra,
+  package files, unknown paths): the full pg lane, then the Cloud Build simulation steps
+  #0 and #3 (`test:cloudbuild` minus step #2, which IS the pg lane). Strictly in that
+  order, never in parallel, each under the laptop-wide pg-lane lock: run concurrently on
+  12 Oct they gave 9 false pg failures that passed solo.
+
+It runs once after the ordinary loop (on all of `GREEN_PENDING`), and once more on the
+migration transaction's final tree before that push (always full: it touches drizzle/).
+Compute and record the tier first; a missing or malformed tier file is red:
 
 ~~~bash
 PG_TREE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
-PG_EVIDENCE="$EVIDENCE_DIR/full-pg-$PG_TREE_SHA"
+TIER_JSON="$EVIDENCE_DIR/tier-$PG_TREE_SHA.json"
+python3 ~/.claude/skills/land-batch/bin/tier_gates.py plan \
+  --scratch "$SCRATCH" --base "$BASE_SHA" --out "$TIER_JSON" || exit 1
+jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
+GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
+~~~
+
+For a full tier run `colima start` first. Then run each gate in list order, detached,
+waiting for its exit file before starting the next (never two at once). Each gate's
+command already takes the pg-lane lock, so a full lane anywhere else on the laptop
+makes it wait:
+
+~~~bash
+GATE_I="${GATE_I:-0}"   # 0..GATE_COUNT-1; start the next only after this one's exit file is 0
+GATE_NAME="$(jq -er ".gates[$GATE_I].name" "$TIER_JSON")"
+GATE_EVIDENCE="$EVIDENCE_DIR/$GATE_NAME-$PG_TREE_SHA"
 nohup bash -o pipefail -c '
-  cd "$2" && python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- \
-    env TZ=UTC RUN_PG_TESTS=true npx jest --selectProjects pg-tests
+  cd "$2" && eval "$3"
   code=$?; printf "%s\n" "$code" > "$1"; exit "$code"
-' bash "$PG_EVIDENCE.exit" "$SCRATCH" > "$PG_EVIDENCE.log" 2>&1 </dev/null &
-printf '%s\n' "$!" > "$PG_EVIDENCE.pid"
+' bash "$GATE_EVIDENCE.exit" "$SCRATCH" "$(jq -er ".gates[$GATE_I].cmd" "$TIER_JSON")" \
+  > "$GATE_EVIDENCE.log" 2>&1 </dev/null &
+printf '%s\n' "$!" > "$GATE_EVIDENCE.pid"
 ~~~
 
 Poll the log and exit file; never foreground-wait. A `waiting: full pg lane already
-running` line is normal, not red (`~/.claude/fleet/pg-lane.log` names the holder). Only
-this is green, and only then push, exactly the tree that was tested:
+running` line is normal, not red (`~/.claude/fleet/pg-lane.log` names the holder). A
+nonzero gate stops the sequence: later gates do not run. Only this is green, and only
+then push, exactly the tree that was classified and tested:
 
 ~~~bash
-PG_EXIT="$(cat "$PG_EVIDENCE.exit" 2>/dev/null || echo missing)"
-if [ -z "${PG_TREE_SHA:-}" ] || [ "$PG_EXIT" != 0 ] \
+GATES_RED=""
+for name in $(jq -r '.gates[].name' "$TIER_JSON"); do
+  code="$(cat "$EVIDENCE_DIR/$name-$PG_TREE_SHA.exit" 2>/dev/null || echo missing)"
+  [ "$code" = 0 ] || GATES_RED="$GATES_RED $name:$code"
+done
+if [ -z "${PG_TREE_SHA:-}" ] || [ -n "$GATES_RED" ] \
+  || [ "$(jq -r .head "$TIER_JSON")" != "$PG_TREE_SHA" ] \
   || [ "$(git -C "$SCRATCH" rev-parse HEAD)" != "$PG_TREE_SHA" ]; then
-  printf 'HELD — full pg lane not green on the tree to push (exit: %s); evidence: %s. Nothing pushed.\n' \
-    "$PG_EXIT" "$PG_EVIDENCE.log"
-  exit 1  # never push main past a red, missing or stale full pg lane (LUCY-w6fpi)
+  printf 'HELD — tier gates not green on the tree to push (%s); evidence: %s. Nothing pushed.\n' \
+    "${GATES_RED:-stale tree}" "$EVIDENCE_DIR"
+  exit 1  # never push main past a red, missing or stale gate (LUCY-w6fpi, LUCY-z3ykz.2)
 fi
 git -C "$SCRATCH" push origin "$PG_TREE_SHA:main"
 ~~~
+
+Cite `$TIER_JSON` (tier, reasons, gate list) in the final report for every push.
 
 Then run the B-1 close and B-2 blocks below once per `GREEN_PENDING` entry, with that
 entry's `BEAD_ID` and `MERGE_SHA`.
 
 Missing/malformed exit, a dead pid without an exit file, or any nonzero exit pushes
-nothing. Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
+nothing. The rest of this paragraph applies to every full-tier gate ("lane" = gate). Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
 a pass and never a reason to run the lane without the lock. Infra-shaped red (exit
 3/134/137, Docker/Colima or container start errors, killed) reruns once with separate
 retry evidence, then HOLDs the whole batch as **pg-lane-infra**. A red assertion
 isolates the culprit: reset the scratch to `$BASE_SHA` and replay `GREEN_PENDING` one
 candidate at a time as a push-rejected replay does (new `LAND_ATTEMPT`, every Step 2
-gate with fresh evidence), running this full pg lane before each single-candidate push.
+gate with fresh evidence), running the tiered push gate (re-planned on that single
+candidate's tree) before each single-candidate push.
 A candidate whose lane is red is reset to `$MERGE_SHA^`, held as **pg-lane-red** with
 both lanes' evidence, and goes through the kickback steps above (its pre-merge tree's
 lane is the baseline). The others push one at a time.
@@ -911,8 +949,8 @@ RECONCILE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 ~~~
 
 Rerun the scoped gates against the reconciled names, then run the final
-**check-only** ratchet pinned to that captured commit, then the full pg lane block
-from the ordinary loop on this exact tree (red HOLDs the whole transaction, no push;
+**check-only** ratchet pinned to that captured commit, then the risk-tiered push gate
+block from the ordinary loop on this exact tree (red HOLDs the whole transaction, no push;
 LUCY-w6fpi), before the one normal
 non-force fast-forward push:
 
@@ -1089,7 +1127,8 @@ turn. Empty ledger means report/release; do not deploy.
 
 ### Step 4 — Fresh scratch and detached full Jest
 
-Create fresh scratch at current origin/main. Run
+Create fresh scratch at current origin/main and link its node_modules
+(`tier_gates.py link-node-modules`, as in Step 2). Run
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` and `npm run lint`
 with full evidence. Run full Jest **once**, detached so V8 heap OOM kills the subprocess,
 not Claude's Node process:
@@ -1172,6 +1211,7 @@ every command below runs inside an isolated worktree, never bare against
 ~~~bash
 FIX_SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-fix$ITERATION"
 git -C "$REPO" worktree add "$FIX_SCRATCH" origin/main
+python3 ~/.claude/skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$FIX_SCRATCH" --repo "$REPO"
 ~~~
 
 For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files;
