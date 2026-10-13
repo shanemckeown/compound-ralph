@@ -217,7 +217,9 @@ section) without disturbing the session.
 
 ### Phase 4 — QA (adversarial) — per-child fault isolation, escalated for sensitive paths
 
-Unlike `/goal`'s single end-of-bundle QA pass, run QA **after each child's commit**, against that child's diff plus everything already landed on the branch so far (`git diff origin/main...HEAD`) — catching cross-child interaction issues as they accumulate, not just at the very end. This costs more Codex calls than `/goal`'s bundle mode; that's the right trade for an unattended run, since a bad interaction caught at child 12 instead of child 4 is much more expensive to unwind.
+🔴 **One review per branch, not per child (LUCY-z3ykz.3, Shane 12 Oct "yes to everything").** The epic is one feature on one branch; each child is a commit. After every standard child is committed (each with its own tsc/lint and targeted tests, Phase 3), run **one** adversarial review over the whole branch diff (`git diff origin/main...HEAD`) before the single `/ship` push. The brief lists each child's id, commit SHA and acceptance criteria, and the verdict must give a per-child PASS/NEEDS_CHANGES so a finding still isolates to the child that caused it (12 Oct: per-change reviews ran every gate 3x for one feature). Reviewers run targeted tests only (`~/.claude/scripts/targeted-tests.py`); the heavy set (full pg lane, `test:cloudbuild`) runs once at landing when the batch's risk tier is full.
+
+**Exception — sensitive-path and migration children keep their own dual-model pass**, run right after that child's commit as before, so a money/auth/migration change is never reviewed only as one hunk of a large diff.
 
 **Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 
@@ -352,7 +354,7 @@ failed: epic <EPIC_ID> — 0 eligible children (all excluded at 0e, see notes). 
 | Total bundle diff > 2000 LOC | Refuse whole run | Soft ceiling raised to 8000 LOC, still a hard stop past that |
 | Missing acceptance criteria / file refs on a child | Not checked | New: exclude that child, continue (0e) |
 | Taste / clinical judgment fork | Not addressed | **New: resolved via Shane Decision Frame in planning, logged as a `Judgment call:`, never blocks (0f)** |
-| QA pass timing | Once, end of bundle | Per child, as it lands |
+| QA pass timing | Once, end of bundle | **Once over the branch diff before push, with a per-child verdict (LUCY-z3ykz.3); sensitive-path/migration children also get their own dual-model pass as they land** |
 | QA reviewer(s) | Codex only | **Codex only for standard children; Codex + GLM (blind, both must pass) for sensitive-path/migration children** |
 | One child un-QA-clean after 3 rounds | Whole bundle `needs input:` | That child (+ dependents) excluded; rest of run continues |
 | Merge to main / deploy anywhere | Never | Never — unchanged, non-negotiable |

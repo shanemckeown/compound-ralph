@@ -91,6 +91,8 @@ codex exec resume <session-id> "continue; finish the verdict" </dev/null
 
 Take the session ID from the output. Never start a fresh session. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
+**Tests reviewers run: targeted only (LUCY-z3ykz.3).** To check a claim, run `python3 ~/.claude/scripts/targeted-tests.py` (related suites, by exact path) or a single named test file. Never run the full pg lane (the whole `pg-tests` project) or the Cloud Build simulation (`scripts/ci/simulate-cloudbuild-test.sh`): the heavy set runs once per landing batch, chosen by risk tier, on the combined tree. A scratch pg test of one SQL path (Step 2) is a single file, not the lane.
+
 **Step 2: fresh-context Opus head-to-head (money, patient data or tenancy beads only).** Run a separate fresh-context Opus agent with the same brief. It must trace code paths from each entry point to the write, run a scratch pg test against the real schema where SQL decides the outcome, and run mutations. The two reviewers must not see each other's output until both have finished.
 
 **Step 3: non-vacuous check (both reviewers).** For each new guard, revert it in a scratch worktree and confirm a test goes red. Also confirm that a control case goes green both ways.

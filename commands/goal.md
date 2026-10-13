@@ -77,6 +77,15 @@ If the bead's `bd show` output lists `CHILDREN`, this is an epic. Collect every 
 
 If no children, treat as a single bead. The rest of the validation runs on either one bead (singleton) or the full child set (bundle).
 
+🔴 **One feature = one branch (LUCY-z3ykz.3, Shane 12 Oct "yes to everything").** A bead whose
+parent is an open epic is not dispatched on its own: `fleet-dispatch.py` check 14 refuses it and
+points at `fleet-dispatch.py <epic> --epic`, so the feature builds on one branch with each child
+as a commit and one review per landing batch (12 Oct: 14 beads for one feature ran every gate 3x
+per change; a one-sentence copy edit took ~2h). **Tiny follow-ups ride along:** a copy fix or
+one-line tweak to a feature whose branch is still unlanded and whose session has finished
+(never a live session's branch) is a commit on that branch,
+not a new bead and a new branch. Note it in the branch's change note and the bead's comments.
+
 #### 0d. Extract affected paths
 
 For each bead in scope (singleton or every child), pull affected paths from:
@@ -427,8 +436,11 @@ runs only the pg files you edited (the rest is logged as deferred to landing). N
 `--selectProjects pg-tests` from `/goal`: the full pg lane runs once on the combined landing
 tree (`/land-batch`) and again in Cloud Build, serialised laptop-wide by
 `~/.claude/scripts/pg-lane-lock.py` (a second caller waits and logs). `/ship` still runs
-`npm test` (node + dom, no pg). For the Cloud Build tarball check use
-`npm run test:cloudbuild -- --step 0` (`--step 3` too when `mobile/` changed).
+`npm test` (node + dom, no pg). The Cloud Build tarball check (`test:cloudbuild` steps #0
+and #3) runs once per landing batch whenever the batch's risk tier is full
+(`~/.claude/scripts/risk_tier.py`, LUCY-z3ykz.2), so builders do not need it; run
+`npm run test:cloudbuild -- --step 0` yourself only to debug a test that reads a
+checked-in file or shells out to `git`.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
 package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /

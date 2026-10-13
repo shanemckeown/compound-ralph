@@ -30,6 +30,11 @@ Usage:
   fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
   fleet-dispatch.py <bead-id> --force --force-reason="…"  # also required to force past checks 12 and 13
 
+Check 14 (one feature = one branch, LUCY-z3ykz.3): a single /goal of a bead whose parent is an
+open epic is refused; dispatch the epic with --epic so the whole feature builds on one branch,
+each child a commit, one review per landing batch. --force past it needs a P0 bead and a
+--force-reason.
+
 --force NEVER overrides the resource checks 6–9 (disk, worktrees, resident sessions, memory):
 the 7 Oct 2026 laptop crash came at 11 resident sessions after sessions were forced past them.
 
@@ -195,10 +200,31 @@ def check_dependencies(bead):
 
 def check_epic_has_children(bead):
     """Check 3: /long-goal hard-refuses a childless epic. Verify before calling it ready."""
-    code, out, _ = sh(f"bd list --parent {bead}", cwd=REPO)
+    # bead=bead: without it BEADS_DIR is the code repo and every LUCY-* epic looks childless.
+    code, out, _ = sh(f"bd list --parent {bead}", cwd=REPO, bead=bead)
     if code != 0 or not out.strip() or "no issues" in out.lower():
         return [f"epic {bead} has NO children — /long-goal will hard-refuse it"]
     return []
+
+
+EPIC_CHILD_CHECK = "14 not a child of an open epic"
+
+
+def check_not_epic_child(bead, record, load=None):
+    """Check 14 (LUCY-z3ykz.3): a child of an open epic is built by dispatching the epic.
+    12 Oct: one feature as 14 beads, each build -> review -> land, ran every gate 3x per change."""
+    parent = (record or {}).get("parent")
+    if not parent:
+        return []
+    parent_record, err = (load or load_bead_record)(parent)
+    if err:
+        return [f"cannot verify parent {parent} — {err}"]
+    if parent_record.get("issue_type") != "epic" or parent_record.get("status") == "closed":
+        return []
+    return [f"{bead} is a child of open epic {parent}: dispatch the epic: "
+            f"fleet-dispatch.py {parent} --epic",
+            "One feature = one branch; slices are commits on it. Override only for a P0: "
+            "--force --force-reason=\"<why this child can't wait for its epic>\"."]
 
 
 FILE_PATH_RE = re.compile(r"[\w./-]+\.\w{1,5}(:\d+)?")
@@ -586,10 +612,10 @@ RESOURCE_UNFORCEABLE = ("resource checks can't be forced; free capacity first "
                         "(claude rm idle sessions, prune worktrees)")
 
 
-def force_refusal(failures, force, force_reason):
+def force_refusal(failures, force, force_reason, priority=None):
     """Resource checks 6–9 refuse even with --force (the 7 Oct crash: 11 resident sessions after
     forcing past the caps). --force past checks 11, 12 and 13 needs a written reason, recorded
-    in the manifest row."""
+    in the manifest row. --force past check 14 needs a P0 bead AND a written reason."""
     failed_resources = [c for c in RESOURCE_CHECKS if failures.get(c)]
     if failed_resources:
         return f"{', '.join(failed_resources)} failed — {RESOURCE_UNFORCEABLE}."
@@ -602,6 +628,9 @@ def force_refusal(failures, force, force_reason):
     if force and WIP_CHECK in failures and not (force_reason or "").strip():
         return ("--force past check 13 needs a written reason: re-run with "
                 "--force-reason=\"<the dated client promise this can't wait past>\".")
+    if force and EPIC_CHILD_CHECK in failures and (priority != 0 or not (force_reason or "").strip()):
+        return ("--force past check 14 is only for a P0 bead with a written reason; otherwise "
+                "dispatch the parent epic with --epic.")
     return None
 
 
@@ -1002,6 +1031,8 @@ def run_gate(bead, is_epic):
                                        if load_error else check_client_triage_tree(bead, record))
         results[PREMISE_CHECK] = ([f"cannot verify the premise — {load_error}"]
                                   if load_error else check_premise_tree(bead, record))
+        results[EPIC_CHILD_CHECK] = ([f"cannot verify the parent epic — {load_error}"]
+                                     if load_error else check_not_epic_child(bead, record))
     resource_results, resource_warnings, resource_details = check_resources()
     results.update(resource_results)
     pace_problems, pace_warning, pace_detail = check_credit_pace(bead, record)
@@ -1143,7 +1174,11 @@ def main():
                          if a.startswith("--force-reason=")), None)
 
     failed, failures = run_gate(bead, is_epic)
-    refusal = force_refusal(failures, force, force_reason)
+    priority = None
+    if force and EPIC_CHILD_CHECK in failures:
+        record, _ = load_bead_record(bead)
+        priority = (record or {}).get("priority")
+    refusal = force_refusal(failures, force, force_reason, priority)
     if refusal:
         print(f"\n🔴 REFUSED. {refusal}")
         if pre_claimed:
