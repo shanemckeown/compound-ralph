@@ -109,3 +109,67 @@ def test_cloudbuild_gate_cannot_inherit_skip_pg_tests():
     # Astra round 2: SKIP_PG_TESTS=1 in the lander's shell would drop step #2 and still exit 0.
     cmd = tg.plan(FULL)["gates"][-1]["cmd"]
     assert "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh" in cmd
+
+
+# LUCY-z3ykz.8: the push-time verdict. Independent review 13 Oct: `gates: []` with a matching
+# head passed the SKILL loop, so the push went ahead with no gate run at all.
+
+HEAD = "a" * 40
+
+
+def _green(tmp_path, tier_plan):
+    for gate in tier_plan.get("gates", []):
+        (tmp_path / f"{gate['name']}-{HEAD}.exit").write_text("0\n")
+    return tier_plan
+
+
+def _plan_file(tmp_path, tier_plan):
+    f = tmp_path / "tier.json"
+    f.write_text(json.dumps(tier_plan))
+    return f
+
+
+def test_green_plans_pass_the_push_check(tmp_path):
+    for paths in (LIGHT, FULL):
+        tier_plan = _green(tmp_path, {**tg.plan(paths), "head": HEAD})
+        assert tg.push_problems(tier_plan, HEAD, tmp_path) == []
+
+
+def test_empty_gate_list_is_refused_even_with_a_matching_head(tmp_path):
+    for tier in ("light", "full"):
+        problems = tg.push_problems({"tier": tier, "gates": [], "head": HEAD}, HEAD, tmp_path)
+        assert "gate list empty or missing" in problems
+        assert any("tsc missing" in p for p in problems)
+
+
+def test_full_tier_without_cloudbuild_is_refused(tmp_path):
+    tier_plan = _green(tmp_path, {"tier": "full", "gates": [dict(tg.TSC)], "head": HEAD})
+    assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["required gate cloudbuild-full missing from the plan"]
+
+
+def test_unknown_tier_needs_the_full_set(tmp_path):
+    tier_plan = _green(tmp_path, {"tier": "medium", "gates": [dict(tg.TSC)], "head": HEAD})
+    problems = tg.push_problems(tier_plan, HEAD, tmp_path)
+    assert any("unknown tier" in p for p in problems) and any("cloudbuild-full" in p for p in problems)
+
+
+def test_stale_head_and_missing_or_red_exit_files_are_refused(tmp_path):
+    tier_plan = {**tg.plan(FULL), "head": HEAD}
+    (tmp_path / f"tsc-{HEAD}.exit").write_text("2\n")
+    problems = tg.push_problems(tier_plan, HEAD, tmp_path)
+    assert problems == ["tsc:2", "cloudbuild-full:missing"]
+    assert any("not the tree to push" in p for p in tg.push_problems(_green(tmp_path, tier_plan), "b" * 40, tmp_path))
+
+
+def test_check_cli_exit_codes(tmp_path):
+    def check(tier_plan):
+        return subprocess.run([sys.executable, str(SCRIPT), "check", "--plan", str(_plan_file(tmp_path, tier_plan)),
+                               "--head", HEAD, "--evidence-dir", str(tmp_path)], capture_output=True, text=True)
+    empty = check({"tier": "light", "gates": [], "head": HEAD})
+    assert empty.returncode == 1 and "gate list empty" in empty.stdout
+    green = check(_green(tmp_path, {**tg.plan(LIGHT), "head": HEAD}))
+    assert (green.returncode, green.stdout) == (0, "")
+    (tmp_path / "tier.json").write_text("not json")
+    unreadable = subprocess.run([sys.executable, str(SCRIPT), "check", "--plan", str(tmp_path / "tier.json"),
+                                 "--head", HEAD, "--evidence-dir", str(tmp_path)], capture_output=True, text=True)
+    assert unreadable.returncode == 1 and "unreadable" in unreadable.stdout

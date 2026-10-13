@@ -3,6 +3,7 @@
 
     tier_gates.py plan --scratch DIR --base SHA --out FILE.json
     tier_gates.py link-node-modules --scratch DIR --repo REPO
+    tier_gates.py check --plan FILE.json --head SHA --evidence-dir DIR   # push-time verdict
 
 `plan` diffs the combined batch tree (the scratch HEAD with every green merge) against the
 pinned base, classifies it with ~/.claude/scripts/risk_tier.py, and writes the tier, its
@@ -61,6 +62,38 @@ def plan(paths, repo=None):
     return {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths)}
 
 
+def push_problems(tier_plan, head, evidence_dir):
+    """Why a push of ``head`` must be held; [] only when every required gate ran green on it.
+
+    LUCY-z3ykz.8: a plan with a matching head and ``gates: []`` used to pass the SKILL loop
+    (nothing to check, so nothing red). The minimum is enforced here, not trusted from the file:
+    tsc always, and the Cloud Build simulation whenever the tier is full (or unknown).
+    """
+    if not isinstance(tier_plan, dict):
+        return ["tier plan unreadable"]
+    problems = []
+    tier = tier_plan.get("tier")
+    if tier not in ("light", "full"):
+        problems.append(f"unknown tier {tier!r} (treated as full)")
+    gates = tier_plan.get("gates")
+    if not isinstance(gates, list) or not gates:
+        problems.append("gate list empty or missing")
+        gates = []
+    names = [g.get("name") for g in gates if isinstance(g, dict)]
+    required = [TSC["name"]] + ([] if tier == "light" else [CLOUDBUILD["name"]])
+    problems += [f"required gate {name} missing from the plan" for name in required if name not in names]
+    if not head or tier_plan.get("head") != head:
+        problems.append(f"plan head {tier_plan.get('head')!r} is not the tree to push {head!r}")
+    for name in names:
+        try:
+            code = (Path(evidence_dir) / f"{name}-{head}.exit").read_text().strip()
+        except OSError:
+            code = "missing"
+        if code != "0":
+            problems.append(f"{name}:{code}")
+    return problems
+
+
 def link_node_modules(scratch, repo):
     """Make scratch/node_modules point at repo/node_modules. Returns the link path."""
     link = Path(scratch) / "node_modules"
@@ -79,11 +112,24 @@ def main(argv=None):
     n = sub.add_parser("link-node-modules")
     n.add_argument("--scratch", required=True)
     n.add_argument("--repo", required=True)
+    c = sub.add_parser("check", help="exit 0 only if every required gate is green on --head")
+    c.add_argument("--plan", required=True)
+    c.add_argument("--head", required=True)
+    c.add_argument("--evidence-dir", required=True)
     args = ap.parse_args(argv)
 
     if args.cmd == "link-node-modules":
         print(link_node_modules(args.scratch, args.repo))
         return 0
+    if args.cmd == "check":
+        try:
+            tier_plan = json.loads(Path(args.plan).read_text())
+        except (OSError, ValueError):
+            tier_plan = None
+        problems = push_problems(tier_plan, args.head, args.evidence_dir)
+        for problem in problems:
+            print(problem)
+        return 1 if problems else 0
     result = plan(risk_tier.diff_paths(args.scratch, args.base), args.scratch)
     result["base"] = args.base
     result["head"] = subprocess.run(["git", "-C", args.scratch, "rev-parse", "HEAD"],

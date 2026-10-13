@@ -187,8 +187,10 @@ way (a P0 lander behind it, or Shane says stop) yields with
 it removes only that run's own ticket, logs it to `withdrawals.jsonl`, and marks the run
 withdrawn so its detached admission worker cannot re-queue or acquire (that worker exits 4
 with an empty `admission.json`). If the result says `"lock_held": true`, the run was
-admitted at the same instant: run `land-state.py release --run-id "$RUN_ID"`. Never `rm`
-a QUEUE.d ticket by hand; the lock holder releases instead.
+admitted at the same instant: run `land-state.py release --run-id "$RUN_ID"`. The worker's
+own back-out may release too; that is safe: release removes LOCK.d only while this run holds
+it, atomically, and a second release is a no-op (exit 0, `{"released":false}`). Never `rm`
+a QUEUE.d ticket or LOCK.d by hand; the lock holder releases instead.
 
 For a non-dry run, create a stable run/evidence identity and acquire admission.
 Dry-run runs read-only discovery/plan first and skips this admission step. The
@@ -747,13 +749,14 @@ nonzero gate stops the sequence: later gates do not run. Only this is green, and
 then push, exactly the tree that was classified and tested:
 
 ~~~bash
-GATES_RED=""
-for name in $(jq -r '.gates[].name' "$TIER_JSON"); do
-  code="$(cat "$EVIDENCE_DIR/$name-$PG_TREE_SHA.exit" 2>/dev/null || echo missing)"
-  [ "$code" = 0 ] || GATES_RED="$GATES_RED $name:$code"
-done
-if [ -z "${PG_TREE_SHA:-}" ] || [ -n "$GATES_RED" ] \
-  || [ "$(jq -r .head "$TIER_JSON")" != "$PG_TREE_SHA" ] \
+# The script, not this loop, decides: an empty gate list, a missing tsc, a full tier without
+# cloudbuild-full, a stale head or any missing/nonzero exit file all hold (LUCY-z3ykz.8).
+python3 ~/.claude/skills/land-batch/bin/tier_gates.py check \
+  --plan "$TIER_JSON" --head "${PG_TREE_SHA:-}" --evidence-dir "$EVIDENCE_DIR" \
+  > "$EVIDENCE_DIR/push-check-${PG_TREE_SHA:-none}.txt"
+GATES_EXIT=$?
+GATES_RED="$(tr '\n' ' ' < "$EVIDENCE_DIR/push-check-${PG_TREE_SHA:-none}.txt")"
+if [ -z "${PG_TREE_SHA:-}" ] || [ "$GATES_EXIT" != 0 ] \
   || [ "$(git -C "$SCRATCH" rev-parse HEAD)" != "$PG_TREE_SHA" ]; then
   printf 'HELD — tier gates not green on the tree to push (%s); evidence: %s. Nothing pushed.\n' \
     "${GATES_RED:-stale tree}" "$EVIDENCE_DIR"

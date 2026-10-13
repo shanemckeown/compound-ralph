@@ -115,6 +115,25 @@ def test_non_patient_presentation_stays_light(path):
     assert rt.classify([path]) == ("light", [])
 
 
+@pytest.mark.parametrize("path", [
+    # LUCY-z3ykz.8, independent review 13 Oct: all three classified light before the allowlist.
+    "components/clinic/clinic-booking-flow.tsx",  # picks the tenant on public booking
+    "components/pos/quote-banner.tsx",  # checkout maths
+    "components/admin/admin-layout.tsx",  # auth hook
+    "components/brand-new-dir/Widget.tsx",  # a new dir fails closed
+    "components/Loose.tsx",  # no dir at all
+])
+def test_component_outside_presentational_allowlist_is_full(path):
+    tier, reasons = rt.classify([path])
+    assert tier == "full" and len(reasons) == 1 and "allowlist" in reasons[0]
+
+
+@pytest.mark.parametrize("path", ["components/landing/Hero.tsx", "components/blog/Post.tsx"])
+def test_allowlisted_presentation_stays_light_with_repo(tmp_path, path):
+    _component(tmp_path, path.removeprefix("components/"), "export const X = () => <h1>Hi</h1>")
+    assert rt.classify([path], repo=str(tmp_path)) == ("light", [])
+
+
 def test_patient_domain_is_full_even_when_source_looks_presentational(tmp_path):
     path = _component(tmp_path, "face-mapping/Legend.tsx", "export const L = () => <p>Key</p>")
     tier, reasons = rt.classify([path], repo=str(tmp_path))
@@ -144,9 +163,9 @@ def test_cli_diffs_a_repo_against_base(tmp_path):
     git("add", "README")
     git("commit", "-qm", "base")
     git("checkout", "-qb", "feature")
-    (tmp_path / "components").mkdir()
-    (tmp_path / "components" / "Hero.tsx").write_text("export {}")
-    git("add", "components/Hero.tsx")
+    (tmp_path / "components" / "ui").mkdir(parents=True)
+    (tmp_path / "components" / "ui" / "Hero.tsx").write_text("export {}")
+    git("add", "components/ui/Hero.tsx")
     git("commit", "-qm", "ui")
     out = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(tmp_path), "--base", "main"],
                          capture_output=True, text=True, check=True).stdout
@@ -165,11 +184,16 @@ def _component(tmp_path, name, body):
     "const m = useMutation({mutationFn: save})",
     "import { createIntent } from '@/lib/payments/terminal'",
     "apiClient.post(url, body)",
+    # .8: tenancy / session reach.
+    "const { businessId } = useActiveClinic()",
+    "const s = useSession()",
+    "import { useUploadQueue } from '@/hooks/use-upload-queue'",
 ])
 def test_component_that_writes_data_is_full_when_repo_given(tmp_path, body):
     # Astra round 2: mobile-terminal-bridge.tsx (payment intents), CommunicationPreferences.tsx
-    # (marketing consent) had innocent names.
-    path = _component(tmp_path, "terminal/bridge.tsx", f"export function B() {{ {body} }}")
+    # (marketing consent) had innocent names. Since .8 only an allowlisted dir can be light at
+    # all, so the source rule is exercised there.
+    path = _component(tmp_path, "ui/bridge.tsx", f"export function B() {{ {body} }}")
     tier, reasons = rt.classify([path], repo=str(tmp_path))
     assert tier == "full" and "writes data" in reasons[0]
     assert rt.classify([path]) == ("light", [])  # stdin mode: path rules only

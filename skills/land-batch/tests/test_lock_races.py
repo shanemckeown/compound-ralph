@@ -1,0 +1,182 @@
+"""Lock and queue races from the z3ykz independent review (LUCY-z3ykz.8).
+
+Each test forces the interleaving the review reproduced and fails on the code at b7e58fa.
+Run: uvx pytest skills/land-batch/tests/test_lock_races.py -q
+"""
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent.parent / "bin"
+_spec = importlib.util.spec_from_file_location("land_state_races", BIN / "land-state.py")
+land_state = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(land_state)
+
+
+def _identity(run_id):
+    return {"run_id": run_id, "mode": "land", "claude_pid": os.getpid(),
+            "pid_start_time": land_state.pid_start_time(os.getpid())}
+
+
+def _holder_run(state_dir):
+    record = land_state.holder_record(state_dir)
+    return record.get("run_id") if isinstance(record, dict) else None
+
+
+# P1-a: release atomicity -------------------------------------------------------------------
+
+def test_second_release_is_a_noop_and_never_touches_a_successor(tmp_path):
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-a"))["acquired"] is True
+    assert land_state.release_lock(tmp_path, "run-a") is True
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-b"))["acquired"] is True
+    assert land_state.release_lock(tmp_path, "run-a") is False
+    assert _holder_run(tmp_path) == "run-b"
+
+
+def test_two_releasers_of_one_run_cannot_delete_the_successors_lock(tmp_path, monkeypatch):
+    # The review's P1: releaser 2 reads holder=A; meanwhile releaser 1 removes A's lock and B
+    # acquires; releaser 2 then rmtree'd B's live LOCK.d. Releaser 1 + B run on a thread that
+    # starts at releaser 2's holder read; we give it a second to finish.
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-a"))["acquired"] is True
+    real = land_state.holder_record
+    main = threading.current_thread()
+    results = {}
+
+    def other_releaser_then_successor():
+        results["release_1"] = land_state.release_lock(tmp_path, "run-a")
+        results["b"] = land_state.try_acquire_lock(tmp_path, _identity("run-b"))
+
+    worker = threading.Thread(target=other_releaser_then_successor)
+
+    def holder_record(state_dir=None):
+        record = real(state_dir)
+        if threading.current_thread() is main and not worker.is_alive() and "started" not in results:
+            results["started"] = True
+            worker.start()
+            worker.join(timeout=1.0)
+        return record
+
+    monkeypatch.setattr(land_state, "holder_record", holder_record)
+    release_2 = land_state.release_lock(tmp_path, "run-a")
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert [release_2, results["release_1"]].count(True) == 1  # exactly one releaser released
+    assert results["b"]["acquired"] is True
+    assert _holder_run(tmp_path) == "run-b"  # B's lock survived the second release
+
+
+def test_release_cli_is_idempotent_exit_zero(tmp_path):
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-cli"))["acquired"] is True
+    cmd = [sys.executable, str(BIN / "land-state.py"), "--state-dir", str(tmp_path), "release", "--run-id", "run-cli"]
+    first = subprocess.run(cmd, capture_output=True, text=True)
+    second = subprocess.run(cmd, capture_output=True, text=True)
+    assert (first.returncode, json.loads(first.stdout)) == (0, {"released": True})
+    assert (second.returncode, json.loads(second.stdout)) == (0, {"released": False})
+
+
+# P1-b: a holder-less LOCK.d is an acquirer mid-write, not a crash -------------------------
+
+def test_holderless_lock_is_not_stolen_from_a_live_acquirer(tmp_path, monkeypatch):
+    # The review's P1: B's recover_stale_lock read A's fresh holder-less LOCK.d as dead, removed
+    # it and acquired; A then wrote holder.json into B's dir and both returned acquired=True.
+    real_write = land_state.atomic_write_json
+    seen = {}
+
+    def write(path, value):
+        if Path(path).name == "holder.json" and value.get("run_id") == "run-a" and "b" not in seen:
+            seen["b"] = land_state.try_acquire_lock(tmp_path, _identity("run-b"))
+        real_write(path, value)
+
+    monkeypatch.setattr(land_state, "atomic_write_json", write)
+    a = land_state.try_acquire_lock(tmp_path, _identity("run-a"))
+    assert [a["acquired"], seen["b"]["acquired"]] == [True, False]
+    assert _holder_run(tmp_path) == "run-a"
+
+
+def test_concurrent_acquirers_with_a_slow_holder_write_admit_exactly_one(tmp_path, monkeypatch):
+    real_write = land_state.atomic_write_json
+
+    def slow_holder(path, value):
+        if Path(path).name == "holder.json" and Path(path).parent.name == "LOCK.d":
+            time.sleep(0.3)
+        real_write(path, value)
+
+    monkeypatch.setattr(land_state, "atomic_write_json", slow_holder)
+    start = threading.Barrier(6)
+    outcomes = []
+
+    def contend(n):
+        start.wait()
+        for _ in range(10):  # keep trying through the slow write window
+            outcomes.append(land_state.try_acquire_lock(tmp_path, _identity(f"run-{n}")))
+            time.sleep(0.05)
+
+    threads = [threading.Thread(target=contend, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    winners = [o["holder"]["run_id"] for o in outcomes if o["acquired"]]
+    assert len(winners) == 1, winners
+    assert _holder_run(tmp_path) == winners[0]
+
+
+def test_holderless_lock_past_the_grace_is_recovered(tmp_path):
+    (tmp_path / "LOCK.d").mkdir(parents=True)  # a crash between mkdir and the holder write
+    old = time.time() - land_state.HOLDERLESS_GRACE_SECONDS - 5
+    os.utime(tmp_path / "LOCK.d", (old, old))
+    got = land_state.try_acquire_lock(tmp_path, _identity("run-heal"))
+    assert got["acquired"] is True and got["takeover"]["liveness"]["state"] == "invalid"
+
+
+def test_holderless_lock_inside_the_grace_is_held(tmp_path):
+    (tmp_path / "LOCK.d").mkdir(parents=True)
+    got = land_state.try_acquire_lock(tmp_path, _identity("run-wait"))
+    assert got["acquired"] is False and got["reason"] == "held"
+    assert (tmp_path / "LOCK.d").is_dir()
+
+
+# P2-a: register_ticket after withdraw -----------------------------------------------------
+
+def _withdraw_after_first_check(monkeypatch, state_dir, run_id):
+    real = land_state.is_withdrawn
+    calls = {"n": 0}
+
+    def racing(p, rid):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the unlocked pre-check passes; withdraw lands right after it
+            assert land_state.withdraw_ticket(state_dir, run_id, run_id)["withdrawn"] is True
+            return False
+        return real(p, rid)
+
+    monkeypatch.setattr(land_state, "is_withdrawn", racing)
+
+
+def test_register_ticket_never_recreates_a_withdrawn_ticket(tmp_path, monkeypatch):
+    identity = _identity("run-w")
+    land_state.register_ticket(tmp_path, identity)
+    _withdraw_after_first_check(monkeypatch, tmp_path, "run-w")
+    assert land_state.register_ticket(tmp_path, identity) == {"run_id": "run-w", "withdrawn": True}
+    assert list((tmp_path / "QUEUE.d").glob("*run-w.json")) == []
+
+
+def test_wait_for_turn_exits_withdrawn_without_leaving_a_ticket(tmp_path, monkeypatch):
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-holder"))["acquired"] is True
+    identity = _identity("run-w2")
+    land_state.register_ticket(tmp_path, identity)
+    real_register = land_state.register_ticket
+
+    def register(state_dir, ident):
+        _withdraw_after_first_check(monkeypatch, tmp_path, ident["run_id"])
+        return real_register(state_dir, ident)
+
+    monkeypatch.setattr(land_state, "register_ticket", register)
+    got = land_state.wait_for_turn(tmp_path, identity, poll_min=0, poll_max=0, sleep=lambda _: None)
+    assert got == {"acquired": False, "reason": "withdrawn"}
+    assert list((tmp_path / "QUEUE.d").glob("*run-w2.json")) == []
+    assert _holder_run(tmp_path) == "run-holder"

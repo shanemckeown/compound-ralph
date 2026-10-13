@@ -25,9 +25,16 @@ import sys
 from pathlib import Path
 
 # UI / styling / copy, plus the test trees that cover them. Under components/ only
-# presentation files count: a components/**/*.ts helper is logic (upload-helper.ts uploads
-# patient photos), so it is full.
+# presentation files in an allowlisted presentational dir count: a components/**/*.ts helper
+# is logic (upload-helper.ts uploads patient photos), so it is full.
 COMPONENT_PREFIX = "components/"
+# LUCY-z3ykz.8: components/ fails closed. Only these dirs may be light; every other
+# components/<dir>/, including any new one, is full (independent review 13 Oct:
+# clinic/clinic-booking-flow.tsx picks the tenant, pos/quote-banner.tsx does checkout maths,
+# admin/admin-layout.tsx is an auth hook, and all three classified light by default).
+PRESENTATIONAL_COMPONENT_DIRS = tuple(f"components/{d}/" for d in (
+    "ui", "layout", "landing", "blog", "help", "docs", "mdx", "academy", "navigation",
+))
 COMPONENT_LIGHT_SUFFIXES = (".tsx", ".jsx", ".css", ".scss", ".mdx", ".md", ".svg")
 LIGHT_PREFIXES = (
     "styles/",
@@ -53,6 +60,8 @@ NEUTRAL_EXACT = {"CHANGELOG.md", "VERSION", "tests/meta/file-length-baseline.jso
 WRITES_DATA = re.compile(
     r"fetch\(|useMutation|axios|mutate\(|apiClient|['\"`]/api/"
     r"|@/lib/(?:payments|stripe|services|auth|db)\b"
+    # .8: tenancy and session reach (clinic-switcher.tsx, impersonation-banner.tsx in layout/).
+    r"|businessId|tenantId|useAuth|useSession|@/hooks/"
 )
 
 # Any path naming one of these is full, even under components/ (components/payments/X.tsx).
@@ -95,8 +104,8 @@ PATIENT_DOMAINS = (
     "components/content/",  # BALibrary.tsx groups patient before/after photos by client
     "components/reviews/",  # ClientFeedbackList.tsx lists each client's feedback
 )
-# Not listed: leads/ (prospects, not patients), audio/ (no consumers). Landing, blog, ui
-# and help stay light.
+# Since .8 the allowlist above already makes all of these full; the list stays so the
+# reason names the patient domain.
 
 
 def component_source_reason(path, repo):
@@ -118,6 +127,8 @@ def path_reason(path, repo=None):
     if path.startswith(PATIENT_DOMAINS):
         return f"{path}: patient-data domain ({path.split('/')[1]})"
     if path.startswith(COMPONENT_PREFIX):
+        if not path.startswith(PRESENTATIONAL_COMPONENT_DIRS):
+            return f"{path}: component dir not on the presentational allowlist (default full)"
         if path.endswith(COMPONENT_LIGHT_SUFFIXES):
             return component_source_reason(path, repo) if repo and path.endswith((".tsx", ".jsx")) else None
         return f"{path}: component logic, not presentation (default full)"

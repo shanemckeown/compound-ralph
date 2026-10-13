@@ -28,6 +28,10 @@ from land_batch_safety import SENSITIVE_PREFIXES, sensitive_paths as configured_
 
 POLL_MIN_SECONDS = 120
 POLL_MAX_SECONDS = 180
+# A lock dir with no holder.json yet is an acquirer between mkdir and its holder write, not a
+# crash, until it is this old by mtime (LUCY-z3ykz.8: a fresh LOCK.d read as dead and was
+# stolen, so two landers both got acquired=True). After it, a crashed acquirer is healed.
+HOLDERLESS_GRACE_SECONDS = 30.0
 
 
 def utc_now() -> str:
@@ -221,12 +225,23 @@ def _remove_directory(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _initialising(path: Path) -> bool:
+    """True while a holder-less lock dir is young enough to be a live acquirer mid-write."""
+    try:
+        return time.time() - path.stat().st_mtime < HOLDERLESS_GRACE_SECONDS
+    except FileNotFoundError:
+        return False
+
+
 def _acquire_counter_lock(p: dict[str, Path], sleep: Callable[[float], None] = time.sleep) -> None:
     while True:
         try:
             p["counter_lock"].mkdir(mode=0o700)
         except FileExistsError:
             owner = read_json(p["counter_lock"] / "holder.json", default=None)
+            if owner is None and _initialising(p["counter_lock"]):
+                sleep(random.uniform(0.05, 0.20))
+                continue
             if owner is None or not liveness(owner)["alive"]:
                 _remove_directory(p["counter_lock"])
                 continue
@@ -277,6 +292,11 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
         for entry in queue_entries(p["root"]):
             if entry.get("run_id") == run_id and entry.get("liveness", {}).get("alive"):
                 return entry
+        # Re-check under the lock (LUCY-z3ykz.8): withdraw marks BEFORE it unlinks, so a ticket
+        # missing from the scan above means any withdrawal of it is already visible here.
+        # Without this a withdrawn run recreated its ticket and blocked FIFO while alive.
+        if is_withdrawn(p, run_id):
+            return {"run_id": run_id, "withdrawn": True}
         order = _write_counter_locked(p)
         ticket = {
             "run_id": run_id,
@@ -778,6 +798,8 @@ def _acquire_recovery_lock(p: dict[str, Path]) -> bool:
         p["recovery_lock"].mkdir(mode=0o700)
     except FileExistsError:
         owner = read_json(p["recovery_lock"] / "holder.json", default=None)
+        if owner is None and _initialising(p["recovery_lock"]):
+            return False
         if owner is None or not liveness(owner)["alive"]:
             _remove_directory(p["recovery_lock"])
             return _acquire_recovery_lock(p)
@@ -786,6 +808,46 @@ def _acquire_recovery_lock(p: dict[str, Path]) -> bool:
         p["recovery_lock"] / "holder.json",
         {"claude_pid": os.getpid(), "pid_start_time": pid_start_time(os.getpid()), "started_at": utc_now()},
     )
+    return True
+
+
+def _wait_for_recovery_lock(p: dict[str, Path], sleep: Callable[[float], None] = time.sleep) -> None:
+    """Block until RECOVERY-LOCK.d is ours. Its owner is judged by liveness, so a dead one clears."""
+    while not _acquire_recovery_lock(p):
+        sleep(random.uniform(0.05, 0.20))
+
+
+def _log_lock_anomaly(p: dict[str, Path], entry: dict[str, Any]) -> None:
+    entry = {"at": utc_now(), **entry}
+    with open(p["root"] / "lock-anomalies.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
+
+
+def _retire_lock_dir(p: dict[str, Path], expected_holder: Any) -> bool:
+    """Remove LOCK.d iff it still carries ``expected_holder``. Caller holds RECOVERY-LOCK.d.
+
+    LOCK.d is renamed to a unique tombstone first, so it vanishes in one step and the slow
+    rmtree can never reach a successor's LOCK.d. The holder is re-read from the tombstone; on
+    a mismatch the dir goes back (or, if a new LOCK.d already exists, stays aside and is logged).
+    """
+    tombstone = p["root"] / f"LOCK.released.{os.getpid()}.{time.time_ns()}"
+    try:
+        os.rename(p["lock"], tombstone)
+    except FileNotFoundError:
+        return False
+    found = read_json(tombstone / "holder.json", default=None)
+    if found != expected_holder:
+        restored = False
+        if not p["lock"].exists():
+            try:
+                os.rename(tombstone, p["lock"])
+                restored = True
+            except OSError:
+                pass
+        _log_lock_anomaly(p, {"event": "retire-mismatch", "expected": expected_holder, "found": found,
+                              "restored": restored, "tombstone": None if restored else str(tombstone)})
+        return False
+    shutil.rmtree(tombstone, ignore_errors=True)
     return True
 
 
@@ -798,6 +860,8 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
         return None
     try:
         holder = read_json(p["holder"], default=None)
+        if not isinstance(holder, dict) and _initialising(p["lock"]):
+            return None  # an acquirer between mkdir and its holder write (LUCY-z3ykz.8)
         status = liveness(holder) if isinstance(holder, dict) else {"state": "invalid", "alive": False}
         if status["alive"]:
             return None
@@ -807,8 +871,9 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
             "dead_run": _orphan_forensics(holder if isinstance(holder, dict) else None, repo),
         }
         takeover["cleanup"] = _cleanup_orphan_worktree(holder if isinstance(holder, dict) else None, repo)
+        if not _retire_lock_dir(p, holder):
+            return None  # it changed under us: not the dead lock we judged
         record_takeover(p["root"], takeover)
-        _remove_directory(p["lock"])
         return takeover
     finally:
         _remove_directory(p["recovery_lock"])
@@ -887,9 +952,14 @@ def wait_for_turn(
     p = ensure_state_dir(state_dir)
     while True:
         outcome = try_acquire_lock(p["root"], identity, repo=repo)
-        if outcome["acquired"] or outcome.get("reason") == "withdrawn":
+        if outcome["acquired"]:
             return outcome
-        register_ticket(p["root"], identity)
+        if outcome.get("reason") == "withdrawn" or register_ticket(p["root"], identity).get("withdrawn"):
+            # Never leave a live-PID ticket behind a withdrawn run: it would block FIFO.
+            own = _own_ticket_path(p, identity["run_id"])
+            if own:
+                own.unlink(missing_ok=True)
+            return {"acquired": False, "reason": "withdrawn"}
         sleep(random.uniform(poll_min, poll_max))
 
 
@@ -908,12 +978,25 @@ def heartbeat(state_dir: Path | None, run_id: str, stage: str, **updates: Any) -
 
 
 def release_lock(state_dir: Path | None, run_id: str) -> bool:
+    """Drop LOCK.d only if ``run_id`` holds it. True if this call released it.
+
+    Withdraw makes two releasers of one run normal (the caller on lock_held, the worker's
+    back-out). Both used to read holder=R and then rmtree, so the second could delete a
+    successor's live lock (LUCY-z3ykz.8). Now the holder check and the removal run under
+    RECOVERY-LOCK.d, which every LOCK.d removal takes, so nothing can swap LOCK.d between
+    them; a second release finds no lock of its own and is a no-op.
+    """
     p = paths(state_dir)
-    holder = holder_record(p["root"])
-    if not holder or holder.get("run_id") != run_id:
+    if not p["lock"].is_dir():
         return False
-    _remove_directory(p["lock"])
-    return True
+    _wait_for_recovery_lock(p)
+    try:
+        holder = holder_record(p["root"])
+        if not isinstance(holder, dict) or holder.get("run_id") != run_id:
+            return False
+        return _retire_lock_dir(p, holder)
+    finally:
+        _remove_directory(p["recovery_lock"])
 
 
 def archive_ledger_after_prod(state_dir: Path | None, evidence_dir: Path, prod_sha: str) -> dict[str, Any]:
@@ -1115,7 +1198,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, separators=(",", ":")))
         return 0
     if args.command == "release":
-        return 0 if release_lock(state_dir, args.run_id) else 1
+        # Idempotent (LUCY-z3ykz.8): a run holding nothing has nothing to release. Exit 0 either
+        # way; stdout says whether this call released.
+        print(json.dumps({"released": release_lock(state_dir, args.run_id)}, separators=(",", ":")))
+        return 0
     if args.command == "withdraw":
         result = withdraw_ticket(state_dir, args.ticket, args.run_id)
         print(json.dumps(result, separators=(",", ":")))
