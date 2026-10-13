@@ -4,7 +4,8 @@
      NOT loaded. The Manager enables it after the deploy:
        cp ~/.claude/launchd/com.aestheticc.land-train.plist ~/Library/LaunchAgents/
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aestheticc.land-train.plist
-     Times are the laptop's local clock (Europe/London); keep them equal to TRAINS.json. -->
+     Runs every 15 min; trains.py announces once per train per day using TRAINS.json's
+     own timezone, so a changed laptop clock never moves the trains. -->
 <plist version="1.0">
 <dict>
     <key>Label</key><string>com.aestheticc.land-train</string>
@@ -14,11 +15,7 @@
         <string>/Users/shane/.claude/skills/land-batch/bin/trains.py</string>
         <string>announce</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>31</integer></dict>
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>31</integer></dict>
-    </array>
+    <key>StartInterval</key><integer>900</integer>
     <key>RunAtLoad</key><false/>
     <key>StandardOutPath</key><string>/Users/shane/.claude/fleet/land-train.out.log</string>
     <key>StandardErrorPath</key><string>/Users/shane/.claude/fleet/land-train.err.log</string>

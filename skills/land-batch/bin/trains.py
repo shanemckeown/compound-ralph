@@ -78,17 +78,27 @@ def check(config, now, land_now=False, reason=None):
             "next_opens": opens.isoformat() if opens else None}
 
 
-def announce(config, now):
+def announce(config, now, log=LOG):
+    """Relay once per train per London day. launchd runs this every 15 min, so the schedule
+    follows TRAINS.json's timezone, not the laptop's clock (travel, a changed system zone)."""
     train = current_train(config, now)
     if not train:
         return 0
+    key = f"{now.astimezone(ZoneInfo(config['timezone'])).date()} train={train}"
+    try:
+        if any(line.split(" ", 1)[-1].startswith(key) for line in Path(log).read_text().splitlines()):
+            return 0
+    except OSError:
+        pass
     message = (f"Land train '{train}' is open: run /land-batch now for the finished branches "
                f"queued since the last train (LUCY-z3ykz.4).")
     code = subprocess.run([str(RELAY), message], capture_output=True, text=True).returncode
+    if code != 0:
+        return code  # not logged: the next 15-min tick retries
     try:
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG, "a") as fh:
-            fh.write(f"{now.isoformat()} train={train} relay_exit={code}\n")
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a") as fh:
+            fh.write(f"{now.isoformat()} {key} relay_exit={code}\n")
     except OSError:
         pass
     return code

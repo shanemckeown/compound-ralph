@@ -53,7 +53,13 @@ def paths(state_dir: Path | None = None) -> dict[str, Path]:
         "pending_qa": root / "pending-qa.md",
         "takeovers": root / "takeovers.jsonl",
         "recovery_lock": root / "RECOVERY-LOCK.d",
+        "withdrawn": root / "WITHDRAWN.d",
     }
+
+
+def is_withdrawn(p: dict[str, Path], run_id: str) -> bool:
+    """A withdrawn run never re-queues or acquires, even from a detached wait worker."""
+    return (p["withdrawn"] / run_id).exists()
 
 
 def ensure_state_dir(state_dir: Path | None = None) -> dict[str, Path]:
@@ -259,6 +265,8 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
     p = ensure_state_dir(state_dir)
     cleanup_stale_tickets(p["root"])
     run_id = identity["run_id"]
+    if is_withdrawn(p, run_id):
+        return {"run_id": run_id, "withdrawn": True}
     for entry in queue_entries(p["root"]):
         if entry.get("run_id") == run_id and entry.get("liveness", {}).get("alive"):
             return entry
@@ -305,10 +313,13 @@ def withdraw_ticket(state_dir: Path | None, ticket: str, run_id: str) -> dict[st
         holder = holder_record(p["root"])
         if isinstance(holder, dict) and holder.get("run_id") == run_id:
             return {"withdrawn": False, "reason": "holds-lock-use-release", "ticket_file": path.name}
+        # Mark first: the run's detached wait worker may wake between unlink and mark.
+        p["withdrawn"].mkdir(mode=0o700, exist_ok=True)
+        (p["withdrawn"] / run_id).write_text(utc_now() + "\n", encoding="utf-8")
         try:
             path.unlink()
         except FileNotFoundError:
-            break
+            pass
         entry = {"withdrawn_at": utc_now(), "run_id": run_id, "ticket_file": path.name, "ticket": record}
         with open(p["root"] / "withdrawals.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
@@ -808,6 +819,8 @@ def _own_ticket_path(p: dict[str, Path], run_id: str) -> Path | None:
 def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str | None = None) -> dict[str, Any]:
     """Attempt admission. ``mkdir LOCK.d`` remains the final arbiter."""
     p = ensure_state_dir(state_dir)
+    if is_withdrawn(p, identity["run_id"]):
+        return {"acquired": False, "reason": "withdrawn"}
     takeover = recover_stale_lock(p["root"], repo=repo)
     cleanup_stale_tickets(p["root"])
     if p["lock"].is_dir():
@@ -861,7 +874,7 @@ def wait_for_turn(
     p = ensure_state_dir(state_dir)
     while True:
         outcome = try_acquire_lock(p["root"], identity, repo=repo)
-        if outcome["acquired"]:
+        if outcome["acquired"] or outcome.get("reason") == "withdrawn":
             return outcome
         register_ticket(p["root"], identity)
         sleep(random.uniform(poll_min, poll_max))
@@ -1082,6 +1095,10 @@ def main(argv: list[str] | None = None) -> int:
             poll_min=args.poll_min,
             poll_max=args.poll_max,
         )
+        if not result.get("acquired"):
+            # Withdrawn: leave stdout (admission.json) empty so it never reads as admitted.
+            print(json.dumps(result, separators=(",", ":")), file=sys.stderr)
+            return 4
         print(json.dumps(result, separators=(",", ":")))
         return 0
     if args.command == "release":

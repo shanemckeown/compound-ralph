@@ -114,3 +114,51 @@ def test_withdraw_unknown_ticket_and_cli_exit_code(tmp_path):
     out = subprocess.run([sys.executable, str(BIN / "land-state.py"), "--state-dir", str(tmp_path),
                           "withdraw", "nope", "--run-id", "run-mine"], capture_output=True, text=True)
     assert out.returncode == 1 and json.loads(out.stdout)["reason"] == "no-such-ticket"
+
+
+def test_withdrawn_run_cannot_requeue_or_acquire(tmp_path):
+    # Review round 1: the detached wait worker wakes after withdraw and re-registers.
+    identity = {"run_id": "run-mine", "mode": "land", "claude_pid": os.getpid(),
+                "pid_start_time": land_state.pid_start_time(os.getpid())}
+    land_state.register_ticket(tmp_path, identity)
+    assert land_state.withdraw_ticket(tmp_path, "run-mine", "run-mine")["withdrawn"] is True
+    assert land_state.register_ticket(tmp_path, identity).get("withdrawn") is True
+    assert land_state.queue_entries(tmp_path) == []
+    assert land_state.try_acquire_lock(tmp_path, identity) == {"acquired": False, "reason": "withdrawn"}
+    assert not (tmp_path / "LOCK.d").exists()
+    slept = []
+    result = land_state.wait_for_turn(tmp_path, identity, poll_min=0, poll_max=0, sleep=slept.append)
+    assert result["reason"] == "withdrawn" and slept == []
+
+
+def test_wait_cli_exits_4_with_empty_stdout_when_withdrawn(tmp_path):
+    land_state.register_ticket(tmp_path, {"run_id": "run-x", "mode": "land", "claude_pid": os.getpid(),
+                                          "pid_start_time": land_state.pid_start_time(os.getpid())})
+    land_state.withdraw_ticket(tmp_path, "run-x", "run-x")
+    out = subprocess.run([sys.executable, str(BIN / "land-state.py"), "--state-dir", str(tmp_path), "wait",
+                          "--run-id", "run-x", "--mode", "land", "--claude-pid", str(os.getpid()),
+                          "--poll-min", "0", "--poll-max", "0"], capture_output=True, text=True)
+    assert out.returncode == 4 and out.stdout == "" and "withdrawn" in out.stderr
+
+
+def test_announce_relays_once_per_train_per_day(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(trains.subprocess, "run",
+                        lambda args, **kw: calls.append(args) or subprocess.CompletedProcess(args, 0))
+    log = tmp_path / "land-train.log"
+    assert trains.announce(CONFIG, at(9, 0), log=log) == 0 and calls == []
+    trains.announce(CONFIG, at(12, 31), log=log)
+    trains.announce(CONFIG, at(12, 46), log=log)
+    trains.announce(CONFIG, at(18, 31), log=log)
+    trains.announce(CONFIG, at(12, 31, day=15), log=log)
+    assert len(calls) == 3
+
+
+def test_announce_failure_is_retried_next_tick(tmp_path, monkeypatch):
+    codes = iter([3, 0])
+    monkeypatch.setattr(trains.subprocess, "run",
+                        lambda args, **kw: subprocess.CompletedProcess(args, next(codes)))
+    log = tmp_path / "land-train.log"
+    assert trains.announce(CONFIG, at(12, 31), log=log) == 3
+    assert trains.announce(CONFIG, at(12, 46), log=log) == 0
+    assert "train=midday relay_exit=0" in log.read_text()
