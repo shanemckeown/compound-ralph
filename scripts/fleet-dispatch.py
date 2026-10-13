@@ -30,7 +30,7 @@ Usage:
   fleet-dispatch.py <bead-id> --pre-claimed # slot was already claimed by dequeue-next
   fleet-dispatch.py <bead-id> --force --force-reason="…"  # also required to force past checks 12 and 13
 
-Check 14 (one feature = one branch, LUCY-z3ykz.3): a single /goal of a bead whose parent is an
+Check 15 (one feature = one branch, LUCY-z3ykz.3): a single /goal of a bead whose parent is an
 open epic is refused; dispatch the epic with --epic so the whole feature builds on one branch,
 each child a commit, one review per landing batch. --force past it needs a P0 bead and a
 --force-reason.
@@ -207,11 +207,11 @@ def check_epic_has_children(bead):
     return []
 
 
-EPIC_CHILD_CHECK = "14 not a child of an open epic"
+EPIC_CHILD_CHECK = "15 not a child of an open epic"
 
 
 def check_not_epic_child(bead, record, load=None):
-    """Check 14 (LUCY-z3ykz.3): a child of an open epic is built by dispatching the epic.
+    """Check 15 (LUCY-z3ykz.3): a child of an open epic is built by dispatching the epic.
     12 Oct: one feature as 14 beads, each build -> review -> land, ran every gate 3x per change."""
     parent = (record or {}).get("parent")
     if not parent:
@@ -615,7 +615,7 @@ RESOURCE_UNFORCEABLE = ("resource checks can't be forced; free capacity first "
 def force_refusal(failures, force, force_reason, priority=None):
     """Resource checks 6–9 refuse even with --force (the 7 Oct crash: 11 resident sessions after
     forcing past the caps). --force past checks 11, 12 and 13 needs a written reason, recorded
-    in the manifest row. --force past check 14 needs a P0 bead AND a written reason."""
+    in the manifest row. --force past check 15 needs a P0 bead AND a written reason."""
     failed_resources = [c for c in RESOURCE_CHECKS if failures.get(c)]
     if failed_resources:
         return f"{', '.join(failed_resources)} failed — {RESOURCE_UNFORCEABLE}."
@@ -629,7 +629,7 @@ def force_refusal(failures, force, force_reason, priority=None):
         return ("--force past check 13 needs a written reason: re-run with "
                 "--force-reason=\"<the dated client promise this can't wait past>\".")
     if force and EPIC_CHILD_CHECK in failures and (priority != 0 or not (force_reason or "").strip()):
-        return ("--force past check 14 is only for a P0 bead with a written reason; otherwise "
+        return ("--force past check 15 is only for a P0 bead with a written reason; otherwise "
                 "dispatch the parent epic with --epic.")
     return None
 

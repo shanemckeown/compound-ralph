@@ -4,7 +4,7 @@ import importlib.util
 import os
 import unittest
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)

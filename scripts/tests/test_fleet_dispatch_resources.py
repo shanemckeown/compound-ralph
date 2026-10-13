@@ -46,21 +46,21 @@ def test_all_healthy_passes(healthy):
 
 
 def test_low_disk_refused_with_fix(healthy):
-    healthy.setattr(fd, "probe_disk_free_gb", lambda: 119.0)
+    healthy.setattr(fd, "probe_disk_free_gb", lambda: 99.0)
     results, _, _ = fd.check_resources()
     assert failed(results) == {"6 disk free"}
     assert any("remove merged+clean worktrees" in p for p in results["6 disk free"])
 
 
 def test_too_many_worktrees_refused_with_fix(healthy):
-    healthy.setattr(fd, "probe_worktree_count", lambda: 41)
+    healthy.setattr(fd, "probe_worktree_count", lambda: 51)
     results, _, _ = fd.check_resources()
     assert failed(results) == {"7 worktree count"}
     assert any("git -C" in p and "worktree remove" in p for p in results["7 worktree count"])
 
 
-def test_worktree_boundary_40_passes(healthy):
-    healthy.setattr(fd, "probe_worktree_count", lambda: 40)
+def test_worktree_boundary_50_passes(healthy):
+    healthy.setattr(fd, "probe_worktree_count", lambda: 50)
     assert failed(fd.check_resources()[0]) == set()
 
 

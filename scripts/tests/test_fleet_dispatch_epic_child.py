@@ -1,4 +1,4 @@
-"""Check 14 of fleet-dispatch.py (LUCY-z3ykz.3): one feature = one branch. A single /goal of a
+"""Check 15 of fleet-dispatch.py (LUCY-z3ykz.3): one feature = one branch. A single /goal of a
 child of an open epic is refused and pointed at `--epic`; a standalone bead and the epic itself
 dispatch. Also covers the check 3 BEADS_DIR fix (LUCY-* epics falsely reported childless).
 Run: uvx --python 3.13 pytest ~/.claude/scripts/tests/test_fleet_dispatch_epic_child.py -q"""
@@ -78,7 +78,7 @@ def test_run_gate_refuses_single_dispatch_of_epic_child():
 
 
 def test_run_gate_allows_standalone_bead():
-    failed, failures = _gate("LUCY-solo", False, {"id": "LUCY-solo"})
+    failed, failures = _gate("LUCY-solo", False, {"id": "LUCY-solo", "labels": ["area:platform-reliability"]})
     assert not failed and fd.EPIC_CHILD_CHECK not in failures
 
 
@@ -87,7 +87,7 @@ def test_run_gate_allows_the_epic_itself_with_epic_flag():
     assert not failed and fd.EPIC_CHILD_CHECK not in failures
 
 
-def test_force_past_check_14_needs_p0_and_reason():
+def test_force_past_check_15_needs_p0_and_reason():
     failures = {fd.EPIC_CHILD_CHECK: ["x"]}
     assert "P0" in fd.force_refusal(failures, True, "client down", priority=1)
     assert "P0" in fd.force_refusal(failures, True, "  ", priority=0)

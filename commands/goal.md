@@ -78,7 +78,7 @@ If the bead's `bd show` output lists `CHILDREN`, this is an epic. Collect every 
 If no children, treat as a single bead. The rest of the validation runs on either one bead (singleton) or the full child set (bundle).
 
 🔴 **One feature = one branch (LUCY-z3ykz.3, Shane 12 Oct "yes to everything").** A bead whose
-parent is an open epic is not dispatched on its own: `fleet-dispatch.py` check 14 refuses it and
+parent is an open epic is not dispatched on its own: `fleet-dispatch.py` check 15 refuses it and
 points at `fleet-dispatch.py <epic> --epic`, so the feature builds on one branch with each child
 as a commit and one review per landing batch (12 Oct: 14 beads for one feature ran every gate 3x
 per change; a one-sentence copy edit took ~2h). **Tiny follow-ups ride along:** a copy fix or
