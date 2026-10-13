@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # claude-seat-setup.sh — create/refresh extra Claude Team seat config dirs.
 #
-# Seat 1 is the default ~/.claude. Seats 2..N live in ~/.claude-seatN and share
+# Seat 1 is the default ~/.claude (shane@). Other seats live in ~/.claude-<name>
+# (~/.claude-support, ~/.claude-seat3, ...) and share
 # everything in ~/.claude (hooks, skills, settings, commands, agents, projects/
 # transcripts + memory, sessions registry) via symlinks, so every seat boots as
 # full Lucy and stays visible to fleet tooling. Only the login and per-account
 # runtime state stay separate.
 #
-# Usage: claude-seat-setup.sh 2 3 4     (idempotent; re-run to pick up new entries)
-# Then:  c2  → sign in with that seat's email ("Continue with email").
+# Usage: claude-seat-setup.sh support 3 4 5   (idempotent; re-run to pick up new entries)
+#        a number N → ~/.claude-seatN; a word → ~/.claude-<word>
+# Then:  lucy-support / lucy3 … → /login with that seat's email.
 set -euo pipefail
 
 SRC="$HOME/.claude"
@@ -28,8 +30,9 @@ is_private() {
 [ $# -gt 0 ] || { echo "usage: $0 <seat-number>..." >&2; exit 2; }
 
 for n in "$@"; do
-  [[ "$n" =~ ^[2-9]$ ]] || { echo "seat must be 2-9 (seat 1 is ~/.claude): $n" >&2; exit 2; }
-  DST="$HOME/.claude-seat$n"
+  if [[ "$n" =~ ^[2-9]$ ]]; then DST="$HOME/.claude-seat$n"
+  elif [[ "$n" =~ ^[a-z]+$ ]]; then DST="$HOME/.claude-$n"
+  else echo "seat must be 2-9 or a lowercase word (seat 1 is ~/.claude): $n" >&2; exit 2; fi
   mkdir -p "$DST"
   linked=0
   for path in "$SRC"/* "$SRC"/.[!.]*; do
@@ -37,7 +40,7 @@ for n in "$@"; do
     name="$(basename "$path")"
     is_private "$name" && continue
     if [ -L "$DST/$name" ]; then continue; fi
-    if [ -e "$DST/$name" ]; then echo "  seat$n: skipping $name (real file exists)"; continue; fi
+    if [ -e "$DST/$name" ]; then echo "  $n: skipping $name (real file exists)"; continue; fi
     ln -s "$path" "$DST/$name"; linked=$((linked + 1))
   done
 
@@ -53,7 +56,7 @@ keep = ["mcpServers", "projects", "theme", "hasCompletedOnboarding", "lastOnboar
 json.dump({k: d[k] for k in keep if k in d}, open(dst, "w"), indent=2)
 EOF
     chmod 600 "$DST/.claude.json"
-    echo "  seat$n: wrote .claude.json (MCP servers + project trust, no login)"
+    echo "  $n: wrote .claude.json (MCP servers + project trust, no login)"
   fi
-  echo "seat$n: $DST ready ($linked new links)"
+  echo "$n: $DST ready ($linked new links)"
 done
