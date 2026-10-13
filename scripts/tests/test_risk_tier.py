@@ -19,7 +19,9 @@ spec.loader.exec_module(rt)
     ["components/ui/button.tsx", "styles/globals.css", "content/blog/botox-aftercare.mdx"],
     ["components/ui/__tests__/button.test.tsx", "tests/components/hero.test.tsx"],
     ["public/images/hero.webp", "app/landing.module.css"],
-    ["components/ui/card.tsx", "CHANGELOG.md", ".beads/issues.jsonl"],
+    ["components/ui/card.tsx", "CHANGELOG.md", ".beads/issues.jsonl", "VERSION"],
+    # The ratchet baseline moves on every land that changes a line; it must not force full.
+    ["components/ui/card.tsx", "tests/meta/file-length-baseline.json"],
 ])
 def test_ui_only_is_light(paths):
     assert rt.classify(paths) == ("light", [])
@@ -40,6 +42,10 @@ def test_ui_only_is_light(paths):
     "public/sw.js",
     "pages/dashboard/index.tsx",
     "weird-new-dir/thing.ts",
+    "components/booking/use-slots.ts",
+    "components/ui/format.js",
+    ".beads/config.yaml",
+    "tests/meta/file-length-ratchet.test.ts",
 ])
 def test_non_ui_paths_are_full(path):
     tier, reasons = rt.classify([path])
@@ -56,6 +62,11 @@ def test_non_ui_paths_are_full(path):
     "components/auth/LoginForm.tsx",
     "components/billing/Plan.tsx",
     "styles/clinical-notes.css",
+    # Review round 1: real files that write prices / upload patient photos.
+    "components/settings/membership-plan-form.tsx",
+    "components/face-mapping/upload-helper.ts",
+    "components/pos/VoucherPanel.tsx",
+    "components/clients/PhotoGallery.tsx",
 ])
 def test_sensitive_keyword_beats_ui_prefix(path):
     tier, reasons = rt.classify([path])

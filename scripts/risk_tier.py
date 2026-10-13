@@ -23,9 +23,12 @@ import re
 import subprocess
 import sys
 
-# UI / styling / copy, plus the test trees that cover them.
+# UI / styling / copy, plus the test trees that cover them. Under components/ only
+# presentation files count: a components/**/*.ts helper is logic (upload-helper.ts uploads
+# patient photos), so it is full.
+COMPONENT_PREFIX = "components/"
+COMPONENT_LIGHT_SUFFIXES = (".tsx", ".jsx", ".css", ".scss", ".mdx", ".md", ".svg")
 LIGHT_PREFIXES = (
-    "components/",
     "styles/",
     "content/",
     "copy/",
@@ -35,24 +38,32 @@ LIGHT_PREFIXES = (
 LIGHT_SUFFIXES = (".css", ".scss")
 # public/ static text and images only: public/*.js (a service worker, embed.js) is code.
 PUBLIC_TEXT_SUFFIXES = (".txt", ".md", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico")
-# Bookkeeping every /ship or bd commit carries; it changes no code and no test input.
-NEUTRAL_EXACT = {"CHANGELOG.md", "VERSION", "issues.jsonl"}
-NEUTRAL_PREFIXES = (".beads/",)
+# Bookkeeping every /ship, bd or ratchet commit carries. Named files only, never a whole
+# directory. The beads exports ARE a test input (tests/config-effect reads KNOWN_GAPS beads),
+# so tier_gates.py adds that suite to the gates whenever one of them changes.
+BEADS_EXPORTS = {".beads/issues.jsonl", ".beads/export-state.json", "issues.jsonl"}
+# Regenerated and verified by /land-batch's ratchet helper on every land that moves a line.
+NEUTRAL_EXACT = {"CHANGELOG.md", "VERSION", "tests/meta/file-length-baseline.json"} | BEADS_EXPORTS
 
 # Any path naming one of these is full, even under components/ (components/payments/X.tsx).
 SENSITIVE = re.compile(
-    r"stripe|payment|billing|consent|patient|clinical|tenant|business_id|sms|email|send|comms|auth",
+    r"stripe|payment|billing|consent|patient|clinical|tenant|business_id|sms|email|send|comms|auth"
+    r"|price|pricing|membership|voucher|deposit|refund|invoice|checkout|photo|upload|gdpr",
     re.IGNORECASE,
 )
 
 
 def path_reason(path):
     """None if this path is light, else why it forces full."""
-    if path in NEUTRAL_EXACT or path.startswith(NEUTRAL_PREFIXES):
+    if path in NEUTRAL_EXACT:
         return None
     hit = SENSITIVE.search(path)
     if hit:
         return f"{path}: names a sensitive surface ({hit.group(0)})"
+    if path.startswith(COMPONENT_PREFIX):
+        if path.endswith(COMPONENT_LIGHT_SUFFIXES):
+            return None
+        return f"{path}: component logic, not presentation (default full)"
     if path.startswith(LIGHT_PREFIXES) or path.endswith(LIGHT_SUFFIXES):
         return None
     if path.startswith("public/") and path.lower().endswith(PUBLIC_TEXT_SUFFIXES):
