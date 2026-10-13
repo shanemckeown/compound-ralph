@@ -10,6 +10,7 @@ library so discovery, status, and tests all share the same state contract.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import random
@@ -20,7 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from land_batch_safety import SENSITIVE_PREFIXES, sensitive_paths as configured_sensitive_paths
@@ -51,12 +52,12 @@ def paths(state_dir: Path | None = None) -> dict[str, Path]:
         "holder": root / "LOCK.d" / "holder.json",
         "queue": root / "QUEUE.d",
         "counter": root / "queue-counter",
-        "counter_lock": root / "COUNTER-LOCK.d",
+        "counter_lock": root / "COUNTER.lock",  # flock guard file, never unlinked (.8)
         "ledger": root / "ledger.json",
         "kickbacks": root / "kickbacks.json",
         "pending_qa": root / "pending-qa.md",
         "takeovers": root / "takeovers.jsonl",
-        "recovery_lock": root / "RECOVERY-LOCK.d",
+        "recovery_lock": root / "RECOVERY.lock",  # flock guard file, never unlinked (.8)
         "withdrawn": root / "WITHDRAWN.d",
     }
 
@@ -242,29 +243,31 @@ def _initialising(path: Path) -> bool:
         return False
 
 
-def _acquire_counter_lock(p: dict[str, Path], sleep: Callable[[float], None] = time.sleep) -> None:
-    while True:
-        try:
-            p["counter_lock"].mkdir(mode=0o700)
-        except FileExistsError:
-            owner = read_json(p["counter_lock"] / "holder.json", default=None)
-            if owner is None and _initialising(p["counter_lock"]):
-                sleep(random.uniform(0.05, 0.20))
-                continue
-            if owner is None or not liveness(owner)["alive"]:
-                _remove_directory(p["counter_lock"])
-                continue
-            sleep(random.uniform(0.05, 0.20))
-            continue
-        atomic_write_json(
-            p["counter_lock"] / "holder.json",
-            {"claude_pid": os.getpid(), "pid_start_time": pid_start_time(os.getpid()), "started_at": utc_now()},
-        )
-        return
+def _flock(path: Path, block: bool) -> IO[str] | None:
+    """Exclusive flock on a guard file that is never unlinked; close the handle to release.
+
+    The kernel drops it when the holder exits, so there is no stale owner to judge or steal
+    (LUCY-z3ykz.8, Astra round 2: the old mkdir guards stole a dead owner's dir, and two
+    contenders could each steal, one deleting the other's fresh guard). The guards are short
+    critical sections inside this module; LOCK.d itself stays an mkdir lock held for hours.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle = open(path, "a", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+    except BlockingIOError:
+        handle.close()
+        return None
+    except BaseException:
+        handle.close()
+        raise
+    return handle
 
 
-def _release_counter_lock(p: dict[str, Path]) -> None:
-    _remove_directory(p["counter_lock"])
+def _acquire_counter_lock(p: dict[str, Path]) -> IO[str]:
+    handle = _flock(p["counter_lock"], block=True)
+    assert handle is not None
+    return handle
 
 
 def cleanup_stale_tickets(state_dir: Path | None = None) -> list[dict[str, Any]]:
@@ -295,7 +298,7 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
         if entry.get("run_id") == run_id and entry.get("liveness", {}).get("alive"):
             return entry
 
-    _acquire_counter_lock(p)
+    guard = _acquire_counter_lock(p)
     try:
         # Another caller for this same run may have registered while we waited.
         for entry in queue_entries(p["root"]):
@@ -321,7 +324,7 @@ def register_ticket(state_dir: Path | None, identity: dict[str, Any]) -> dict[st
         ticket["liveness"] = liveness(ticket)
         return ticket
     finally:
-        _release_counter_lock(p)
+        guard.close()
 
 
 def withdraw_ticket(state_dir: Path | None, ticket: str, run_id: str) -> dict[str, Any]:
@@ -802,28 +805,16 @@ def record_takeover(state_dir: Path | None, takeover: dict[str, Any]) -> None:
     write_ledger(p["root"], ledger)
 
 
-def _acquire_recovery_lock(p: dict[str, Path]) -> bool:
-    try:
-        p["recovery_lock"].mkdir(mode=0o700)
-    except FileExistsError:
-        owner = read_json(p["recovery_lock"] / "holder.json", default=None)
-        if owner is None and _initialising(p["recovery_lock"]):
-            return False
-        if owner is None or not liveness(owner)["alive"]:
-            _remove_directory(p["recovery_lock"])
-            return _acquire_recovery_lock(p)
-        return False
-    atomic_write_json(
-        p["recovery_lock"] / "holder.json",
-        {"claude_pid": os.getpid(), "pid_start_time": pid_start_time(os.getpid()), "started_at": utc_now()},
-    )
-    return True
+def _acquire_recovery_lock(p: dict[str, Path]) -> IO[str] | None:
+    """The recovery guard without waiting: a handle to close, or None if another run has it."""
+    return _flock(p["recovery_lock"], block=False)
 
 
-def _wait_for_recovery_lock(p: dict[str, Path], sleep: Callable[[float], None] = time.sleep) -> None:
-    """Block until RECOVERY-LOCK.d is ours. Its owner is judged by liveness, so a dead one clears."""
-    while not _acquire_recovery_lock(p):
-        sleep(random.uniform(0.05, 0.20))
+def _wait_for_recovery_lock(p: dict[str, Path]) -> IO[str]:
+    """Block until the recovery guard is ours (a dead holder's flock is already gone)."""
+    handle = _flock(p["recovery_lock"], block=True)
+    assert handle is not None
+    return handle
 
 
 def _log_lock_anomaly(p: dict[str, Path], entry: dict[str, Any]) -> None:
@@ -835,7 +826,7 @@ def _log_lock_anomaly(p: dict[str, Path], entry: dict[str, Any]) -> None:
 def _retire_lock_dir(p: dict[str, Path], expected_holder: Any, expected_id: tuple[int, int]) -> bool:
     """Remove LOCK.d iff it is still the instance ``expected_id`` carrying ``expected_holder``.
 
-    Caller holds RECOVERY-LOCK.d. LOCK.d is renamed to a unique tombstone first, so it vanishes
+    Caller holds the recovery guard. LOCK.d is renamed to a unique tombstone first, so it vanishes
     in one step and the slow rmtree can never reach a successor's LOCK.d. Identity and holder
     are re-read from the tombstone (two holder-less dirs compare equal by content, so the
     identity is what tells a fresh acquirer's dir from the dead one: Astra .8 round 1). On a
@@ -867,10 +858,11 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
     p = ensure_state_dir(state_dir)
     if not p["lock"].is_dir():
         return None
-    if not _acquire_recovery_lock(p):
+    guard = _acquire_recovery_lock(p)
+    if guard is None:
         return None
     try:
-        # Re-check inside the recovery lock: LOCK.d may have been released while we waited, and
+        # Re-check inside the recovery guard: LOCK.d may have been released while we waited, and
         # a missing dir must never read as "holder-less, dead" (Astra .8 round 1).
         lock_id = _dir_id(p["lock"])
         if lock_id is None:
@@ -892,7 +884,7 @@ def recover_stale_lock(state_dir: Path | None = None, repo: str | None = None) -
         record_takeover(p["root"], takeover)
         return takeover
     finally:
-        _remove_directory(p["recovery_lock"])
+        guard.close()
 
 
 def _own_ticket_path(p: dict[str, Path], run_id: str) -> Path | None:
@@ -1006,13 +998,13 @@ def release_lock(state_dir: Path | None, run_id: str) -> bool:
     Withdraw makes two releasers of one run normal (the caller on lock_held, the worker's
     back-out). Both used to read holder=R and then rmtree, so the second could delete a
     successor's live lock (LUCY-z3ykz.8). Now the holder check and the removal run under
-    RECOVERY-LOCK.d, which every LOCK.d removal takes, so nothing can swap LOCK.d between
-    them; a second release finds no lock of its own and is a no-op.
+    the recovery guard (a flock), which every LOCK.d removal takes, so nothing can swap
+    LOCK.d between them; a second release finds no lock of its own and is a no-op.
     """
     p = paths(state_dir)
     if not p["lock"].is_dir():
         return False
-    _wait_for_recovery_lock(p)
+    guard = _wait_for_recovery_lock(p)
     try:
         lock_id = _dir_id(p["lock"])
         holder = holder_record(p["root"])
@@ -1020,7 +1012,7 @@ def release_lock(state_dir: Path | None, run_id: str) -> bool:
             return False
         return _retire_lock_dir(p, holder, lock_id)
     finally:
-        _remove_directory(p["recovery_lock"])
+        guard.close()
 
 
 def archive_ledger_after_prod(state_dir: Path | None, evidence_dir: Path, prod_sha: str) -> dict[str, Any]:

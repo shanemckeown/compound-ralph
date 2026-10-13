@@ -178,6 +178,39 @@ def test_recoverer_never_retires_a_fresh_lock_made_after_a_release(tmp_path, mon
     assert real_dir_id(lock) == state["a2"]
 
 
+def test_guards_are_flocks_freed_by_their_holders_death(tmp_path):
+    # Astra .8 round 2: a poller dying inside the old mkdir recovery guard left a dir two
+    # releasers could both steal. A flock has no stale owner: the kernel frees it on exit.
+    for guard in ("RECOVERY.lock", "COUNTER.lock"):
+        holder = subprocess.Popen([sys.executable, "-c", (
+            "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+            "print('held', flush=True); time.sleep(60)"), str(tmp_path / guard)],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            assert holder.stdout.readline().strip() == "held"
+            assert land_state._flock(tmp_path / guard, block=False) is None  # live holder: busy
+        finally:
+            holder.kill()
+            holder.wait()
+        handle = land_state._flock(tmp_path / guard, block=False)  # dead holder: free at once
+        assert handle is not None
+        handle.close()
+        assert (tmp_path / guard).is_file()  # never unlinked
+
+
+def test_release_waits_for_a_live_recovery_and_then_releases(tmp_path):
+    assert land_state.try_acquire_lock(tmp_path, _identity("run-r"))["acquired"] is True
+    guard = land_state._acquire_recovery_lock(land_state.paths(tmp_path))
+    result = {}
+    releaser = threading.Thread(target=lambda: result.update(r=land_state.release_lock(tmp_path, "run-r")))
+    releaser.start()
+    releaser.join(timeout=0.5)
+    assert releaser.is_alive() and (tmp_path / "LOCK.d").is_dir()  # held off by the guard
+    guard.close()
+    releaser.join(timeout=10)
+    assert result == {"r": True} and not (tmp_path / "LOCK.d").exists()
+
+
 def test_holderless_lock_past_the_grace_is_recovered(tmp_path):
     (tmp_path / "LOCK.d").mkdir(parents=True)  # a crash between mkdir and the holder write
     old = time.time() - land_state.HOLDERLESS_GRACE_SECONDS - 5
