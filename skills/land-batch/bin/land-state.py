@@ -313,9 +313,11 @@ def withdraw_ticket(state_dir: Path | None, ticket: str, run_id: str) -> dict[st
         holder = holder_record(p["root"])
         if isinstance(holder, dict) and holder.get("run_id") == run_id:
             return {"withdrawn": False, "reason": "holds-lock-use-release", "ticket_file": path.name}
-        # Mark first: the run's detached wait worker may wake between unlink and mark.
+        # Mark first, then re-read the holder: pairs with try_acquire_lock's post-holder check.
         p["withdrawn"].mkdir(mode=0o700, exist_ok=True)
         (p["withdrawn"] / run_id).write_text(utc_now() + "\n", encoding="utf-8")
+        holder = holder_record(p["root"])
+        lock_held = isinstance(holder, dict) and holder.get("run_id") == run_id
         try:
             path.unlink()
         except FileNotFoundError:
@@ -323,7 +325,11 @@ def withdraw_ticket(state_dir: Path | None, ticket: str, run_id: str) -> dict[st
         entry = {"withdrawn_at": utc_now(), "run_id": run_id, "ticket_file": path.name, "ticket": record}
         with open(p["root"] / "withdrawals.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
-        return {"withdrawn": True, "ticket_file": path.name}
+        result = {"withdrawn": True, "ticket_file": path.name}
+        if lock_held:
+            # Admitted in the same instant: the caller must `release` (SKILL.md Step 0).
+            result["lock_held"] = True
+        return result
     return {"withdrawn": False, "reason": "no-such-ticket", "ticket": ticket}
 
 
@@ -857,6 +863,11 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
     except Exception:
         _remove_directory(p["lock"])
         raise
+    # Re-check after the holder is visible. withdraw marks first and reads the holder second,
+    # so either this sees the mark and backs out, or withdraw sees this holder (lock_held).
+    if is_withdrawn(p, identity["run_id"]):
+        _remove_directory(p["lock"])
+        return {"acquired": False, "reason": "withdrawn"}
     return {"acquired": True, "holder": holder, "takeover": takeover}
 
 

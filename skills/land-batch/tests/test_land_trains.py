@@ -162,3 +162,42 @@ def test_announce_failure_is_retried_next_tick(tmp_path, monkeypatch):
     assert trains.announce(CONFIG, at(12, 31), log=log) == 3
     assert trains.announce(CONFIG, at(12, 46), log=log) == 0
     assert "train=midday relay_exit=0" in log.read_text()
+
+
+def _identity(run_id):
+    return {"run_id": run_id, "mode": "land", "claude_pid": os.getpid(),
+            "pid_start_time": land_state.pid_start_time(os.getpid())}
+
+
+def test_withdraw_landing_between_check_and_mkdir_still_wins(tmp_path, monkeypatch):
+    # Astra round 2: withdraw after the first is_withdrawn check let the worker take LOCK.d.
+    identity = _identity("run-race")
+    land_state.register_ticket(tmp_path, identity)
+    real = land_state.is_withdrawn
+    calls = {"n": 0}
+
+    def racing(p, run_id):
+        calls["n"] += 1
+        if calls["n"] == 1:          # the pre-check: withdraw has not happened yet
+            assert land_state.withdraw_ticket(tmp_path, run_id, run_id)["withdrawn"] is True
+            return False
+        return real(p, run_id)
+
+    monkeypatch.setattr(land_state, "is_withdrawn", racing)
+    assert land_state.try_acquire_lock(tmp_path, identity) == {"acquired": False, "reason": "withdrawn"}
+    assert not (tmp_path / "LOCK.d").exists()
+
+
+def test_withdraw_reports_lock_held_when_admitted_in_the_same_instant(tmp_path, monkeypatch):
+    identity = _identity("run-same")
+    land_state.register_ticket(tmp_path, identity)
+    real = land_state.holder_record
+    reads = {"n": 0}
+
+    def holder(state_dir=None):
+        reads["n"] += 1
+        return {"run_id": "run-same"} if reads["n"] > 1 else real(state_dir)
+
+    monkeypatch.setattr(land_state, "holder_record", holder)
+    result = land_state.withdraw_ticket(tmp_path, "run-same", "run-same")
+    assert result["withdrawn"] is True and result["lock_held"] is True

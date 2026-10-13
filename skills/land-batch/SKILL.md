@@ -184,8 +184,11 @@ Record the printed JSON (train, or `now` + reason) in the run evidence and the f
 report. `--now` without a written reason is refused. A run already queued that should give
 way (a P0 lander behind it, or Shane says stop) yields with
 `python3 ~/.claude/skills/land-batch/bin/land-state.py withdraw <ticket-file-or-run-id> --run-id "$RUN_ID"`:
-it removes only that run's own ticket and logs it to `withdrawals.jsonl`. Never `rm` a
-QUEUE.d ticket by hand; the lock holder releases instead.
+it removes only that run's own ticket, logs it to `withdrawals.jsonl`, and marks the run
+withdrawn so its detached admission worker cannot re-queue or acquire (that worker exits 4
+with an empty `admission.json`). If the result says `"lock_held": true`, the run was
+admitted at the same instant: run `land-state.py release --run-id "$RUN_ID"`. Never `rm`
+a QUEUE.d ticket by hand; the lock holder releases instead.
 
 For a non-dry run, create a stable run/evidence identity and acquire admission.
 Dry-run runs read-only discovery/plan first and skips this admission step. The
@@ -245,7 +248,8 @@ else
 fi
 ~~~
 
-If the PID is alive and there is no result, report **“still queued, waiting”**
+Exit 4 with no result means this run was withdrawn (`land-state.py withdraw`): stop,
+never restart the worker. If the PID is alive and there is no result, report **“still queued, waiting”**
 and check again on a future turn/wakeup. Claude Code sessions are turn-based,
 not one indefinitely blocking process. Do not launch a second worker while that
 PID is alive. If the worker exited without a successful result, re-run the
