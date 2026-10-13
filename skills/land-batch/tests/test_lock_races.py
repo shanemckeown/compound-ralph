@@ -106,6 +106,28 @@ def test_holderless_lock_is_not_stolen_from_a_live_acquirer(tmp_path, monkeypatc
     assert _holder_run(tmp_path) == "run-a"
 
 
+def test_acquirer_paused_past_the_grace_is_not_stolen_from(tmp_path, monkeypatch):
+    # Astra .8 round 3: A paused >30 s between mkdir and its holder write (a sleeping laptop);
+    # B out-graced the holder-less dir, recovered it and acquired, then A resumed and also
+    # returned acquired=True. Here A's dir is aged past the grace before B tries.
+    real_write = land_state.atomic_write_json
+    seen = {}
+
+    def write(path, value):
+        if Path(path).name == "holder.json" and value.get("run_id") == "run-a" and "b" not in seen:
+            old = time.time() - land_state.HOLDERLESS_GRACE_SECONDS - 5
+            os.utime(tmp_path / "LOCK.d", (old, old))
+            seen["b"] = land_state.try_acquire_lock(tmp_path, _identity("run-b"))
+        real_write(path, value)
+
+    monkeypatch.setattr(land_state, "atomic_write_json", write)
+    a = land_state.try_acquire_lock(tmp_path, _identity("run-a"))
+    # B's recovery cannot take the guard A holds (non-blocking), so it sees LOCK.d as held.
+    # Before the fix B stole it, and A's holder then overwrote B's: a lock nobody could release.
+    assert [a["acquired"], seen["b"]["acquired"]] == [True, False]
+    assert _holder_run(tmp_path) == "run-a"
+
+
 def test_concurrent_acquirers_with_a_slow_holder_write_admit_exactly_one(tmp_path, monkeypatch):
     real_write = land_state.atomic_write_json
 

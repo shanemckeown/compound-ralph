@@ -910,11 +910,6 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
     if entries and (own_path is None or entries[0].get("run_id") != identity["run_id"]):
         return {"acquired": False, "reason": "waiting-for-earlier-ticket", "queue": entries, "takeover": takeover}
 
-    try:
-        p["lock"].mkdir(mode=0o700)
-    except FileExistsError:
-        return {"acquired": False, "reason": "raced", "takeover": takeover}
-    my_lock_id = _dir_id(p["lock"])
     holder = {
         "run_id": identity["run_id"],
         "mode": identity["mode"],
@@ -929,14 +924,27 @@ def try_acquire_lock(state_dir: Path | None, identity: dict[str, Any], repo: str
         "scratch_path": identity.get("scratch_path"),
         "evidence_dir": identity.get("evidence_dir"),
     }
+    # mkdir and the holder write happen inside the recovery guard (Astra .8 round 3), so a
+    # recoverer, which needs the guard, can never see a live acquirer's holder-less LOCK.d,
+    # however long this process is paused between the two. Released before the withdrawn
+    # back-out below, which takes the guard itself.
+    guard = _wait_for_recovery_lock(p)
     try:
-        atomic_write_json(p["holder"], holder)
-        own_path = _own_ticket_path(p, identity["run_id"])
-        if own_path:
-            own_path.unlink(missing_ok=True)
-    except Exception:
-        _remove_directory(p["lock"])
-        raise
+        try:
+            p["lock"].mkdir(mode=0o700)
+        except FileExistsError:
+            return {"acquired": False, "reason": "raced", "takeover": takeover}
+        my_lock_id = _dir_id(p["lock"])
+        try:
+            atomic_write_json(p["holder"], holder)
+            own_path = _own_ticket_path(p, identity["run_id"])
+            if own_path:
+                own_path.unlink(missing_ok=True)
+        except Exception:
+            _remove_directory(p["lock"])
+            raise
+    finally:
+        guard.close()
     # Re-check after the holder is visible. withdraw marks first and reads the holder second,
     # so either this sees the mark and backs out, or withdraw sees this holder (lock_held).
     if is_withdrawn(p, identity["run_id"]):

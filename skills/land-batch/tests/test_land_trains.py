@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -206,24 +207,35 @@ def test_withdraw_reports_lock_held_when_admitted_in_the_same_instant(tmp_path, 
 def test_withdrawn_back_out_never_removes_a_successors_lock(tmp_path, monkeypatch):
     # Astra round 3: A withdraws (lock_held), A's caller releases, B acquires, then A's worker
     # reaches its post-holder re-check. It must leave B's LOCK.d alone.
+    # Since .8 A writes its holder inside the recovery guard, so the caller's release (another
+    # process in real use) runs concurrently and waits for that guard, as it would for real.
     a, b = _identity("run-a"), _identity("run-b")
     land_state.register_ticket(tmp_path, a)
     real_write = land_state.atomic_write_json
+    got = {}
+
+    def caller_releases_then_b_acquires():
+        got["release"] = land_state.release_lock(tmp_path, "run-a")
+        got["b"] = land_state.try_acquire_lock(tmp_path, b)
+
+    caller = threading.Thread(target=caller_releases_then_b_acquires)
 
     def write_then_interleave(path, value):
         real_write(path, value)
-        if Path(path).name == "holder.json" and value.get("run_id") == "run-a":
+        if Path(path).name == "holder.json" and value.get("run_id") == "run-a" and "started" not in got:
+            got["started"] = True
             # withdraw marked A after its first holder read (so it reported lock_held) ...
             (tmp_path / "WITHDRAWN.d").mkdir(exist_ok=True)
             (tmp_path / "WITHDRAWN.d" / "run-a").write_text("x")
             for ticket in (tmp_path / "QUEUE.d").glob("*run-a.json"):
                 ticket.unlink()
             # ... and its caller followed SKILL.md and released.
-            assert land_state.release_lock(tmp_path, "run-a") is True
             monkeypatch.setattr(land_state, "atomic_write_json", real_write)
-            got = land_state.try_acquire_lock(tmp_path, b)
-            assert got["acquired"] is True, got
+            caller.start()
 
     monkeypatch.setattr(land_state, "atomic_write_json", write_then_interleave)
     assert land_state.try_acquire_lock(tmp_path, a)["reason"] == "withdrawn"
+    caller.join(timeout=30)
+    assert not caller.is_alive()
+    assert got["b"]["acquired"] is True, got
     assert land_state.holder_record(tmp_path)["run_id"] == "run-b"
