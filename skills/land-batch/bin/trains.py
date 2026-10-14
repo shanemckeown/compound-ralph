@@ -1,107 +1,37 @@
 #!/usr/bin/env python3
-"""trains.py: LAND runs ride scheduled land trains (LUCY-z3ykz.4).
+"""trains.py: LAND runs may start any time (LUCY-x0mop, Shane 14 Oct: no clock windows).
 
-    trains.py check [--now --reason "<P0 / dated client promise>"] [--at ISO]
-    trains.py announce          # launchd: tell the orchestrator a train is open
+    trains.py check [--now] [--reason "<text>"] [--at ISO]
+    trains.py announce          # retired no-op (the launchd announce job is gone)
 
-Finished branches wait for the next train instead of each one taking the land lock on its
-own (12 Oct: a lander per bead, 60-90 min each, serialised on one lock). Trains live in
-../TRAINS.json: 12:30 (midday) and 18:30 (pre-deploy), Europe/London. A train's window is
-when a LAND run may START. The pre-deploy window closes at least 30 min before
-`deploy_not_before` (19:30, the /safe-deploy weekday embargo end) so its batch lands before
-the evening deploy.
+History: LUCY-z3ykz.4 gated LAND starts to 12:30 and 18:30 windows. Retired: a train now
+leaves whenever the land lock is free and reviewed branches are waiting; the lock and FIFO
+queue (land-state.py) do the batching, and the lander sweeps every PASSed branch ready at
+admission.
 
-`check` exits 0 inside a window, or outside one with --now plus a non-empty --reason (a P0
-or a dated client promise; the reason goes in the run evidence). Otherwise it exits 1 and
-names the next train. Output is one JSON line either way.
+`check` always prints one JSON line `{"allowed": true, "train": "open"}` and exits 0 for LAND.
+`--now`, `--reason` and `--at` are accepted as no-ops for back-compat. A supplied --reason is
+echoed back so run evidence still records it. TRAINS.json is retained only for
+`deploy_not_before` (the /safe-deploy weekday embargo, which governs DEPLOY, not LAND);
+nothing here reads it.
 """
 import argparse
 import json
-import subprocess
 import sys
-from datetime import datetime, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
-
-TRAINS_FILE = Path(__file__).resolve().parent.parent / "TRAINS.json"
-RELAY = Path.home() / ".claude" / "scripts" / "relay-to-orchestrator.sh"
-LOG = Path.home() / ".claude" / "fleet" / "land-train.log"
+from datetime import datetime
 
 
-def load(path=TRAINS_FILE):
-    return json.loads(Path(path).read_text())
+def check(config=None, now=None, land_now=False, reason=None):
+    """Always allowed. Arguments are ignored; kept so old callers keep working."""
+    result = {"allowed": True, "train": "open"}
+    if (reason or "").strip():
+        result["reason"] = reason.strip()
+    return result
 
 
-def _at(day, hhmm, tz):
-    h, m = (int(x) for x in hhmm.split(":"))
-    return datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
-
-
-def windows(config, day):
-    """[(name, opens, closes)] for the trains on this local date."""
-    tz = ZoneInfo(config["timezone"])
-    out = []
-    for t in config["trains"]:
-        opens = _at(day, t["start"], tz)
-        out.append((t["name"], opens, opens + timedelta(minutes=t["window_minutes"])))
-    return out
-
-
-def current_train(config, now):
-    local = now.astimezone(ZoneInfo(config["timezone"]))
-    for name, opens, closes in windows(config, local.date()):
-        if opens <= local < closes:
-            return name
-    return None
-
-
-def next_train(config, now):
-    local = now.astimezone(ZoneInfo(config["timezone"]))
-    for offset in (0, 1):
-        for name, opens, _ in sorted(windows(config, local.date() + timedelta(days=offset)),
-                                     key=lambda w: w[1]):
-            if opens > local:
-                return name, opens
-    return None, None
-
-
-def check(config, now, land_now=False, reason=None):
-    train = current_train(config, now)
-    if train:
-        return {"allowed": True, "train": train}
-    if land_now and (reason or "").strip():
-        return {"allowed": True, "train": "now", "reason": reason.strip()}
-    name, opens = next_train(config, now)
-    why = ("--now needs --reason=\"<P0 or dated client promise>\"" if land_now
-           else "outside a land train window")
-    return {"allowed": False, "why": why, "next_train": name,
-            "next_opens": opens.isoformat() if opens else None}
-
-
-def announce(config, now, log=LOG):
-    """Relay once per train per London day. launchd runs this every 15 min, so the schedule
-    follows TRAINS.json's timezone, not the laptop's clock (travel, a changed system zone)."""
-    train = current_train(config, now)
-    if not train:
-        return 0
-    key = f"{now.astimezone(ZoneInfo(config['timezone'])).date()} train={train}"
-    try:
-        if any(line.split(" ", 1)[-1].startswith(key) for line in Path(log).read_text().splitlines()):
-            return 0
-    except OSError:
-        pass
-    message = (f"Land train '{train}' is open: run /land-batch now for the finished branches "
-               f"queued since the last train (LUCY-z3ykz.4).")
-    code = subprocess.run([str(RELAY), message], capture_output=True, text=True).returncode
-    if code != 0:
-        return code  # not logged: the next 15-min tick retries
-    try:
-        Path(log).parent.mkdir(parents=True, exist_ok=True)
-        with open(log, "a") as fh:
-            fh.write(f"{now.isoformat()} {key} relay_exit={code}\n")
-    except OSError:
-        pass
-    return code
+def announce(config=None, now=None, log=None):
+    """Retired: no trains to announce."""
+    return 0
 
 
 def main(argv=None):
@@ -110,18 +40,13 @@ def main(argv=None):
     c = sub.add_parser("check")
     c.add_argument("--now", action="store_true", dest="land_now")
     c.add_argument("--reason")
-    c.add_argument("--at", help="ISO timestamp to check instead of the clock (tests, dry runs)")
+    c.add_argument("--at", help="accepted and ignored (back-compat)")
     sub.add_parser("announce")
     args = ap.parse_args(argv)
-    config = load()
-    now = datetime.now().astimezone()
     if args.cmd == "announce":
-        return announce(config, now)
-    if args.at:
-        now = datetime.fromisoformat(args.at)
-    result = check(config, now, args.land_now, args.reason)
-    print(json.dumps(result))
-    return 0 if result["allowed"] else 1
+        return announce()
+    print(json.dumps(check(None, datetime.now().astimezone(), args.land_now, args.reason)))
+    return 0
 
 
 if __name__ == "__main__":

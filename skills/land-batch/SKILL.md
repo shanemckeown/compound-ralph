@@ -31,8 +31,8 @@ Modes:
 - **/land-batch --ship** — attended SHIP: full gate, one staging deployment,
   QA all ledger checks, Codex fix/revert loop, then one human production gate.
 - **/land-batch --status** — read-only lock/queue/ledger dashboard; no lock.
-- **/land-batch --now --reason='<P0 / dated client promise>'** — LAND outside a land
-  train window (see Step 0).
+- **/land-batch --now --reason='<text>'** — accepted for back-compat; a no-op, since LAND
+  has no clock windows (see Step 0).
 - **--dry-run** — discovery and full plan only; preserve the precedent that it
   mutates nothing: no ticket, lock, scratch, ledger, merge, or deployment.
 
@@ -163,25 +163,20 @@ ledger.json.
 
 ### Step 0 — Land train, then admission
 
-🔴 **LAND rides a land train (LUCY-z3ykz.4, Shane 12 Oct "landing batches, yes").**
-Finished branches wait for the next train instead of each taking the lock on its own
-(12 Oct: one lander per bead, 60-90 min each, serialised on one lock). Trains are in
-`~/.claude/skills/land-batch/TRAINS.json`: 12:30 midday and 18:30 pre-deploy, Europe/London;
-the window is when a LAND run may start, and the pre-deploy window closes 30+ min before
-the 19:30 evening deploy, and a SHIP queues behind a running LAND in the same FIFO, so
-the deploy never starts before the pre-deploy train has landed. `com.aestheticc.land-train` (launchd, under `~/.claude/launchd/`)
-checks every 15 min against TRAINS.json's own timezone and tells the orchestrator once
-per train per day when one opens. Before admission, for a non-dry LAND run only
+🔴 **A train leaves whenever the lock is free (LUCY-x0mop, Shane 14 Oct: no clock windows).**
+A train leaves whenever the lock is free; the lander sweeps every PASSed branch ready at
+admission; branches that finish mid-run ride the next train; never re-curate a running lane.
+Batching comes from the lock and FIFO queue, not the clock. The safe-deploy embargo
+(`deploy_not_before` 19:30 weekdays) governs DEPLOY only, never LAND. A SHIP queues behind a
+running LAND in the same FIFO. Before admission, for a non-dry LAND run only
 (SHIP, `--status` and `--dry-run` are not gated):
 
 ~~~bash
-TRAIN_ARGS=()   # add: --now --reason "<P0 or dated client promise>" when Shane passed --now
-python3 ~/.claude/skills/land-batch/bin/trains.py check "${TRAIN_ARGS[@]}" \
-  || { echo "Not a land train window: queue for the next train (named above) or rerun with --now --reason."; exit 1; }
+python3 ~/.claude/skills/land-batch/bin/trains.py check   # always exit 0; --now/--reason are no-ops
 ~~~
 
-Record the printed JSON (train, or `now` + reason) in the run evidence and the final
-report. `--now` without a written reason is refused. A run already queued that should give
+Record the printed JSON in the run evidence and the final
+report. A run already queued that should give
 way (a P0 lander behind it, or Shane says stop) yields with
 `python3 ~/.claude/skills/land-batch/bin/land-state.py withdraw <ticket-file-or-run-id> --run-id "$RUN_ID"`:
 it removes only that run's own ticket, logs it to `withdrawals.jsonl`, and marks the run

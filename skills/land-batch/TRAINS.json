@@ -1,8 +1,6 @@
 {
+  "_retired": "LUCY-x0mop (Shane 14 Oct 2026): land-train clock windows are retired; a LAND may start whenever the lock is free. Only deploy_not_before is live, and it governs DEPLOY (/safe-deploy), never LAND. Nothing in land-batch reads this file.",
   "timezone": "Europe/London",
   "deploy_not_before": "19:30",
-  "trains": [
-    {"name": "midday", "start": "12:30", "window_minutes": 60},
-    {"name": "pre-deploy", "start": "18:30", "window_minutes": 30}
-  ]
+  "trains": []
 }
