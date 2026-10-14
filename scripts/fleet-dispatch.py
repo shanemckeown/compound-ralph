@@ -801,6 +801,14 @@ def resident_background_sessions(rows):
     return resident
 
 
+COUNTED_STATES = ("working", "blocked")  # LUCY-rsfj8: only these count toward the cap
+
+
+def counts_toward_cap(row):
+    """Only working/blocked sessions count; done (awaiting landing) and idle are listed, not counted."""
+    return row.get("state") in COUNTED_STATES
+
+
 def probe_agents():
     """`claude agents --json` rows. Raises on failure or timeout (caller warns, never refuses)."""
     r = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True,
@@ -835,7 +843,8 @@ def resource_snapshot(agent_rows=None):
     try:
         rows = agent_rows if agent_rows is not None else probe_agents()
         snap["resident_rows"] = resident_background_sessions(rows)
-        snap["resident_bg"] = len(snap["resident_rows"])
+        snap["resident_bg"] = sum(1 for a in snap["resident_rows"] if counts_toward_cap(a))
+        snap["resident_listed"] = len(snap["resident_rows"])
     except subprocess.TimeoutExpired:
         snap["errors"]["resident_bg"] = f"`claude agents --json` timed out after {AGENTS_TIMEOUT_S}s"
     except Exception as exc:
@@ -884,12 +893,15 @@ def check_resources(snap=None):
         results[name] = []
         warnings[name] = f"{err.get('resident_bg')} — session count not enforced this run"
     else:
-        details[name] = f"{snap['resident_bg']} resident background sessions (max {MAX_RESIDENT_BG_SESSIONS})"
+        uncounted = len(snap.get("resident_rows") or []) - snap["resident_bg"]
+        details[name] = (f"{snap['resident_bg']} resident background sessions (max {MAX_RESIDENT_BG_SESSIONS})"
+                         + (f"; {uncounted} not counted (done/idle, awaiting landing)" if uncounted > 0 else ""))
         if snap["resident_bg"] <= MAX_RESIDENT_BG_SESSIONS:
             results[name] = []
         else:
             listing = [f"  {a.get('id') or a.get('sessionId', '?')[:8]}  {a.get('state')}"
                        f"{'  pid ' + str(a['pid']) if a.get('pid') else ''}  {a.get('name') or ''}"
+                       f"{'' if counts_toward_cap(a) else '  (not counted: ' + str(a.get('state')) + (', awaiting landing)' if a.get('state') == 'done' else ')')}"
                        for a in snap["resident_rows"]]
             results[name] = [
                 f"{snap['resident_bg']} resident background Claude sessions (> {MAX_RESIDENT_BG_SESSIONS}).",

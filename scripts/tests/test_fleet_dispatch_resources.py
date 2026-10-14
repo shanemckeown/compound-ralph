@@ -82,6 +82,21 @@ def test_resident_counting_rules(monkeypatch):
     assert len(fd.resident_background_sessions(rows)) == 4
 
 
+def test_done_sessions_listed_but_not_counted(healthy):
+    rows = [bg("working", name=f"w{i}") for i in range(8)] + [bg("done", pid=5, name=f"d{i}") for i in range(5)]
+    healthy.setattr(fd, "probe_agents", lambda: rows)
+    results, _, details = fd.check_resources()
+    assert failed(results) == set()
+    assert "8 resident" in details["8 resident bg sessions"]
+    # a ninth working session refuses, and the done ones are listed marked not counted
+    rows.append(bg("blocked", name="b9"))
+    results, _, _ = fd.check_resources()
+    text = "\n".join(results["8 resident bg sessions"])
+    assert failed(results) == {"8 resident bg sessions"}
+    assert text.count("(not counted: done, awaiting landing)") == 5
+    assert text.startswith("9 resident")
+
+
 def test_low_memory_refused(healthy):
     healthy.setattr(fd, "probe_memory_free_pct", lambda: 24)
     results, _, _ = fd.check_resources()
