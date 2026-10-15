@@ -825,7 +825,7 @@ $(git -C "$SCRATCH" show "$MERGE_SHA")"
     # there is no separate CLI call for this leg, same as every other GLM-outage path.)
   fi
 
-  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || echo 'opus, GLM unreachable')): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
+  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || { [ "$CLAUDE_ONLY" == 1 ] && echo 'opus, Claude-only client' || echo 'opus, GLM unreachable'; })): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
 
   # Any line naming a real, still-unfixed other site: auto-file a child bead rather
   # than requiring a human to notice it in the comment. Same prefix as $BEAD_ID,

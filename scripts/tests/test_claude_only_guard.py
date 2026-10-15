@@ -180,6 +180,33 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(code, 3, err)
         self.assertNotIn("REAL CODEX", out)
 
+    def _repo_with_main(self, name):
+        repo = self.t / name
+        git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        return repo, git
+
+    def test_detached_at_main_is_not_attributed_to_branches_cut_from_it(self):
+        # land-batch's FIX_SCRATCH is detached at origin/main; a fresh Anita branch shares that SHA.
+        repo, git = self._repo_with_main("atmain")
+        subprocess.run(git + ["branch", "goal/aestheticcnext-anita1"], check=True)
+        subprocess.run(git + ["checkout", "-q", "--detach", "main"], check=True)
+        code, out, err = self.run_cmd([SHIM, "exec", "-"], cwd=repo)
+        self.assertEqual(code, 0, err)
+        self.assertIn("REAL CODEX", out)
+
+    def test_detached_at_stale_tip_of_labelled_branch(self):
+        # The review scratch was made at c1, then the builder committed c2 on the branch.
+        repo, git = self._repo_with_main("stale")
+        subprocess.run(git + ["checkout", "-q", "-b", "long-goal/aestheticcnext-anita1"], check=True)
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "c1"], check=True)
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "c2"], check=True)
+        subprocess.run(git + ["checkout", "-q", "--detach", "HEAD~1"], check=True)
+        code, out, err = self.run_cmd([SHIM, "exec", "-"], cwd=repo)
+        self.assertEqual(code, 3, err)
+        self.assertNotIn("REAL CODEX", out)
+
     def test_shim_reads_dash_c_dir(self):
         repo = self.t / "wt2"
         subprocess.run(["git", "init", "-q", "-b", "goal/aestheticcnext-anita1-r2", str(repo)], check=True)
@@ -229,6 +256,25 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(code, 4, out + err)  # distinct: the queue drain re-queues it as goal
         self.assertIn("REFUSED", out)
         self.assertIn("Claude only", out)
+
+    def test_every_queue_drain_requeues_claude_only_refusal_as_goal(self):
+        # Exit 4 from fleet-dispatch-codex must never go back on the queue as kind=codex.
+        for path, pattern in (
+            (CODEX_DISPATCH, 'if [[ $dispatch_exit -eq 4 && "$next_kind" == codex ]]; then\n'
+                             '      # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.\n'
+                             '      python3 "$SLOTS" enqueue "$next_bead" goal'),
+            (ROOT / "commands" / "goal.md", 'if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then'),
+            (ROOT / "commands" / "long-goal.md", 'if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then'),
+        ):
+            self.assertIn(pattern, Path(path).read_text(), path)
+
+    def test_codex_dispatcher_releases_pre_claimed_slot_on_refusal(self):
+        code, out, err = self.run_cmd(
+            # A token that matches no slot: fleet-slots' release filters by token, so this is a no-op.
+            [sys.executable, CODEX_DISPATCH, "dispatch", "AestheticcNext-anita1",
+             "--pre-claimed", "test-b3hf5-no-such-token"])
+        self.assertEqual(code, 4, out + err)
+        self.assertIn("Released pre-claimed codex_glm slot after Claude-only refusal", out)
 
 
 if __name__ == "__main__":

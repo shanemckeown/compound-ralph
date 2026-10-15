@@ -133,11 +133,27 @@ def _git(path, *args):
 def git_branch(path):
     """Branch name(s) for the checkout at path. A detached HEAD (a review scratch worktree
     at a branch tip, since git won't check out a branch another worktree holds) falls back
-    to every local branch pointing at HEAD."""
+    to every local branch containing HEAD, so a scratch at an older tip still counts.
+    A detached HEAD already on main carries no client diff, so it is not attributed:
+    otherwise every branch cut from main would match a scratch at main."""
     name = _git(path, "symbolic-ref", "--short", "-q", "HEAD")
     if name:
         return name
+    for main in ("origin/main", "main"):
+        if _git(path, "rev-parse", "-q", "--verify", main + "^{commit}"):
+            if _is_ancestor(path, main):
+                return ""
+            return _git(path, "branch", "--contains", "HEAD", "--format=%(refname:short)")
     return _git(path, "for-each-ref", "--points-at", "HEAD", "--format=%(refname:short)", "refs/heads")
+
+
+def _is_ancestor(path, ref):
+    try:
+        r = subprocess.run(["git", "-C", path, "merge-base", "--is-ancestor", "HEAD", ref],
+                           capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
 
 
 def dirs_from_argv(argv):

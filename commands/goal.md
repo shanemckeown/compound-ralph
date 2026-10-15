@@ -563,8 +563,9 @@ set +e
 } > "$EVIDENCE_DIR/review-brief-round-N.txt"
 ```
 
-**Step 1: Astra at `xhigh` (always).** Run it in the foreground and read-only, with the brief on
-stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
+**Step 1: Astra at `xhigh` (always, except the claude route).** Check the route first (see
+"Claude route" right after this block); on `claude`, don't run this block. Run it in the
+foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
 ```bash
 set +e

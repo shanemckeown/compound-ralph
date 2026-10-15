@@ -260,7 +260,11 @@ finish_worker() {{
         dispatch_exit=64
         ;;
     esac
-    if [[ $dispatch_exit -ne 0 ]]; then
+    if [[ $dispatch_exit -eq 4 && "$next_kind" == codex ]]; then
+      # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+      python3 "$SLOTS" enqueue "$next_bead" goal
+      echo "fleet auto-drain: $next_bead is Claude-only; re-enqueued as kind=goal" >&2
+    elif [[ $dispatch_exit -ne 0 ]]; then
       # Both dispatchers release their pre-claimed slot on every failure path.
       # Restore the exact queue kind so a later drainer can try it again.
       python3 "$SLOTS" enqueue "$next_bead" "$next_kind"
