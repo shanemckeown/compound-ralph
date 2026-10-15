@@ -25,6 +25,10 @@ fi
 
 KIND="$1"; LABEL="$2"; shift 2
 
+# LUCY-b3hf5: a Claude-only client's bead never goes to codex or GLM. Checked here, before
+# the slot claim, as well as in bin/codex, so a caller that bypasses PATH is still caught.
+python3 "$(dirname "$0")/claude_only_guard.py" exec-check --label "$LABEL" -- "$@" || exit $?
+
 SLOTS="$HOME/.claude/scripts/fleet-slots.py"
 TOKEN=""
 DEADLINE=$(( $(date +%s) + 90 ))

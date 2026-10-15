@@ -1,0 +1,10 @@
+{
+  "_comment": "Clients whose beads are reviewed by Claude only: never codex/Astra/GLM (LUCY-b3hf5). A bead matches when it, its parent chain or a dotted-id ancestor carries a listed label or is a listed bead. Read by scripts/claude_only_guard.py.",
+  "labels": [
+    "client:dr-anita-dhunna",
+    "dr-anita-dhunna"
+  ],
+  "beads": [
+    "AestheticcNext-i6xyx"
+  ]
+}

@@ -31,6 +31,7 @@ EXISTING_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch.py")
 SLOTS = os.path.join(HOME, ".claude/scripts/fleet-slots.py")
 CLAUDE_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch.py")
 CODEX_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch-codex.py")
+CLAUDE_ONLY_GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_only_guard.py")
 WORKTREES_ROOT = os.path.join(HOME, ".claude/worktrees")
 WORKERS_ROOT = os.path.join(HOME, ".claude/fleet/codex-workers")
 MANIFEST = os.path.join(WORKERS_ROOT, "manifest.jsonl")
@@ -382,6 +383,18 @@ def release_codex_slot(slot_token):
 
 def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None, force_reason=None):
     validate_bead_id(bead)
+    # LUCY-b3hf5: a Claude-only client's bead is never handed to a Codex builder; --force
+    # does not override it. Dispatch it with fleet-dispatch.py (Claude) instead.
+    guard_code, _guard_out, guard_err = sh(
+        [sys.executable, CLAUDE_ONLY_GUARD, "check", bead], timeout=90
+    )
+    if guard_code != 0:
+        print(f"\nREFUSED. {guard_err or 'claude-only guard failed'}")
+        print(f"Dispatch it to Claude instead: python3 {CLAUDE_DISPATCHER} {bead}")
+        if pre_claimed:
+            release_codex_slot(pre_claimed)
+            print("Released pre-claimed codex_glm slot after Claude-only refusal.")
+        return 1
     failed, failures = DISPATCHER.run_gate(bead, False)
     refusal = DISPATCHER.force_refusal(failures, force, force_reason)
     if refusal:

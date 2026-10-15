@@ -40,7 +40,16 @@ case "$BEAD_ID" in
     echo "failed: unknown bead prefix in $BEAD_ID" && exit 1
     ;;
 esac
+export BEAD_ID EPIC_ID="$BEAD_ID"   # bin/codex reads these to attribute any codex call
+# LUCY-b3hf5: Claude-only clients are reviewed by Claude only (see /goal Phase 0a).
+REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
+
+🔴 **`REVIEW_ROUTE=claude` (an Anita epic, or anything in `claude-only-clients.json`): no
+codex/Astra/GLM anywhere in the run**, including dual-model children and `/autoplan`'s outside
+voice. Phase 4 then uses `/goal` Phase 4's claude route (two independent fresh-context Opus
+reviewers). `bin/codex`, `fleet-guarded.sh` and `fleet-dispatch-codex.py` refuse such a bead
+(exit 3); that refusal is the gate working, never something to route around.
 
 #### 0b. Load the epic
 
@@ -220,6 +229,10 @@ section) without disturbing the session.
 🔴 **One review per branch, not per child (LUCY-z3ykz.3, Shane 12 Oct "yes to everything").** The epic is one feature on one branch; each child is a commit. After every standard child is committed (each with its own tsc/lint and targeted tests, Phase 3), run **one** adversarial review over the whole branch diff (`git diff origin/main...HEAD`) before the single `/ship` push. The brief lists each child's id, commit SHA and acceptance criteria, and the verdict must give a per-child PASS/NEEDS_CHANGES so a finding still isolates to the child that caused it (12 Oct: per-change reviews ran every gate 3x for one feature). Reviewers run targeted tests only (`~/.claude/scripts/targeted-tests.py`); the heavy set (full pg lane, `test:cloudbuild`) runs once at landing when the batch's risk tier is full.
 
 **Exception — sensitive-path and migration children keep their own dual-model pass**, run right after that child's commit as before, so a money/auth/migration change is never reviewed only as one hunk of a large diff.
+
+**Claude route (`REVIEW_ROUTE=claude`):** both seats below are fresh-context Opus Agents
+(`/goal` Phase 4 claude route); no Codex pass, no GLM pass, for standard and sensitive children
+alike.
 
 **Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 

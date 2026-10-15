@@ -57,7 +57,17 @@ case "$BEAD_ID" in
     echo "failed: unknown bead prefix in $BEAD_ID" && exit 1
     ;;
 esac
+# LUCY-b3hf5: Claude-only clients (Anita, and anything in claude-only-clients.json) are
+# reviewed by Claude only. "claude" = no codex/Astra/GLM anywhere in this run.
+REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
+
+🔴 **`REVIEW_ROUTE=claude` means nothing from this run goes to a non-Claude model** — not
+Phase 4 Step 1, not `/autoplan`'s or `/codex`'s outside voice, not GLM. Phase 4 uses its
+claude route. This is structure, not prose: `~/.claude/bin/codex`, `fleet-guarded.sh` and
+`fleet-dispatch-codex.py` all refuse such a bead (exit 3) via `claude_only_guard.py`. A
+refusal from them is the gate working; never route around it. (15 Oct: Astra ran six times on
+an Anita branch when this was a prose rule.)
 
 #### 0b. Load the bead
 
@@ -581,6 +591,14 @@ REVIEWER="astra-xhigh"
 # releases it on exit. Never remove the wrapper to "simplify" the command.
 ```
 
+**Claude route (`REVIEW_ROUTE=claude`, Claude-only client): skip the Astra call above.**
+Instead spawn a fresh-context Opus Agent (`model: opus`) on the same brief as the Astra-seat
+reviewer; it writes `$EVIDENCE_DIR/claude-seat1-round-N.md`. Step 2 below always runs too, so
+the gate is two independent Claude reviews. Set `REVIEWER="opus x2 (Claude-only client)"`,
+write `fallback used: claude-only client — <guard reason>` to
+`$EVIDENCE_DIR/fallback-round-N.txt` (so the Step 4 checker drops the Astra log), and say so
+in Phase 7. This is not "Astra unavailable": the hold rule below does not apply.
+
 **If Codex itself fails** (non-zero exit that a resume doesn't fix: auth, quota or network),
 don't swap seats silently:
 - **Money / patient-data / tenancy bead (Step 2 applies): hold.** Its gate is two
@@ -624,8 +642,8 @@ clinic has (*"we never need two device sync ever"*). After Steps 1-3 finish, spa
 
 > You are the review lead. Follow `~/.claude/references/review-lead/LEAD.md` exactly. bead: $BEAD_ID;
 > round: N; scope_lock: <true|false>; evidence dir: $EVIDENCE_DIR (bead, comments, plan and diff
-> are in `brief-inputs-round-N/`; this round's verdicts are `astra-verdict-round-N.log` and, if
-> present, `opus-h2h-round-N.md`; earlier rounds' verdicts and `lead-round-*.json` are alongside).
+> are in `brief-inputs-round-N/`; this round's verdicts are `astra-verdict-round-N.log` (claude
+> route: `claude-seat1-round-N.md` instead) and, if present, `opus-h2h-round-N.md`; earlier rounds' verdicts and `lead-round-*.json` are alongside).
 > Write your JSON to `$EVIDENCE_DIR/lead-round-N.json`.
 
 The lead reads `Aestheticc/Ops/personas/CLINIC_REALITY.md` and the learned
@@ -650,6 +668,7 @@ python3 ~/.claude/references/review-lead/review_lead_check.py \
   $( grep -qs "^fallback used" "$EVIDENCE_DIR/fallback-round-N.txt" \
        || echo --verdict "$EVIDENCE_DIR/astra-verdict-round-N.log" ) \
   --verdict "$EVIDENCE_DIR/mutants-round-N.txt" \
+  $( [ -f "$EVIDENCE_DIR/claude-seat1-round-N.md" ] && echo --verdict "$EVIDENCE_DIR/claude-seat1-round-N.md" ) \
   $( [ -f "$EVIDENCE_DIR/opus-h2h-round-N.md" ] && echo --verdict "$EVIDENCE_DIR/opus-h2h-round-N.md" ) \
   --out-dir "$EVIDENCE_DIR" --round N $( [ "$SCOPE_LOCK" = true ] && echo --scope-lock )
 ```
