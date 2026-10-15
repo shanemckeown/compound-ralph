@@ -196,6 +196,17 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("REAL CODEX", out)
 
+    def test_detached_on_local_main_ahead_of_origin_main(self):
+        # ~/.claude: local main runs ahead of origin/main; a scratch on local main has no client diff.
+        repo, git = self._repo_with_main("ahead")
+        subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "main"], check=True)
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "local main ahead"], check=True)
+        subprocess.run(git + ["branch", "goal/aestheticcnext-anita1"], check=True)
+        subprocess.run(git + ["checkout", "-q", "--detach", "main"], check=True)
+        code, out, err = self.run_cmd([SHIM, "exec", "-"], cwd=repo)
+        self.assertEqual(code, 0, err)
+        self.assertIn("REAL CODEX", out)
+
     def test_detached_at_stale_tip_of_labelled_branch(self):
         # The review scratch was made at c1, then the builder committed c2 on the branch.
         repo, git = self._repo_with_main("stale")

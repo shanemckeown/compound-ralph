@@ -139,11 +139,12 @@ def git_branch(path):
     name = _git(path, "symbolic-ref", "--short", "-q", "HEAD")
     if name:
         return name
-    for main in ("origin/main", "main"):
-        if _git(path, "rev-parse", "-q", "--verify", main + "^{commit}"):
-            if _is_ancestor(path, main):
-                return ""
-            return _git(path, "branch", "--contains", "HEAD", "--format=%(refname:short)")
+    mains = [m for m in ("origin/main", "main")
+             if _git(path, "rev-parse", "-q", "--verify", m + "^{commit}")]
+    if any(_is_ancestor(path, m) for m in mains):  # local main may be ahead of origin/main
+        return ""
+    if mains:
+        return _git(path, "branch", "--contains", "HEAD", "--format=%(refname:short)")
     return _git(path, "for-each-ref", "--points-at", "HEAD", "--format=%(refname:short)", "refs/heads")
 
 
