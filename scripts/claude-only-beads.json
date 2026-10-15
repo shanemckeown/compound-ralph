@@ -1,0 +1,11 @@
+{
+  "_comment": "Beads whose content must never reach codex/Astra/GLM: patient records, imports and exports (LUCY-b3hf5; Shane 15 Oct: client business details may go to Astra, patient data may not). A bead matches when it, its parent chain or a dotted-id ancestor carries a listed label or is a listed bead. Label new patient-record work patient-data. Read by scripts/claude_only_guard.py.",
+  "labels": [
+    "patient-data",
+    "sensitive:patient-data",
+    "phi"
+  ],
+  "beads": [
+    "AestheticcNext-i6xyx"
+  ]
+}

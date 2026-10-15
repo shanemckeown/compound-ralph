@@ -1,0 +1,33 @@
+#!/bin/bash
+# codex PATH shim (LUCY-b3hf5): refuses any codex call attributable to a Claude-only
+# (patient-data) bead, then execs the real codex. bin/glm is a symlink to this file and does the
+# same for glm. Same pattern as bin/bd (bd-close-guard);
+# ~/.claude/bin is first on PATH via ~/.zshrc. The bead comes from $BEAD_ID/$EPIC_ID/
+# $CHILD_ID or the git branch of --cd/-C and the cwd (a detached checkout uses the branches
+# pointing at HEAD); see scripts/claude_only_guard.py.
+# MARKER: claude-only-codex-shim (a worktree copy of this file also on PATH is skipped, not exec'd)
+set -uo pipefail
+
+NAME="$(basename "${BASH_SOURCE[0]}")"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$NAME"
+GUARD="$(dirname "$SELF")/../scripts/claude_only_guard.py"
+
+case "${1:-}" in
+  --version|-V|--help|-h|help|login|logout|completion) ;;  # nothing leaves the machine
+  *)
+    python3 "$GUARD" exec-check -- "$@" || exit $?
+    ;;
+esac
+
+IFS=: read -ra DIRS <<< "${PATH:-}"
+for d in "${DIRS[@]}"; do
+  cand="$d/$NAME"
+  [ -x "$cand" ] && [ ! -d "$cand" ] || continue
+  real="$(cd "$(dirname "$cand")" 2>/dev/null && pwd -P)/$NAME"
+  [ "$real" = "$SELF" ] && continue
+  # head: the real codex is a ~240 MB binary; grepping all of it costs seconds per call
+  head -c 4096 "$cand" 2>/dev/null | grep -q 'MARKER: claude-only-codex-shim' && continue
+  exec "$cand" "$@"
+done
+echo "$NAME shim: no real $NAME found on PATH" >&2
+exit 127

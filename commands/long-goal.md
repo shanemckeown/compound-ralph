@@ -40,7 +40,17 @@ case "$BEAD_ID" in
     echo "failed: unknown bead prefix in $BEAD_ID" && exit 1
     ;;
 esac
+# bin/codex attributes a codex call by the cwd's branch (and $BEAD_ID/$EPIC_ID if set in the
+# same Bash call; shell variables don't carry over between calls). Recompute the route at Phase 4.
+# LUCY-b3hf5: patient-data beads are reviewed by Claude only (see /goal Phase 0a).
+REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
+
+🔴 **`REVIEW_ROUTE=claude` (a `patient-data` epic, or anything in `claude-only-beads.json`): no
+codex/Astra/GLM anywhere in the run**, including dual-model children and `/autoplan`'s outside
+voice. Phase 4 then uses `/goal` Phase 4's claude route (two independent fresh-context Opus
+reviewers). `bin/codex`, `fleet-guarded.sh` and `fleet-dispatch-codex.py` refuse such a bead
+(exit 3); that refusal is the gate working, never something to route around.
 
 #### 0b. Load the epic
 
@@ -221,6 +231,13 @@ section) without disturbing the session.
 
 **Exception — sensitive-path and migration children keep their own dual-model pass**, run right after that child's commit as before, so a money/auth/migration change is never reviewed only as one hunk of a large diff.
 
+**Claude route (`REVIEW_ROUTE=claude`):** recompute it here
+(`python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID"`). On `claude`, both seats
+below are fresh-context Opus Agents (`/goal` Phase 4 claude route); no Codex pass, no GLM pass,
+for standard and sensitive children alike. Valid evidence is `/goal`'s claude-route clause:
+`claude-seat1-round-N.md` and `opus-h2h-round-N.md` both complete, with the `fallback used:
+claude-only` line.
+
 **Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 
 **Sensitive-path children (Stripe/payments/auth) and migration children (per 0f): dual-model.** Run the standard Codex pass, and separately run `glm review` against the same diff (`~/.claude/scripts/fleet-guarded.sh glm "$EPIC_ID/$CHILD_ID phase4 dual-model" glm review "<one-line focus matching the bead's acceptance criteria>" --cd "$(pwd)" --base origin/main -o "$EVIDENCE_DIR/glm-verdict-round-N.txt"`) — give GLM the same qa.md calibration text, not just a one-line acceptance-criteria focus. 🔴 The `fleet-guarded.sh` wrapper claims/releases against the same 11-total fleet budget as Agent View dispatch — with two dual-model children potentially running Codex+GLM concurrently across several worktrees, this is exactly where uncounted load would otherwise pile up fastest. Neither reviewer sees the other's verdict before producing its own. Both artifacts go in `$EVIDENCE_DIR`. A child is QA-clean only when **both** are PASS with no unresolved *calibrated* S1/S2 (re-apply the calibration gate to each finding before counting it — see above). If they disagree after calibration, resolve toward whichever raised the surviving issue — do not average two verdicts into a pass, and do not skip calibration just because two models happened to agree.
@@ -312,7 +329,10 @@ if [ "$NEXT_INFO" != "NONE" ]; then
       ;;
   esac
   RC=$?
-  if [ $RC -ne 0 ]; then
+  if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then
+    # Claude-only bead (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" goal
+  elif [ $RC -ne 0 ]; then
     # Both dispatchers release their pre-claimed slot on any failure path.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
   fi

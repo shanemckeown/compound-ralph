@@ -796,6 +796,10 @@ This ancestry check is intentionally redundant with `bd-close-guard` (`~/.claude
 🔴 **B-2 (AI Fleet Grand Plan, 2026-09-01): post-land goal-state review, a different model family asking a different question than Phase 4 already did.** `/goal` Phase 4 (Codex, or GLM per B-10) already reviewed the DIFF — is this change sound. This is the SECOND, independent check, run only after a real close above, asking the GOAL-STATE question instead: does this bug-shape exist anywhere ELSE in the repo, fixed or not. This is exactly the check that would have caught `AestheticcNext-n708r`'s third unfixed copy at land time instead of three days later as a separately-filed `zrexy`. Only runs for a bead that was actually closed just now (skip entirely on HELD):
 
 ~~~bash
+# LUCY-b3hf5: a patient-data bead's diff never goes to GLM. The scratch's branch doesn't
+# name the bead, so nothing downstream can attribute the call: check it here.
+CLAUDE_ONLY=0
+python3 ~/.claude/scripts/claude_only_guard.py check "$BEAD_ID" 2>/dev/null || CLAUDE_ONLY=1
 if [[ "$CLOSE_RESULT" == "closed" ]]; then
   GLM_GOALSTATE_PROMPT="This fix landed at $MERGE_SHA (bead $BEAD_ID). Diff below. Enumerate every OTHER site in the repo that implements the same operation/state as this fix, and state for each whether the fix applies there too — i.e. does the same bug-shape still exist somewhere unfixed. Do NOT review the diff itself for correctness; a different reviewer already did that in /goal Phase 4. Answer ONLY the goal-state question: other sites, fixed or not, one line each. If there are none, say so plainly.
 
@@ -803,9 +807,16 @@ DIFF:
 $(git -C "$SCRATCH" show "$MERGE_SHA")"
 
   set +e
-  echo "$GLM_GOALSTATE_PROMPT" | glm review --cd "$SCRATCH" \
-    > "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>&1
-  GLM_GS_EXIT=$?
+  if [[ "$CLAUDE_ONLY" == 1 ]]; then
+    # Claude-only (patient-data) bead: never GLM. Exit 99 takes the Opus path below.
+    echo "Claude-only (patient-data) bead: goal-state review answered by Opus in-session, not GLM." \
+      > "/tmp/land-batch-goalstate-$BEAD_ID.log"
+    GLM_GS_EXIT=99
+  else
+    echo "$GLM_GOALSTATE_PROMPT" | glm review --cd "$SCRATCH" \
+      > "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>&1
+    GLM_GS_EXIT=$?
+  fi
   set -e
 
   if [[ "$GLM_GS_EXIT" -ne 0 ]]; then
@@ -814,7 +825,7 @@ $(git -C "$SCRATCH" show "$MERGE_SHA")"
     # there is no separate CLI call for this leg, same as every other GLM-outage path.)
   fi
 
-  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || echo 'opus, GLM unreachable')): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
+  bd comment "$BEAD_ID" "Post-land goal-state review ($([ "$GLM_GS_EXIT" -eq 0 ] && echo glm || { [ "$CLAUDE_ONLY" == 1 ] && echo 'opus, Claude-only bead' || echo 'opus, GLM unreachable'; })): $(cat "/tmp/land-batch-goalstate-$BEAD_ID.log" 2>/dev/null | head -c 4000)"
 
   # Any line naming a real, still-unfixed other site: auto-file a child bead rather
   # than requiring a human to notice it in the comment. Same prefix as $BEAD_ID,
@@ -1245,7 +1256,10 @@ git -C "$REPO" worktree add "$FIX_SCRATCH" origin/main
 python3 ~/.claude/skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$FIX_SCRATCH" --repo "$REPO"
 ~~~
 
-For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files;
+For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files. If the feature's
+bead is Claude-only (patient data) (`python3 ~/.claude/scripts/claude_only_guard.py check <bead>` exits
+3), fix it yourself (Opus) instead: the scratch is off origin/main, so the codex shim can't
+attribute the call (LUCY-b3hf5);
 surface any sensitive path. Commit atomically, then direct ff-push to main with
 SHIP’s existing fetch/rebase/re-gate/retry discipline, never force-pushing
 (all `-C "$FIX_SCRATCH"`). LAND candidate merges use fresh replay as documented
