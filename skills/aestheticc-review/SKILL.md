@@ -74,7 +74,13 @@ Write the plan to `.goal/PLAN.md`, or to the bead with `bd comment`. Never use `
 
 Run after every push. You need the bead ID, the branch and the tip SHA. The diff base is `origin/main`, unless the bead names a stacked base.
 
-**Step 1: independent Astra review (always).** Run it in the foreground, read-only, with stdin closed:
+**Step 1: independent Astra review (always, except Claude-only clients).** First run
+`python3 ~/.claude/scripts/claude_only_guard.py route <bead>`. If line 1 is `claude` (Anita, or
+anything in `~/.claude/scripts/claude-only-clients.json`), skip codex: this seat is a
+fresh-context Opus Agent on the same brief, and Step 2 runs as well, so the review is two
+independent Claude reviews (LUCY-b3hf5). `~/.claude/bin/codex` refuses the call anyway (exit 3),
+including from a detached scratch at the branch tip. Otherwise run Astra in the foreground,
+read-only, with stdin closed:
 
 ```bash
 cd <scratch worktree at tip> && codex exec -c model_reasoning_effort=xhigh -s read-only \

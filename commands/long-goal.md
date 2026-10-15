@@ -40,7 +40,8 @@ case "$BEAD_ID" in
     echo "failed: unknown bead prefix in $BEAD_ID" && exit 1
     ;;
 esac
-export BEAD_ID EPIC_ID="$BEAD_ID"   # bin/codex reads these to attribute any codex call
+# bin/codex attributes a codex call by the cwd's branch (and $BEAD_ID/$EPIC_ID if set in the
+# same Bash call; shell variables don't carry over between calls). Recompute the route at Phase 4.
 # LUCY-b3hf5: Claude-only clients are reviewed by Claude only (see /goal Phase 0a).
 REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
@@ -230,9 +231,12 @@ section) without disturbing the session.
 
 **Exception — sensitive-path and migration children keep their own dual-model pass**, run right after that child's commit as before, so a money/auth/migration change is never reviewed only as one hunk of a large diff.
 
-**Claude route (`REVIEW_ROUTE=claude`):** both seats below are fresh-context Opus Agents
-(`/goal` Phase 4 claude route); no Codex pass, no GLM pass, for standard and sensitive children
-alike.
+**Claude route (`REVIEW_ROUTE=claude`):** recompute it here
+(`python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID"`). On `claude`, both seats
+below are fresh-context Opus Agents (`/goal` Phase 4 claude route); no Codex pass, no GLM pass,
+for standard and sensitive children alike. Valid evidence is `/goal`'s claude-route clause:
+`claude-seat1-round-N.md` and `opus-h2h-round-N.md` both complete, with the `fallback used:
+claude-only client` line.
 
 **Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 
@@ -325,7 +329,10 @@ if [ "$NEXT_INFO" != "NONE" ]; then
       ;;
   esac
   RC=$?
-  if [ $RC -ne 0 ]; then
+  if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then
+    # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" goal
+  elif [ $RC -ne 0 ]; then
     # Both dispatchers release their pre-claimed slot on any failure path.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
   fi

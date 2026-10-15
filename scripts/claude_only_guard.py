@@ -121,14 +121,23 @@ def why_claude_only(bead):
     return None
 
 
-def git_branch(path):
+def _git(path, *args):
     try:
-        r = subprocess.run(["git", "-C", path, "symbolic-ref", "--short", "-q", "HEAD"],
-                           capture_output=True, text=True, timeout=10,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
+                           timeout=10, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def git_branch(path):
+    """Branch name(s) for the checkout at path. A detached HEAD (a review scratch worktree
+    at a branch tip, since git won't check out a branch another worktree holds) falls back
+    to every local branch pointing at HEAD."""
+    name = _git(path, "symbolic-ref", "--short", "-q", "HEAD")
+    if name:
+        return name
+    return _git(path, "for-each-ref", "--points-at", "HEAD", "--format=%(refname:short)", "refs/heads")
 
 
 def dirs_from_argv(argv):

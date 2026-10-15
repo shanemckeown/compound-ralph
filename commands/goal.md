@@ -592,7 +592,9 @@ REVIEWER="astra-xhigh"
 ```
 
 **Claude route (`REVIEW_ROUTE=claude`, Claude-only client): skip the Astra call above.**
-Instead spawn a fresh-context Opus Agent (`model: opus`) on the same brief as the Astra-seat
+Shell variables don't survive between Bash calls, so recompute the route here first:
+`python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID"` (line 1 `claude` or
+`astra`; save it to `$EVIDENCE_DIR/route-round-N.txt`). On `claude`, spawn a fresh-context Opus Agent (`model: opus`) on the same brief as the Astra-seat
 reviewer; it writes `$EVIDENCE_DIR/claude-seat1-round-N.md`. Step 2 below always runs too, so
 the gate is two independent Claude reviews. Set `REVIEWER="opus x2 (Claude-only client)"`,
 write `fallback used: claude-only client — <guard reason>` to
@@ -719,8 +721,11 @@ captured output, and exit-code artifacts under `$EVIDENCE_DIR`; those files must
 exist, and the output must record the command that actually ran. **All** of these must hold:
 (1) the QA exit-code file contains `0`, with no exceptions; (2) the Astra exit-code file
 contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
-`fallback used` alongside a completed Opus verdict; (3) where Step 2 applies, both the Astra
-and the Opus verdicts are complete (no fallback exists for these); (4) `mutants-round-N.txt`
+`fallback used` alongside a completed Opus verdict, **or** on the claude route (any bead,
+sensitive included) `fallback-round-N.txt` says `fallback used: claude-only client` and
+`claude-seat1-round-N.md` is complete; (3) where Step 2 applies, both the Astra
+and the Opus verdicts are complete (no Astra-unavailable fallback exists for these; on the
+claude route, `claude-seat1-round-N.md` and `opus-h2h-round-N.md` are both complete); (4) `mutants-round-N.txt`
 exists; (5) `lead-round-N.json` exists and `review_lead_check.py` exited 0 on it.
 A model-returned PASS without those
 artifacts is QA FAILED. "Suite did not run" never equals "suite passed."
@@ -927,7 +932,10 @@ if [ "$NEXT_INFO" != "NONE" ]; then
       ;;
   esac
   RC=$?
-  if [ $RC -ne 0 ]; then
+  if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then
+    # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+    python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" goal
+  elif [ $RC -ne 0 ]; then
     # Both dispatchers release their pre-claimed slot on any failure path.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" "$NEXT_KIND"
   fi

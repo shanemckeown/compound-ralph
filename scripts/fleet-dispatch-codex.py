@@ -32,6 +32,8 @@ SLOTS = os.path.join(HOME, ".claude/scripts/fleet-slots.py")
 CLAUDE_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch.py")
 CODEX_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch-codex.py")
 CLAUDE_ONLY_GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_only_guard.py")
+# Exit code for a Claude-only refusal: the queue drains re-enqueue it as kind "goal", not "codex".
+CLAUDE_ONLY_EXIT = 4
 WORKTREES_ROOT = os.path.join(HOME, ".claude/worktrees")
 WORKERS_ROOT = os.path.join(HOME, ".claude/fleet/codex-workers")
 MANIFEST = os.path.join(WORKERS_ROOT, "manifest.jsonl")
@@ -394,7 +396,7 @@ def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None, force_r
         if pre_claimed:
             release_codex_slot(pre_claimed)
             print("Released pre-claimed codex_glm slot after Claude-only refusal.")
-        return 1
+        return CLAUDE_ONLY_EXIT
     failed, failures = DISPATCHER.run_gate(bead, False)
     refusal = DISPATCHER.force_refusal(failures, force, force_reason)
     if refusal:

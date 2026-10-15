@@ -17,6 +17,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent
 ROOT = SCRIPTS.parent
 GUARD = SCRIPTS / "claude_only_guard.py"
 SHIM = ROOT / "bin" / "codex"
+GLM_SHIM = ROOT / "bin" / "glm"
 FLEET_GUARDED = SCRIPTS / "fleet-guarded.sh"
 CODEX_DISPATCH = SCRIPTS / "fleet-dispatch-codex.py"
 REAL_ALLOWLIST = SCRIPTS / "claude-only-clients.json"
@@ -63,6 +64,8 @@ class GuardTest(unittest.TestCase):
         real.mkdir()
         (real / "codex").write_text(FAKE_CODEX)
         (real / "codex").chmod(0o755)
+        (real / "glm").write_text(FAKE_CODEX.replace("REAL CODEX", "REAL GLM"))
+        (real / "glm").chmod(0o755)
         self.plain_dir = t / "plain"
         self.plain_dir.mkdir()
         self.env = {
@@ -166,6 +169,45 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("REAL CODEX", out)
 
+    def test_shim_reads_detached_head_at_branch_tip(self):
+        # A review scratch worktree at the tip is detached (the builder's worktree holds the branch).
+        repo = self.t / "scratch"
+        git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", "-b", "long-goal/aestheticcnext-anita1", str(repo)], check=True)
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        subprocess.run(git + ["checkout", "-q", "--detach"], check=True)
+        code, out, err = self.run_cmd([SHIM, "exec", "brief"], cwd=repo)
+        self.assertEqual(code, 3, err)
+        self.assertNotIn("REAL CODEX", out)
+
+    def test_shim_reads_dash_c_dir(self):
+        repo = self.t / "wt2"
+        subprocess.run(["git", "init", "-q", "-b", "goal/aestheticcnext-anita1-r2", str(repo)], check=True)
+        code, out, _ = self.run_cmd([SHIM, "-C", repo, "exec", "-"])
+        self.assertEqual(code, 3)
+        self.assertNotIn("REAL CODEX", out)
+
+    def test_branch_naming_a_missing_bead_passes(self):
+        repo = self.t / "wt3"
+        subprocess.run(["git", "init", "-q", "-b", "fix/lucy-bot-login", str(repo)], check=True)
+        code, out, err = self.run_cmd([SHIM, "exec", "-"], cwd=repo)
+        self.assertEqual(code, 0, err)
+        self.assertIn("REAL CODEX", out)
+
+    def test_shim_checks_every_sending_subcommand(self):
+        for sub in (["e", "-"], ["review"], ["exec", "resume", "abc", "go"], ["apply"], []):
+            code, out, _ = self.run_cmd([SHIM, *sub], BEAD_ID="AestheticcNext-anita1")
+            self.assertEqual(code, 3, sub)
+            self.assertNotIn("REAL CODEX", out, sub)
+
+    def test_glm_shim_refuses_and_passes(self):
+        code, out, err = self.run_cmd([GLM_SHIM, "review", "--cd", "."], BEAD_ID="AestheticcNext-anita1")
+        self.assertEqual(code, 3, err)
+        self.assertNotIn("REAL GLM", out)
+        code, out, err = self.run_cmd([GLM_SHIM, "review"], BEAD_ID="AestheticcNext-plain")
+        self.assertEqual(code, 0, err)
+        self.assertIn("REAL GLM review", out)
+
     def test_shim_version_is_not_checked(self):
         code, out, _ = self.run_cmd([SHIM, "--version"], BEAD_ID="AestheticcNext-anita1")
         self.assertEqual(code, 0)
@@ -176,15 +218,15 @@ class GuardTest(unittest.TestCase):
         for kind in ("codex", "glm"):
             code, out, err = self.run_cmd(
                 ["bash", FLEET_GUARDED, kind, "AestheticcNext-anita1 phase4 review round-1",
-                 "echo", "SENT"])
-            self.assertNotEqual(code, 0, kind)
+                 "echo", "SENT"], HOME=str(self.t))
+            self.assertEqual(code, 3, kind)
             self.assertNotIn("SENT", out, kind)
             self.assertIn("REFUSED", err, kind)
 
     def test_codex_dispatcher_refuses(self):
         code, out, err = self.run_cmd(
             [sys.executable, CODEX_DISPATCH, "dispatch", "AestheticcNext-anita1", "--dry-run", "--force"])
-        self.assertNotEqual(code, 0, out + err)
+        self.assertEqual(code, 4, out + err)  # distinct: the queue drain re-queues it as goal
         self.assertIn("REFUSED", out)
         self.assertIn("Claude only", out)
 
