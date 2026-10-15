@@ -27,7 +27,7 @@ Repo: `/Users/shane/Documents/GitReBase/AestheticcNext`. Run `bd` inside the rep
 
 **Severity** (see CLAUDE.md for the exact wording):
 - **P1:** money, patient data, tenancy or security. Blocks landing.
-- **P2:** any user-facing broken promise, where a button or workflow does not do what it says. Blocks landing.
+- **P2:** any user-facing broken promise, where a button or workflow does not do what it says. Also an **H-D0 duplicate path** (below), with no clinic-scenario filter. Blocks landing.
 - **P3:** only for issues that are not user-facing. It may land unfixed if the builder rejects it in one written line.
 - Do not grade a defect down because its patch is small.
 
@@ -35,7 +35,7 @@ Repo: `/Users/shane/Documents/GitReBase/AestheticcNext`. Run `bd` inside the rep
 
 ## Mode: `plan`
 
-Write the plan to `.goal/PLAN.md`, or to the bead with `bd comment`. Never use `--notes`: it replaces the existing text. The plan needs these six fields, in this order:
+Write the plan to `.goal/PLAN.md`, or to the bead with `bd comment`. Never use `--notes`: it replaces the existing text. The plan needs these seven fields, in this order:
 
 1. **OUTCOME PROMISE.** Shane's words, in the form "pressing X does Y for Z". This is the acceptance criterion. It is verified by driving the app, not by reading code.
 2. **PREMISE CHECK.** Show on prod that the problem is real before building anything.
@@ -44,19 +44,25 @@ Write the plan to `.goal/PLAN.md`, or to the bead with `bd comment`. Never use `
    - `treatments.updated_at` is not bumped by the PUT or by soft-delete, so do not use it to date a change. Use row `xmin` and the capture notes instead.
    - Record the query and its result. oa58j and 0mwa0 were both filed on premises that prod disproved.
    - If the premise is false, rescope or downgrade the bead before planning.
-3. **TOUCHPOINT MAP.** Grep every call site and every copy of the rule, predicate or writer being changed, and list them as `file:line`. Cover:
+3. **EXISTING CAPABILITY.** Before designing anything, grep for every table, module, setting, predicate, util or send path that already does part of the outcome *for the same actor and data*. List each as `file:line` with one of:
+   - `EXTEND <file:line>`: the default. "Extend X with one column or setting" is the expected answer.
+   - `NEW PATH <file> — <why extending the existing path fails>`: a new path needs this written reason. A NEW PATH with no reason fails plan review.
+   - `none — <why no existing path fits>` when nothing similar exists. A bare `none` fails.
+   - Client-shaped work adds one line `Generic: <feature name>, first used by <client>`.
+   - `python3 ~/.claude/scripts/goal-plan-fields.py <plan>` checks this field is there and filled in (/goal Phase 2b runs it). A reviewer who later finds an unrecorded second path raises H-D0. *(mbow6-r2: ~2,500 lines and 5 schema changes beside account credit, where account credit plus an expiry column was the design)*
+4. **TOUCHPOINT MAP.** Grep every call site and every copy of the rule, predicate or writer being changed, and list them as `file:line`. Cover:
    - every write path: web, diary, v1 API, client appointments, portal, voice, concierge, waitlist claim, package auto-book, mobile
    - every read path, plus the readers of any field whose writer changes (COM-02, UI-05)
    - "fixed at two sites" is a finding waiting to happen. o2lrj needed 10 sites across 3 rounds.
-4. **HAZARDS.** Quote each hazard ID below that applies, with a one-line answer ("H-M3: POS settle voids the link at pos/checkout.ts:NNN"). Name the ones that do not apply.
-5. **SHANE QUESTIONS.** Put the outcome, UI, business and clinical questions in ONE batched list. Code questions never go to Shane. If one would, the plan is not finished; decide it with the Shane Decision Frame. Typical questions:
+5. **HAZARDS.** Quote each hazard ID below that applies, with a one-line answer ("H-M3: POS settle voids the link at pos/checkout.ts:NNN"). Name the ones that do not apply.
+6. **SHANE QUESTIONS.** Put the outcome, UI, business and clinical questions in ONE batched list. Code questions never go to Shane. If one would, the plan is not finished; decide it with the Shane Decision Frame. Typical questions:
    - Does every booking get this, or is it a tick-box?
    - Should it auto-release or only flag?
    - Which channels should it use?
    - What is the lifetime or cutoff?
    - Does "switched off" include "hidden"?
    - Does the rule apply to new bookings only, or to reschedules too?
-6. **ACCEPTANCE TESTS.** Name the runnable tests that prove the promise. For each one, state:
+7. **ACCEPTANCE TESTS.** Name the runnable tests that prove the promise. For each one, state:
    - the real path it drives: the handler, the real SQL on pg, or the rendered email. A mocked writer does not count.
    - the mutation it must catch ("revert X → this test fails")
    - the Settings save/reload and clinic-isolation cell, if a clinic control is involved (settings contract, UI-06)
@@ -182,6 +188,7 @@ Each hazard has an ID, a checkable question, and the bead(s) where it was learne
 - **H-U3 A staff alert stays until it is acted on, and names the thing.** It is not dated "today" only, it is deduped on a stable key across replays and days, and it names the package or session. *(1o8a1)*
 
 ### Data, tests and evidence (DR-02, DR-06, DR-07)
+- **H-D0 Duplicate path (P2, blocks landing; both modes, every review answers it).** Does the change add a table, column set, setting, module, predicate, util or send path that does a job an existing one already does for the same actor and data, without a refused-extend reason in the plan's EXISTING CAPABILITY field? Cite the existing path as `file:line`. Tiebreak: could this outcome have shipped by adding at most one column or setting to the thing that already does the job? Yes, and the plan gives no reason → P2. Label the finding `H-D0` and grade it P2 even if it looks small. The CLINIC_REALITY "no scenario, no finding" filter does not apply: it is structural, and the cost two months later is the scenario. `review_lead_check.py` accepts it without a clinic scenario and refuses to Note it. *(mbow6-r2 consult credit beside account credit; comms kernel beside 5 legacy send paths; 9 phone normalisers; Shane 15 Oct: "Yes, P2 blocks")*
 - **H-D1 Tests are non-vacuous.** Revert the guard and the test must fail. A control must pass both ways. Mocks must not always throw. *(0mwa0, c96ck, lmmle)*
 - **H-D2 Tests exercise the real path.** Drive the real handler or SQL on pg. Render the real email, mocking only the transport. A pg test covers reminder or selection SQL that a unit test fakes. *(vg5rs findDue, jdfqy, lmmle)*
 - **H-D3 Fixtures do not encode the bug.** Use realistic values: a staff memo that reads like a memo, not a treatment name. *(lmmle)*

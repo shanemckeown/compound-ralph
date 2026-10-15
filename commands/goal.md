@@ -186,6 +186,12 @@ save/persist action, confirm .goal/PLAN.md names the new `promise_inventory.json
 
 1. If not already in a worktree, call `EnterWorktree`. Otherwise work in place.
 2. Branch name: `goal/<bead-id-lowercase>` for singletons, `goal/<epic-id-lowercase>` for bundles.
+   🔴 **A re-dispatch resumes the bead's branch, never a `-rN` sibling (LUCY-6v5gv).** If a
+   worktree for the bead exists, enter it with `EnterWorktree` (`path`). Otherwise, if
+   `origin/goal/<id>` exists (or its newest unlanded `-rN`, as `fleet-dispatch.py` check 1
+   printed under "resume"), run `git checkout -B goal/<id> origin/<that branch>` in the new
+   worktree and build on top of it. Never start a fresh branch beside it. A live session on the
+   bead makes check 1 refuse, so a resume never fights a running builder.
 3. For each bead in scope:
    ```bash
    bd update <ID> --claim --status=in_progress
@@ -221,7 +227,7 @@ hand` in the evidence.
 
 **Bundle:** compose one plan per child at `.goal/plans/<child-id>.md` (create `.goal/plans/` if needed), plus a `.goal/BUNDLE.md` that links all child plans and states the execution order. For bundles, references to `.goal/PLAN.md` below mean the corresponding child plan.
 
-Each PLAN contains, **in this order**. The first six are `aestheticc-review plan`'s fields;
+Each PLAN contains, **in this order**. The first seven are `aestheticc-review plan`'s fields;
 use its headings:
 - **Outcome promise** — first line, in Shane's words: "pressing X does Y for Z". This is the
   acceptance criterion, verified by driving the app, not by reading code.
@@ -231,6 +237,13 @@ use its headings:
   Where no prod state is involved (a new capability, a harness or tooling change), write
   `n/a — <why no prod state is involved>` plus the evidence the need is real: the Shane
   request or capture it came from, or the failing check. A bare `n/a` is not a premise.
+- **Existing capability** (LUCY-fuu2h, Shane 15 Oct) — before designing, grep for every table,
+  module, setting, predicate, util or send path that already does part of the outcome for the
+  same actor and data. One line each: `EXTEND <file:line>` (the default: extend it with a
+  column or setting), or `NEW PATH <file> — <why extending fails>`, or `none — <why nothing
+  similar exists>`. A NEW PATH with no reason, or a bare `none`, fails Phase 2b. Client-shaped
+  work adds `Generic: <feature name>, first used by <client>`. A reviewer who later finds an
+  unrecorded second implementation raises H-D0, a P2 that blocks landing.
 - **Touchpoint map** — every call site and every copy of the rule / predicate / writer being
   changed, as `file:line`: every write path, and every reader of a field whose writer changes.
 - **Hazards answered** — each applicable hazard ID from the skill with a one-line answer; name
@@ -307,8 +320,11 @@ every `/goal` dispatch. Do not proceed to Phase 3 without running this.
 **2. Route to reviews.** Keep this gate light on purpose — see the note below.
 
 `aestheticc-review plan` has already run in Phase 2 on **every** bead, and that is not
-routed. Check here that the plan carries all six of its fields; a plan missing one goes back
-to Phase 2. The routing below adds only the *extra* reviews:
+routed. Check here that the plan carries all seven of its fields, by running
+`python3 ~/.claude/scripts/goal-plan-fields.py .goal/PLAN.md` (bundles: every
+`.goal/plans/*.md`). Exit 1 means a field is missing, out of order, or EXISTING CAPABILITY is
+empty or has a NEW PATH with no reason: the plan goes back to Phase 2. Save its output to the
+evidence directory. The routing below adds only the *extra* reviews:
 
 ```
 touchesSensitive       -> none extra            # aestheticc-review plan already covers it
@@ -593,7 +609,9 @@ a promised behaviour is a P2 (H-D1). The file is a verdict the lead must classif
 `P2 <file:line> — mutant survived: <what was reverted> — <test to add>`.
 
 **Severity is the CLAUDE.md review line (decision #4):** P1 = money / patient data / tenancy /
-security; P2 = any user-facing broken promise; both block. P3 = not user-facing only, and it
+security; P2 = any user-facing broken promise, or an H-D0 duplicate path (a second
+implementation of a job an existing path already does, with no refused-extend reason in the
+plan; no clinic-scenario filter); both block. P3 = not user-facing only, and it
 may pass with one written line rejecting it. Don't grade a defect down because its patch is small.
 
 **Step 4: review lead: only Act-on findings reach you (LUCY-oawgi, Shane 26 Sep).** Don't read

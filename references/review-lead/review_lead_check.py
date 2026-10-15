@@ -20,6 +20,12 @@ Refuses (exit 1, reasons on stderr) when:
   - more than 5 blocking act_on items without act_on_over_cap_reason;
   - round >= 2 and no premise block;
   - a pre_existing act_on / consider item lacks a follow_up bead title.
+Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
+  - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
+    whatever severity the reviewer wrote, so it can never be Noted;
+  - it is structural: an act_on needs no clinic_scenario, and it is never demoted to a P4 note;
+  - one the branch added that is Consider, or Act on but out of scope under the lock, escalates
+    (blocks landing) instead of becoming a follow-up; a pre_existing one is a follow-up.
 Ordinary-use triage (LUCY-r1lyy, Shane 7 Oct 2026, CLINIC_REALITY "The ordinary-use test"):
   - every finding states `ordinary_use` (how ONE person using the app normally triggers it with
     one or two ordinary actions, or "none: <why>") and `carve_out` (true when it touches money,
@@ -55,8 +61,12 @@ OPEN_CATEGORIES = {"clinical_record_concurrency", "timing_window", "crafted_requ
                    # what a user sees or is told (broken promise, wrong screen): carve-out from the
                    # ordinary-use demotion, but the lead may still dismiss a hypothetical one.
                    "user_facing"}
-CATEGORIES = PROTECTED_CATEGORIES | OPEN_CATEGORIES
-CARVE_OUT_CATEGORIES = PROTECTED_CATEGORIES | {"user_facing"}
+# H-D0: a second implementation of a job an existing table/module/setting/send path already does.
+# Not protected (the lead may dismiss it with a reason, e.g. the plan recorded why extending failed).
+STRUCTURAL_CATEGORIES = {"duplicate_path"}
+CATEGORIES = PROTECTED_CATEGORIES | OPEN_CATEGORIES | STRUCTURAL_CATEGORIES
+CARVE_OUT_CATEGORIES = PROTECTED_CATEGORIES | {"user_facing"} | STRUCTURAL_CATEGORIES
+DUPLICATE_PATH = re.compile(r"\bH-D0\b|\bduplicate[- ]path\b", re.I)
 # An ordinary_use value that says there is no ordinary path counts as absent.
 NO_ORDINARY_USE = re.compile(r"^\s*(none|n/?a|no\b|not (an )?ordinary|unknown|-+)\b", re.I)
 
@@ -116,6 +126,10 @@ def pattern_names():
     return {norm(m.group(1)).lower() for m in re.finditer(r"(?m)^###\s+(.+)$", PATTERNS.read_text())}
 
 
+def is_duplicate_path(f, src):
+    return f.get("category") in STRUCTURAL_CATEGORIES or bool(DUPLICATE_PATH.search(src))
+
+
 def has_ordinary_use(f):
     text = norm(f.get("ordinary_use") or "")
     return len(text) >= 12 and not NO_ORDINARY_USE.match(text)
@@ -128,7 +142,7 @@ def is_carve_out(f, protected):
 def triage_ordinary_use(f, protected):
     """Mark an act_on / consider finding `_demoted` (P4 note) when it has no ordinary-use path
     and is not in the carve-out. Dismissed / noted items are already non-blocking."""
-    f["_carve_out"] = is_carve_out(f, protected)
+    f["_carve_out"] = is_carve_out(f, protected) or f.get("_duplicate_path") is True
     f["_demoted"] = (f.get("verdict") in ("act_on", "consider") and not f["_carve_out"]
                      and not has_ordinary_use(f))
     return f["_demoted"]
@@ -163,10 +177,11 @@ def check(lead, reviewer_lines, round_no, scope_lock):
             errs.append(f"{tag}: category {cat!r} is not one of {sorted(CATEGORIES)}")
         protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
         f["_protected"] = protected
+        dup = f["_duplicate_path"] = is_duplicate_path(f, src)
         if triage_ordinary_use(f, protected):
             pass  # P4 note: no scenario, demonstration, reason or follow-up demanded
         elif v == "act_on":
-            if not norm(f.get("clinic_scenario", "")):
+            if not dup and not norm(f.get("clinic_scenario", "")):
                 errs.append(f"{tag}: act_on needs a clinic_scenario (who, which device, what moment)")
             if not norm(f.get("demonstrated", "")):
                 errs.append(f"{tag}: act_on needs 'demonstrated' (red test, repro or traced path)")
@@ -186,7 +201,10 @@ def check(lead, reviewer_lines, round_no, scope_lock):
             if protected and v in ("dismissed", "noted"):
                 errs.append(f"{tag}: never-dismiss area (booking/money/sends/webhooks/tenancy/GDPR/"
                             f"prescribing/single-device data loss): must be act_on or consider, not {v}")
-            if v == "noted" and not src.startswith("P3"):
+            if v == "noted" and dup:
+                errs.append(f"{tag}: H-D0 duplicate path is graded P2 and cannot be Noted; act_on, consider "
+                            "or dismissed")
+            elif v == "noted" and not src.startswith("P3"):
                 errs.append(f"{tag}: only a P3 may be Noted; a P1/P2 is act_on, consider or dismissed")
             if v == "dismissed" and src.startswith("P1") and not f.get("pattern"):
                 errs.append(f"{tag}: dismissing a P1 needs a DISMISSAL_PATTERNS heading; a new shape stays "
@@ -211,6 +229,15 @@ def check(lead, reviewer_lines, round_no, scope_lock):
     if round_no >= 2 and not isinstance(lead.get("premise"), dict):
         errs.append("round >= 2: premise block required (attack the premise)")
     return errs, blocking
+
+
+def action_entry(f):
+    if f.get("_duplicate_path"):
+        scenario = norm(f.get("clinic_scenario", "")) or "n/a: structural, no clinic-scenario filter"
+        grade = "P1" if clean(f["source_line"]).startswith("P1") else "P2"
+        return (f"{f['source_line']}\n  graded: {grade} (H-D0 duplicate path, blocks landing)\n"
+                f"  scenario: {scenario}\n  shown by: {f['demonstrated']}\n")
+    return f"{f['source_line']}\n  scenario: {f['clinic_scenario']}\n  shown by: {f['demonstrated']}\n"
 
 
 def main(argv=None):
@@ -245,16 +272,17 @@ def main(argv=None):
     demoted = [f for f in items if f.get("_demoted")]
     consider = [f for f in items if f["verdict"] == "consider" and not f.get("_demoted")]
     # Protected items not fixed on this branch go to the orchestrator, never silently into a bead.
-    escalate = [f for f in consider if f.get("_protected")] + \
-               [f for f in out_of_scope if f.get("_protected")]
-    follow = [f for f in consider if not f.get("_protected")] + \
-             [f for f in out_of_scope if not f.get("_protected")]
+    # So does an unresolved H-D0 the branch added: a P2 duplicate path blocks landing (LUCY-fuu2h).
+    def must_escalate(f):
+        return f.get("_protected") or (f.get("_duplicate_path") and f.get("pre_existing") is not True)
+    escalate = [f for f in consider if must_escalate(f)] + \
+               [f for f in out_of_scope if must_escalate(f)]
+    follow = [f for f in consider if not must_escalate(f)] + \
+             [f for f in out_of_scope if not must_escalate(f)]
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     n = a.round
-    (out / f"lead-actions-round-{n}.txt").write_text(
-        "".join(f"{f['source_line']}\n  scenario: {f['clinic_scenario']}\n  shown by: {f['demonstrated']}\n"
-                for f in blocking))
+    (out / f"lead-actions-round-{n}.txt").write_text("".join(action_entry(f) for f in blocking))
     (out / f"lead-escalate-round-{n}.txt").write_text(
         "".join(f"{f['source_line']}\n  why not fixed here: {f.get('reason') or f.get('follow_up')}\n"
                 for f in escalate))

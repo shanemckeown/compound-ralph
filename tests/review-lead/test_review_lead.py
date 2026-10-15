@@ -411,5 +411,98 @@ class OrdinaryUseTriage(unittest.TestCase):
         self.assertIn("never-dismiss area", out)
 
 
+
+class DuplicatePathH_D0(unittest.TestCase):
+    """LUCY-fuu2h: H-D0 duplicate path is P2, blocks landing, and has no clinic-scenario filter."""
+    DUP = ("P3 lib/contacts/format-phone.ts:1 — H-D0 duplicate path: a tenth phone normaliser beside "
+           "lib/utils/phone.ts:12, which already normalises UK numbers — call the existing one")
+
+    def lead_with(self, finding):
+        v = VERDICT + self.DUP + "\n"
+        lead = base_lead()
+        lead["findings"].append(dict({"id": "D0", "source_line": self.DUP}, **finding))
+        return lead, v
+
+    def test_h_d0_act_on_without_scenario_passes_and_blocks_as_p2(self):
+        lead, v = self.lead_with({"verdict": "act_on", "category": "duplicate_path",
+                                  "demonstrated": "existing path lib/utils/phone.ts:12 does the same job",
+                                  "ordinary_use": "none: structural", "carve_out": False})
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        acts = files["lead-actions-round-1.txt"]
+        self.assertIn("format-phone.ts:1", acts)
+        self.assertIn("graded: P2 (H-D0", acts)
+        self.assertIn("BLOCKING=3", out)  # base lead blocks 2 (no scope lock) + the H-D0
+        self.assertIn("P4=0", out)
+
+    def test_h_d0_found_by_text_even_if_category_is_other(self):
+        lead, v = self.lead_with({"verdict": "act_on", "category": "other",
+                                  "demonstrated": "traced", "ordinary_use": "none: structural"})
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("format-phone.ts:1", files["lead-actions-round-1.txt"])
+
+    def test_h_d0_cannot_be_noted_even_when_reviewer_wrote_p3(self):
+        lead, v = self.lead_with({"verdict": "noted", "category": "duplicate_path",
+                                  "reason": "small, tidy it up later"})
+        code, out, _ = run_check(lead, v)
+        self.assertEqual(code, 1, out)
+        self.assertIn("H-D0 duplicate path is graded P2", out)
+
+    def test_h_d0_can_be_dismissed_with_a_reason(self):
+        lead, v = self.lead_with({"verdict": "dismissed", "category": "duplicate_path",
+                                  "reason": "plan's EXISTING CAPABILITY recorded why extending lib/utils/phone.ts fails"})
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("format-phone.ts:1", files["lead-actions-round-1.txt"])
+
+    def test_money_h_d0_still_cannot_be_dismissed(self):
+        line = ("P2 lib/consult/ledger.ts:1 — H-D0 duplicate path: consult credit table beside account "
+                "credit at lib/account-credit.ts:40 — extend account credit with an expiry column")
+        v = VERDICT + line + "\n"
+        lead = base_lead()
+        lead["findings"].append({"id": "D1", "source_line": line, "verdict": "dismissed",
+                                 "category": "duplicate_path", "reason": "it is only a second ledger, fine"})
+        code, out, _ = run_check(lead, v)
+        self.assertEqual(code, 1, out)
+        self.assertIn("never-dismiss area", out)
+
+    def test_h_d0_consider_added_by_branch_escalates_not_follow_up(self):
+        lead, v = self.lead_with({"verdict": "consider", "category": "duplicate_path",
+                                  "reason": "not sure the existing normaliser covers mobiles",
+                                  "follow_up": "Fold format-phone into lib/utils/phone.ts"})
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("format-phone.ts:1", files["lead-escalate-round-1.txt"])
+        self.assertNotIn("format-phone.ts:1", files["lead-followups-round-1.txt"])
+
+    def test_h_d0_out_of_scope_under_lock_escalates(self):
+        lead, v = self.lead_with({"verdict": "act_on", "category": "duplicate_path", "in_scope": False,
+                                  "demonstrated": "existing lib/utils/phone.ts:12",
+                                  "follow_up": "Fold format-phone into lib/utils/phone.ts"})
+        lead["scope_lock"] = True
+        for f in lead["findings"][:2]:
+            f["in_scope"] = f.get("in_scope", True)
+        code, out, files = run_check(lead, v, scope_lock=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn("format-phone.ts:1", files["lead-escalate-round-1.txt"])
+        self.assertNotIn("format-phone.ts:1", files["lead-followups-round-1.txt"])
+
+    def test_pre_existing_h_d0_consider_is_a_follow_up(self):
+        lead, v = self.lead_with({"verdict": "consider", "category": "duplicate_path", "pre_existing": True,
+                                  "reason": "the duplicate predates this branch",
+                                  "follow_up": "Fold format-phone into lib/utils/phone.ts"})
+        code, out, files = run_check(lead, v)
+        self.assertEqual(code, 0, out)
+        self.assertIn("format-phone.ts:1", files["lead-followups-round-1.txt"])
+        self.assertNotIn("format-phone.ts:1", files["lead-escalate-round-1.txt"])
+
+    def test_control_non_h_d0_act_on_still_needs_a_scenario(self):
+        lead = base_lead(); lead["findings"][0]["clinic_scenario"] = ""
+        code, out, _ = run_check(lead, VERDICT)
+        self.assertEqual(code, 1, out)
+        self.assertIn("needs a clinic_scenario", out)
+
+
 if __name__ == "__main__":
     unittest.main()

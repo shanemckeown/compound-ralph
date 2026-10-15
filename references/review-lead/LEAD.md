@@ -42,7 +42,12 @@ Read "The ordinary-use test" in CLINIC_REALITY. For **every** finding write `ord
 
 Protected (never Dismissed or Noted): `money` · `booking` · `sends` · `webhooks` · `tenancy_auth` · `patient_data_exposure` · `gdpr` · `prescribing` · `single_device_data_loss` (one practitioner on one device loses, overwrites or misfiles their own work).
 Open: `clinical_record_concurrency` (two devices or users on one record at once) · `timing_window` · `crafted_request` · `style` · `user_facing` (changes what a user sees or is told; carve-out from P4 demotion, still dismissable if hypothetical) · `other`.
+Structural: `duplicate_path` (H-D0, below).
 Pick by the **trigger**. "Erases another device's point" is `clinical_record_concurrency`. "Photo switch while the queued save is still retrying writes B's map onto A" is `single_device_data_loss`. "Draws before the opening load returns" is `timing_window` (a human racing a load). The checker also scans the text for protected keywords, so a mislabel can't slip a money or booking finding through.
+
+## Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct: "Yes, P2 blocks")
+
+A finding that the branch adds a second implementation of a job an existing table, module, setting, predicate, util or send path already does, for the same actor and data, is **H-D0**: category `duplicate_path`, graded **P2** whatever the reviewer wrote. It is structural, so the clinic-scenario test does not apply: an Act on needs `demonstrated` (the existing path as `file:line`) but no `clinic_scenario`, and it is never demoted to a P4 note. Tiebreak: could the outcome have shipped by adding at most one column or setting to the existing thing? Yes, and the plan's EXISTING CAPABILITY field gives no refused-extend reason → Act on. Dismiss it only with a reason (the plan did record why extending fails, or the existing path serves a different actor or data). It can never be Noted. A duplicate the branch didn't add is `pre_existing` and goes to a follow-up bead.
 
 ## Never dismiss (the shared "Do not skip when")
 
