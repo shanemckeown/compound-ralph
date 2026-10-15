@@ -5,7 +5,7 @@ import importlib.util
 import os
 import unittest
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
@@ -26,6 +26,14 @@ def with_(**overrides):
 
 
 class BeadBriefCheck(unittest.TestCase):
+    # The Reuses field (LUCY-6v5gv) has its own file, test_fleet_dispatch_programme.py.
+    def setUp(self):
+        self._needs_reuses = fd.needs_reuses
+        fd.needs_reuses = lambda record: False
+
+    def tearDown(self):
+        fd.needs_reuses = self._needs_reuses
+
     def test_complete_brief_passes(self):
         self.assertEqual(fd.check_bead_brief(COMPLETE), [])
 
@@ -72,7 +80,8 @@ class BeadBriefCheck(unittest.TestCase):
         # Mutation guard: if run_gate stops calling check 5, this goes red.
         stubs = {
             "check_bead_is_dispatchable": lambda b: [],
-            "check_no_inflight_work": lambda b: [],
+            "check_no_inflight_work": lambda b, **k: [],
+            "check_programme_route": lambda b, r: ([], None),
             "check_dependencies": lambda b: [],
             "check_headless_eligible": lambda b, out=None: [],
             "load_bead_record": lambda b: ({"id": b, "description": "fix it"}, None),
@@ -200,7 +209,8 @@ class BeadBriefCheck(unittest.TestCase):
     def test_epic_skips_brief_check(self):
         stubs = {
             "check_bead_is_dispatchable": lambda b: [],
-            "check_no_inflight_work": lambda b: [],
+            "check_no_inflight_work": lambda b, **k: [],
+            "check_programme_route": lambda b, r: ([], None),
             "check_dependencies": lambda b: [],
             "check_epic_has_children": lambda b: [],
             "check_client_triage_tree": lambda b: [],  # check 10: own test file

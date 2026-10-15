@@ -38,9 +38,18 @@ each child a commit, one review per landing batch. --force past it needs a P0 be
 --force NEVER overrides the resource checks 6–9 (disk, worktrees, resident sessions, memory):
 the 7 Oct 2026 laptop crash came at 11 resident sessions after sessions were forced past them.
 
-Check 13 (WIP cap, CLAUDE.md "never expand the pile"): refuses when >= 10 origin goal/* branches
-are pushed-not-landed (bead status pushed or in_progress, tip not on origin/main by the same
-test unlanded-sweep.py uses). Override: --force --force-reason="<the dated client promise>".
+Check 13 (WIP cap, CLAUDE.md "never expand the pile"): refuses when >= 10 origin goal/* or
+long-goal/* branches are unlanded (tip not on origin/main by the same test unlanded-sweep.py uses)
+and their bead isn't closed with `LANDED @<sha>` / `SUPERSEDED by <branch>`.
+Override: --force --force-reason="<the dated client promise>".
+
+Check 16 (programme routing, LUCY-6v5gv): a bead sharing its `client:` + `area:` labels with an
+open epic or with a live unlanded branch is refused and pointed there; one programme = one branch.
+--force past it needs a P0 bead and a --force-reason, as check 15.
+
+Check 1 resumes, never siblings: a worktree or unlanded branch for the bead with no live session is
+resumable (the gate prints `resume: <branch>`); /goal Phase 1 checks it out. Only a live session
+owning it refuses.
 
 Check 12 (credit pace, LUCY-r1lyy): when Claude weekly usage runs ahead of elapsed time
 (used_pct / elapsed_pct > 1.25, read from Aestheticc/Ops/CREDIT_PACE.json), P2/P3/P4 beads are
@@ -91,23 +100,67 @@ def registry(include_all=False):
 
 
 # ---------------------------------------------------------------- the gate ---
-def check_no_inflight_work(bead):
-    """Check 1: no worktree or branch already exists for this bead or its children."""
-    problems = []
+LIVE_SESSION_STATES = ("working", "blocked")
+
+
+def key_pattern(key, children=False):
+    """The bead key as a whole token: oxy7p.1 matches goal/aestheticcnext-oxy7p.1-r2, never
+    oxy7p.10, and the child oxy7p.1.2 only with children=True (an epic's check 1)."""
+    tail = r"(?![a-z0-9])" if children else r"(?![a-z0-9]|\.\d)"
+    return re.compile(r"(?<![a-z0-9.])" + re.escape(key) + tail, re.I)
+
+
+def live_owner(pat, agents):
+    """The name of a working/blocked session whose name or cwd matches the bead key, else None."""
+    for a in agents:
+        if a.get("state") in LIVE_SESSION_STATES and pat.search(f"{a.get('name', '')} {a.get('cwd', '')}"):
+            return a.get("name") or a.get("id") or "?"
+    return None
+
+
+def check_no_inflight_work(bead, agents=None, resume=None, is_epic=False):
+    """Check 1: no LIVE session is already on this bead. A worktree or unlanded branch with no
+    live session is resumable, not in-flight (LUCY-6v5gv): a re-dispatch after `claude rm` used
+    to spawn -rN siblings (mbow6/mbow6-r2, p3d4e -r2 -r3). `resume` gets the canonical target
+    first ("target <branch>": the bead's newest unlanded branch by committer date, -rN included,
+    named as on origin), then what exists. main() hands the target to the worker as a `RESUME:`
+    bead comment and /goal Phase 1 checks out and pushes that exact branch."""
+    key = bead.lower().split("-", 1)[-1]
+    pat, exact = key_pattern(key, children=is_epic), key_pattern(key)
+    found = []
     _, wt, _ = sh("git worktree list", cwd=REPO, bead=bead)
     for line in wt.splitlines():
-        if bead.lower().split("-", 1)[-1] in line.lower():
-            problems.append(f"worktree already exists: {line.strip()}")
-    _, br, _ = sh(f"git branch -a --list '*{bead.lower().split('-', 1)[-1]}*'", cwd=REPO, bead=bead)
+        if pat.search(line):
+            parts = line.split()
+            found.append(("worktree", parts[0], line.strip()))
+    _, br, _ = sh(f"git branch -a --list '*{key}*' --sort=-committerdate", cwd=REPO, bead=bead)
     for line in br.splitlines():
-        ref = line.strip().lstrip("* ").strip()
-        if not ref:
+        ref = line.strip().lstrip("*+ ").strip()
+        if not ref or not pat.search(ref):
             continue
         code, _, _ = sh(f"git merge-base --is-ancestor {ref} origin/main", cwd=REPO)
-        state = "LANDED" if code == 0 else "UNLANDED"
-        if state == "UNLANDED":
-            problems.append(f"unlanded branch already exists: {ref}")
-    return problems
+        if code != 0:
+            found.append(("branch", ref, ref))
+    if not found:
+        return []
+    try:
+        rows = agents if agents is not None else probe_agents()
+    except Exception as exc:
+        return [f"{kind} exists ({what}) and `claude agents` is unreadable ({exc}) — cannot tell "
+                f"whether a live session owns it" for kind, _, what in found]
+    owner = live_owner(pat, rows)
+    if owner:
+        return [f"{LIVE_OWNER_PREFIX}{owner} is on this bead — {kind} {what}" for kind, _, what in found]
+    if resume is not None:
+        mine = [(kind, path) for kind, path, what in found if exact.search(what)]
+        # Origin refs first: a local branch can share -r2's tip (and date) yet carry the base name.
+        branches = [p for kind, p in mine if kind == "branch"]
+        target = next((p for p in branches if p.startswith("remotes/origin/")),
+                      branches[0] if branches else None)
+        if target:
+            resume.append(f"target {re.sub(r'^remotes/origin/', '', target)}")
+        resume.extend(f"{kind} {path}" for kind, path in mine)
+    return []
 
 
 BEAD_RE = re.compile(r"\b((?:AestheticcNext|LUCY)-[a-z0-9.]+)\b", re.I)
@@ -225,6 +278,68 @@ def check_not_epic_child(bead, record, load=None):
             f"fleet-dispatch.py {parent} --epic",
             "One feature = one branch; slices are commits on it. Override only for a P0: "
             "--force --force-reason=\"<why this child can't wait for its epic>\"."]
+
+
+PROGRAMME_CHECK = "16 programme routing"
+
+
+def programme_keys(record):
+    """Every (client:<slug>, area:<x>) pair on the bead; [] when it isn't client-shaped. The parent
+    epic is check 15's key; this is the key for the 84 of 149 Anita beads with no parent."""
+    labels = record.get("labels") or []
+    client = sorted(l for l in labels if l.startswith("client:"))
+    area = sorted(l for l in labels if l.startswith("area:"))
+    return [(c, a) for c in client for a in area]
+
+
+def open_programme_epics(bead, key):
+    """Not-closed epics carrying both labels (bd --label is AND)."""
+    code, out, err = sh(f"bd list --type epic --status open,in_progress,blocked,deferred,pushed "
+                        f"--label '{key[0]}' --label '{key[1]}' --json --limit 0",
+                        cwd=REPO, bead=bead, timeout=60)
+    rows = json.loads(out) if code == 0 and out else None
+    if not isinstance(rows, list):
+        raise RuntimeError(err or out or f"bd list exited {code}")
+    return [r for r in rows if isinstance(r, dict) and r.get("id")]
+
+
+def check_programme_route(bead, record, epics=None, branches=None):
+    """Check 16 (LUCY-6v5gv, 8z3go change 2). Returns (problems, warning). A bead whose
+    client:+area: labels match an open epic or a live unlanded branch's bead is routed there,
+    never branched: Anita's voice work was ~150 beads on 76 branches with 58 land commits in 6
+    days, each paying the full gate. Policy gate: an unreadable epic list or branch scan warns."""
+    keys = programme_keys(record or {})
+    if not keys:
+        return [], None
+    own = bead.lower()
+    parent = ((record or {}).get("parent") or "").lower()
+    warnings, problems, seen = [], [], set()
+    for key in keys:
+        try:
+            for e in (epics or open_programme_epics)(bead, key):
+                if e["id"].lower() in (own, parent) or e["id"] in seen:
+                    continue
+                seen.add(e["id"])
+                problems.append(f"programme epic {e['id']} ({e.get('title', '')[:60]}) shares "
+                                f"{key[0]} + {key[1]}: `bd update {bead} --parent {e['id']}` then "
+                                f"`fleet-dispatch.py {e['id']} --epic`")
+        except Exception as exc:
+            warnings.append(f"cannot list programme epics for {key[0]} + {key[1]} ({exc})")
+    try:
+        for w in (branches or unlanded_branches)():
+            key = next((k for k in keys if set(k) <= set(w.get("labels") or [])), None)
+            if w["bead"].lower() == own or not key or w["branch"] in seen:
+                continue
+            seen.add(w["branch"])
+            problems.append(f"live branch {w['branch']} ({w['bead']}) shares {key[0]} + {key[1]}: "
+                            f"commit on {w['branch']} (resume {w['bead']} with this as a "
+                            f"REFLECTION, or parent both under one epic)")
+    except Exception as exc:
+        warnings.append(f"cannot scan unlanded branches ({exc})")
+    if problems:
+        problems.append("One programme = one branch; slices and follow-ups are commits on it. Override "
+                        "only for a P0: --force --force-reason=\"<why this can't ride the programme>\".")
+    return problems, ("; ".join(warnings) + ": programme routing not fully enforced") if warnings else None
 
 
 FILE_PATH_RE = re.compile(r"[\w./-]+\.\w{1,5}(:\d+)?")
@@ -351,7 +466,52 @@ def is_new_bead(record):
     return stamp.year < 2020 or created[:10] >= BRIEF_CUTOVER
 
 
-def check_bead_brief(record):
+# Reuses (LUCY-6v5gv, LUCY-8z3go change 1): the existing table/module/setting the work extends,
+# as file:line, or "none — <why no existing path fits>". mbow6-r2 built ~2,500 lines beside account
+# credit because nothing asked. Beads filed before this cutover get the field at plan time instead.
+REUSES_CUTOVER = "2026-10-15T06:17:00+00:00"
+REUSES_RE = re.compile(r"(?im)^[ \t>*_#`-]*(?:\d+[.)][ \t]*)?[*_`]*reuses[ \t*_`]*:[ \t*_`]*(.*)$")
+REUSES_NONE_RE = re.compile(r"(?i)^[\s*_`'\"]*(?:none|n/?a)\b[\s*_`'\"]*[—–:-]+\s*\S.{2,}")
+# BRIEF_PATH_RE plus ~/ and absolute paths (harness beads name ~/.claude/scripts/…).
+REUSES_PATH_RE = re.compile(r"(?<![\w.@/~-])(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]+|" + BRIEF_PATH_RE.pattern)
+VAULT = "/Users/shane/Documents/Obsidian"
+REUSES_ROOTS = (REPO, VAULT, os.path.join(VAULT, "Aestheticc"), os.path.expanduser("~"))
+
+
+def reuse_path_exists(path):
+    path = os.path.expanduser(path.split(":", 1)[0].rstrip(".,;)"))
+    if os.path.isabs(path):
+        return os.path.exists(path)
+    return any(os.path.exists(os.path.join(root, path)) for root in REUSES_ROOTS)
+
+
+def needs_reuses(record):
+    """Beads created after REUSES_CUTOVER; a missing or unparseable created_at counts (fail closed)."""
+    created = _parse_ts(record.get("created_at"))
+    return created is None or created >= _parse_ts(REUSES_CUTOVER)
+
+
+def check_reuses(text, bead, path_exists=None):
+    """[] when the latest populated `Reuses:` line names existing paths or says none — <why>."""
+    fix = (f"`bd comment {bead} \"Reuses: <file:line of the table/module/setting this extends>\"` "
+           f"or `\"Reuses: none — <why no existing path fits>\"`")
+    values = [v.strip() for v in REUSES_RE.findall(text) if v.strip(" *_`")]
+    if not values:
+        return ["a 'Reuses:' line (the existing table/module/setting it extends, as file:line, "
+                "or 'none — <why>')"], [fix]
+    value = values[-1]
+    if REUSES_NONE_RE.match(value):
+        return [], []
+    paths = REUSES_PATH_RE.findall(value)
+    if not paths:
+        return [f"a 'Reuses:' line with a file path or 'none — <why>' (got {value[:60]!r})"], [fix]
+    missing = [p for p in paths if not (path_exists or reuse_path_exists)(p)]
+    if missing:
+        return [f"'Reuses:' paths that exist (not found: {', '.join(missing[:3])})"], [fix]
+    return [], []
+
+
+def check_bead_brief(record, path_exists=None):
     """Check 5 (LUCY-2w17x, 2026-09-25): a single bead must carry the plan contract's inputs
     before a Worker sees it — an Outcome line (the promise in Shane's words), a Premise note
     (why we believe the problem is real on prod, or 'n/a — <why no prod state is involved>'),
@@ -382,6 +542,10 @@ def check_bead_brief(record):
     if not BRIEF_PATH_RE.search(re.sub(r"\b[a-z][\w+.-]*://\S+", " ", text)):  # URLs aren't files
         missing.append("at least one file path")
         fixes.append(f"`bd comment {bead} \"Files: path/to/file.ts\"`")
+    if needs_reuses(record):
+        reuse_missing, reuse_fixes = check_reuses(text, bead, path_exists)
+        missing += reuse_missing
+        fixes += reuse_fixes
     if not missing:
         return []
     return [f"bead brief incomplete — missing {', '.join(missing)}. Fix with "
@@ -612,13 +776,21 @@ RESOURCE_UNFORCEABLE = ("resource checks can't be forced; free capacity first "
                         "(claude rm idle sessions, prune worktrees)")
 
 
+LIVE_OWNER_PREFIX = "live session "
+INFLIGHT_CHECK = "1 no in-flight work"
+
+
 def force_refusal(failures, force, force_reason, priority=None):
     """Resource checks 6–9 refuse even with --force (the 7 Oct crash: 11 resident sessions after
     forcing past the caps). --force past checks 11, 12 and 13 needs a written reason, recorded
-    in the manifest row. --force past check 15 needs a P0 bead AND a written reason."""
+    in the manifest row. --force past check 15 or 16 needs a P0 bead AND a written reason."""
     failed_resources = [c for c in RESOURCE_CHECKS if failures.get(c)]
     if failed_resources:
         return f"{', '.join(failed_resources)} failed — {RESOURCE_UNFORCEABLE}."
+    if any(p.startswith(LIVE_OWNER_PREFIX) for p in failures.get(INFLIGHT_CHECK) or []):
+        return ("check 1: a live session is on this bead and a re-dispatch resumes its branch, so "
+                "--force can't override it (two builders would push one branch). Wait for it, or "
+                "`claude rm` it first.")
     if force and PREMISE_CHECK in failures and not (force_reason or "").strip():
         return ("--force past check 11 needs a written reason: re-run with "
                 "--force-reason=\"<why this is being built without a verified premise>\".")
@@ -631,6 +803,9 @@ def force_refusal(failures, force, force_reason, priority=None):
     if force and EPIC_CHILD_CHECK in failures and (priority != 0 or not (force_reason or "").strip()):
         return ("--force past check 15 is only for a P0 bead with a written reason; otherwise "
                 "dispatch the parent epic with --epic.")
+    if force and PROGRAMME_CHECK in failures and (priority != 0 or not (force_reason or "").strip()):
+        return ("--force past check 16 is only for a P0 bead with a written reason; otherwise "
+                "route it onto its programme's epic or branch.")
     return None
 
 
@@ -922,16 +1097,20 @@ def check_resources(snap=None):
 
 # ---------------------------------------------------------------- WIP cap ---
 # Check 13 (CLAUDE.md "never expand the pile", Shane 2026-09-14): 61 finished branches sat
-# unlanded because intake outran landing. Refuse a dispatch while >= WIP_CAP goal/* branches are
-# pushed-not-landed. "Unlanded" is unlanded-sweep.py's own test (not an ancestor of origin/main,
-# no land commit naming the tip or the bead, not patch-equivalent), imported, not re-invented.
+# unlanded because intake outran landing. Refuse a dispatch while >= WIP_CAP goal/* or
+# long-goal/* branches are unlanded. "Unlanded" is unlanded-sweep.py's own test (not an ancestor
+# of origin/main, no land commit naming the tip or the bead, not patch-equivalent), imported, not
+# re-invented. Since LUCY-6v5gv (8z3go change 6) a branch counts whatever its bead's status,
+# unless the bead is closed with `LANDED @<sha>` or `SUPERSEDED by <branch>`: 54 closed-bead
+# branches were invisible to the old pushed/in_progress count while 113 sat unlanded.
 # Policy cap, not a safety gate: an unreadable count warns and does not refuse; --force with a
 # written reason overrides (Shane's dated client promises must still dispatch).
 WIP_CHECK = "13 WIP cap"
 WIP_CAP = 10
-WIP_STATUSES = ("pushed", "in_progress")
+WIP_PREFIXES = ("goal", "long-goal")
 UNLANDED_SWEEP = os.path.expanduser("~/.claude/scripts/unlanded-sweep.py")
 WIP_KEY_RE = re.compile(r"^(?:(?:aestheticcnext|lucy)-)?([a-z0-9]+(?:\.\d+)*)", re.I)
+LANDED_MARK_RE = re.compile(r"\bLANDED\s*@\s*[0-9a-f]{7,40}\b|\bSUPERSEDED\s+by\s+\S", re.I)
 
 
 def _load_unlanded_sweep():
@@ -943,27 +1122,43 @@ def _load_unlanded_sweep():
 
 
 def wip_bead_statuses():
-    """{lowercased key after the prefix: (bead id, status)} for code beads pushed/in_progress."""
+    """{lowercased key after the prefix: (bead id, status, record)} for every code bead.
+    Two list calls (not-closed, closed): `bd list --all` is ~5x slower."""
     out = {}
-    for status in WIP_STATUSES:
-        code, raw, err = sh(f"bd list --status {status} --json --limit 0", cwd=REPO, timeout=30)
+    for status in ("open,in_progress,blocked,deferred,pushed", "closed"):
+        code, raw, err = sh(f"bd list --status {status} --json --limit 0", cwd=REPO, timeout=60)
         rows = json.loads(raw) if code == 0 and raw else None
         if not isinstance(rows, list):
             raise RuntimeError(f"bd list --status {status} failed: {err or raw or code}")
         for r in rows:
             if isinstance(r, dict) and r.get("id") and "-" in r["id"]:
-                out[r["id"].split("-", 1)[1].lower()] = (r["id"], status, r)
+                out[r["id"].split("-", 1)[1].lower()] = (r["id"], r.get("status"), r)
     return out
 
 
+def landing_recorded(record, load=None):
+    """A closed bead that says where its code went: LANDED @<sha> or SUPERSEDED by <branch> in its
+    close reason, notes or comments. `bd list` rows carry no comments, so those load on demand."""
+    text = "\n".join(str(record.get(k) or "") for k in ("close_reason", "notes"))
+    if LANDED_MARK_RE.search(text):
+        return True
+    full, err = (load or load_bead_record)(record.get("id"))
+    if err or not full:
+        return False
+    return any(LANDED_MARK_RE.search(str(c.get("text") or "")) for c in full.get("comments") or []
+               if isinstance(c, dict))
+
+
 def probe_wip_branches(fetch=True):
-    """[{branch, tip, bead, status}] for origin goal/* branches that are pushed-not-landed."""
+    """[{branch, tip, bead, status, ct, labels}] for origin goal/* and long-goal/* branches that
+    are unlanded and whose bead has no recorded landing. Check 16 reads the same list."""
     us = _load_unlanded_sweep()
     if fetch:
         sh(f"git -C {REPO} fetch -q origin", timeout=60)
     beads = wip_bead_statuses()
+    refs_arg = " ".join(f"refs/remotes/origin/{p}" for p in WIP_PREFIXES)
     code, refs, err = sh(f"git -C {REPO} for-each-ref --format='%(refname:short)\t%(objectname)"
-                         f"\t%(committerdate:unix)' refs/remotes/origin/goal", timeout=20)
+                         f"\t%(committerdate:unix)' {refs_arg}", timeout=20)
     if code != 0:
         raise RuntimeError(err or f"git for-each-ref exited {code}")
     candidates = []
@@ -972,10 +1167,11 @@ def probe_wip_branches(fetch=True):
         if len(parts) != 3:
             continue
         ref, tip, ct = parts
-        m = WIP_KEY_RE.match(ref[len("origin/goal/"):])
+        branch = ref[len("origin/"):]
+        m = WIP_KEY_RE.match(branch.split("/", 1)[1]) if "/" in branch else None
         hit = beads.get(m.group(1).lower()) if m else None
         if hit:
-            candidates.append((ref[len("origin/"):], tip, int(ct), m.group(1).lower(), hit))
+            candidates.append((branch, tip, int(ct), m.group(1).lower(), hit))
     if not candidates:
         return []
     land = us.land_commits()
@@ -989,7 +1185,10 @@ def probe_wip_branches(fetch=True):
             return None
         if us.landed_elsewhere(branch, tip, ct, key, land, land_subjects):
             return None
-        return {"branch": branch, "tip": tip[:9], "bead": bead_id, "status": status, "ct": ct}
+        if status == "closed" and landing_recorded(record):
+            return None
+        return {"branch": branch, "tip": tip[:9], "bead": bead_id, "status": status, "ct": ct,
+                "labels": list(record.get("labels") or [])}
 
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1002,28 +1201,49 @@ def probe_wip_branches(fetch=True):
     return sorted(newest.values(), key=lambda w: w["branch"])
 
 
+_WIP_MEMO = {}
+_GATE_STATE = {}  # run_gate -> main: the branch a re-dispatch resumes (check 1)
+
+
+def unlanded_branches():
+    """probe_wip_branches once per gate run: checks 13 and 16 share it (one fetch, one scan)."""
+    if "rows" not in _WIP_MEMO:
+        try:
+            _WIP_MEMO["rows"] = probe_wip_branches()
+        except Exception as exc:
+            _WIP_MEMO["rows"] = exc
+    if isinstance(_WIP_MEMO["rows"], Exception):
+        raise _WIP_MEMO["rows"]
+    return _WIP_MEMO["rows"]
+
+
 def check_wip(probe=None):
     """Check 13. Returns (problems, warning, detail)."""
     try:
-        wip = (probe or probe_wip_branches)()
+        wip = (probe or unlanded_branches)()
     except Exception as exc:
-        return [], f"cannot count pushed-not-landed branches ({exc}): WIP cap not enforced", None
-    detail = f"{len(wip)} pushed-not-landed goal/* branches (cap {WIP_CAP})"
+        return [], f"cannot count unlanded branches ({exc}): WIP cap not enforced", None
+    detail = f"{len(wip)} unlanded goal/long-goal branches (cap {WIP_CAP})"
     if len(wip) < WIP_CAP:
         return [], None, detail
     listing = [f"  {w['branch']} @ {w['tip']}  {w['bead']} [{w['status']}]" for w in wip]
-    return ([f"WIP cap: {len(wip)} pushed-not-landed branches (>= {WIP_CAP}). Land something "
-             f"first (/land-batch; unlanded-sweep.py ranks them).",
+    return ([f"WIP cap: {len(wip)} unlanded branches (>= {WIP_CAP}). Land something first "
+             f"(/land-batch; unlanded-sweep.py ranks them), or record where a closed bead's code "
+             f"went (`LANDED @<sha>` / `SUPERSEDED by <branch>`).",
              "Override for a dated client promise: --force --force-reason=\"<client, date>\" "
              "(recorded). Unlanded now:"] + listing), None, detail
 
 
 def run_gate(bead, is_epic):
     print(f"── pre-dispatch gate: {bead}")
+    _WIP_MEMO.clear()
     headless_diagnostics = None
+    gate_warnings = {}
+    resume = []
+    _GATE_STATE.clear()
     results = {
         "0 bead is dispatchable": check_bead_is_dispatchable(bead),
-        "1 no in-flight work": check_no_inflight_work(bead),
+        INFLIGHT_CHECK: check_no_inflight_work(bead, resume=resume, is_epic=is_epic),
         "2 dependencies closed": check_dependencies(bead),
     }
     record = None
@@ -1045,7 +1265,14 @@ def run_gate(bead, is_epic):
                                   if load_error else check_premise_tree(bead, record))
         results[EPIC_CHILD_CHECK] = ([f"cannot verify the parent epic — {load_error}"]
                                      if load_error else check_not_epic_child(bead, record))
+        if load_error:
+            results[PROGRAMME_CHECK] = [f"cannot verify programme routing — {load_error}"]
+        else:
+            results[PROGRAMME_CHECK], programme_warning = check_programme_route(bead, record)
+            if programme_warning:
+                gate_warnings[PROGRAMME_CHECK] = programme_warning
     resource_results, resource_warnings, resource_details = check_resources()
+    resource_warnings.update(gate_warnings)
     results.update(resource_results)
     pace_problems, pace_warning, pace_detail = check_credit_pace(bead, record)
     results[CREDIT_PACE_CHECK] = pace_problems
@@ -1076,6 +1303,11 @@ def run_gate(bead, is_epic):
             print(f"   ⚠ {name} — WARN (not refusing): {resource_warnings[name]}")
         else:
             print(f"   ✓ {name}{detail}")
+            if name == INFLIGHT_CHECK and resume:
+                print(f"       resume, don't sibling (no live session): {'; '.join(resume)}")
+    target = next((r.split(" ", 1)[1] for r in resume if r.startswith("target ")), None)
+    if target:
+        _GATE_STATE["resume_target"] = target
     return failed, {k: v for k, v in results.items() if v}
 
 
@@ -1187,7 +1419,7 @@ def main():
 
     failed, failures = run_gate(bead, is_epic)
     priority = None
-    if force and EPIC_CHILD_CHECK in failures:
+    if force and (EPIC_CHILD_CHECK in failures or PROGRAMME_CHECK in failures):
         record, _ = load_bead_record(bead)
         priority = (record or {}).get("priority")
     refusal = force_refusal(failures, force, force_reason, priority)
@@ -1245,6 +1477,13 @@ def main():
             print(cleanup[2] or cleanup[1])
             sys.exit(1)
 
+    target = _GATE_STATE.get("resume_target")
+    if target:
+        # The worker only receives `/goal <bead>`; the bead is the durable channel (LUCY-6v5gv).
+        sh(f"bd comment {bead} \"RESUME: {target} — fleet-dispatch check 1: newest unlanded branch, "
+           f"no live session. Check out and push this exact branch; never a -rN sibling.\"",
+           cwd=REPO, bead=bead)
+        print(f"   ✓ RESUME: {target} recorded on {bead} for /goal Phase 1")
     session = dispatch(bead, is_epic, dispatched_by)
     if session:
         sh(f"python3 {SLOTS} attach-session-id {bead} {session['sessionId']}")

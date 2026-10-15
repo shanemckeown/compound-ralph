@@ -186,12 +186,14 @@ save/persist action, confirm .goal/PLAN.md names the new `promise_inventory.json
 
 1. If not already in a worktree, call `EnterWorktree`. Otherwise work in place.
 2. Branch name: `goal/<bead-id-lowercase>` for singletons, `goal/<epic-id-lowercase>` for bundles.
-   🔴 **A re-dispatch resumes the bead's branch, never a `-rN` sibling (LUCY-6v5gv).** If a
-   worktree for the bead exists, enter it with `EnterWorktree` (`path`). Otherwise, if
-   `origin/goal/<id>` exists (or its newest unlanded `-rN`, as `fleet-dispatch.py` check 1
-   printed under "resume"), run `git checkout -B goal/<id> origin/<that branch>` in the new
-   worktree and build on top of it. Never start a fresh branch beside it. A live session on the
-   bead makes check 1 refuse, so a resume never fights a running builder.
+   🔴 **A re-dispatch resumes the bead's branch, never a `-rN` sibling (LUCY-6v5gv).** If the
+   bead's latest comment starting `RESUME:` names a branch (`fleet-dispatch.py` writes it: the
+   newest unlanded branch, `-rN` included), that exact branch is this run's branch, under that
+   exact name. If a worktree already has it checked out, enter that worktree with `EnterWorktree`
+   (`path`); otherwise, in the new worktree, `git checkout -B <that branch> origin/<that branch>`.
+   Build on top of it and push to that same name. Never rename it, never start a fresh branch
+   beside it. A live session on the bead makes check 1 refuse even with `--force`, so a resume
+   never fights a running builder.
 3. For each bead in scope:
    ```bash
    bd update <ID> --claim --status=in_progress

@@ -1,6 +1,6 @@
-"""Check 13 of fleet-dispatch.py: the CLAUDE.md WIP cap. Refuse when >= 10 origin goal/* branches
-are pushed-not-landed (bead pushed/in_progress, tip not on origin/main by unlanded-sweep.py's own
-test). Overridable only with --force plus a written reason (dated client promises).
+"""Check 13 of fleet-dispatch.py: the CLAUDE.md WIP cap. Refuse when >= 10 origin goal/* or
+long-goal/* branches are unlanded (tip not on origin/main by unlanded-sweep.py's own test) and
+their bead isn't closed with LANDED @<sha> / SUPERSEDED by <branch> (LUCY-6v5gv). Overridable only with --force plus a written reason (dated client promises).
 Run: uvx --python 3.13 pytest ~/.claude/scripts/tests"""
 import importlib.util
 import os
@@ -12,7 +12,7 @@ try:
 except ImportError:
     raise unittest.SkipTest("needs pytest: uvx pytest ~/.claude/scripts/tests")
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch_wip", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
@@ -26,14 +26,14 @@ def wip(n):
 def test_under_cap_passes_and_reports_count():
     problems, warning, detail = fd.check_wip(lambda: wip(9))
     assert problems == [] and warning is None
-    assert detail == "9 pushed-not-landed goal/* branches (cap 10)"
+    assert detail == "9 unlanded goal/long-goal branches (cap 10)"
 
 
 def test_at_cap_refuses_and_lists_branches():
     problems, _, detail = fd.check_wip(lambda: wip(10))
     text = "\n".join(problems)
-    assert "WIP cap: 10 pushed-not-landed" in text and "--force-reason" in text
-    assert "goal/aestheticcnext-b9" in text and "10 pushed-not-landed" in detail
+    assert "WIP cap: 10 unlanded branches" in text and "--force-reason" in text
+    assert "goal/aestheticcnext-b9" in text and "10 unlanded" in detail
 
 
 def test_unreadable_count_warns_not_refuses():
@@ -107,7 +107,7 @@ def test_unlanded_sweep_exposes_the_shared_helpers():
 def test_run_gate_prints_wip_count(monkeypatch, capsys):
     for name in ("check_bead_is_dispatchable", "check_no_inflight_work", "check_dependencies",
                  "check_epic_has_children", "check_client_triage_tree", "check_premise_tree"):
-        monkeypatch.setattr(fd, name, lambda b: [])
+        monkeypatch.setattr(fd, name, lambda b, **k: [])
     monkeypatch.setattr(fd, "check_resources", lambda: ({}, {}, {}))
     monkeypatch.setattr(fd, "check_credit_pace", lambda b, r=None: ([], None, None))
     real_check_wip = fd.check_wip
@@ -115,6 +115,6 @@ def test_run_gate_prints_wip_count(monkeypatch, capsys):
     failed, failures = fd.run_gate("AestheticcNext-epic1", is_epic=True)
     out = capsys.readouterr().out
     assert failed and fd.WIP_CHECK in failures
-    assert "WIP: 12 pushed-not-landed goal/* branches (cap 10)" in out
-    assert "✗ 13 WIP cap — 12 pushed-not-landed" in out
+    assert "WIP: 12 unlanded goal/long-goal branches (cap 10)" in out
+    assert "✗ 13 WIP cap — 12 unlanded" in out
 

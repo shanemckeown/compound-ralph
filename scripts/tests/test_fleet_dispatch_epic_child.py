@@ -50,7 +50,8 @@ def test_unreadable_parent_fails_closed():
 def _gate(bead, is_epic, record):
     stubs = {
         "check_bead_is_dispatchable": lambda b: [],
-        "check_no_inflight_work": lambda b: [],
+        "check_no_inflight_work": lambda b, **k: [],
+            "check_programme_route": lambda b, r: ([], None),
         "check_dependencies": lambda b: [],
         "check_headless_eligible": lambda b, out=None: [],
         "check_bead_brief": lambda r: [],

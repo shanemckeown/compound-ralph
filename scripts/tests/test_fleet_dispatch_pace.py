@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
@@ -170,7 +170,7 @@ class Pace(unittest.TestCase):
         self.assertIsNone(fd.force_refusal(failures, False, None))
 
     def run_gate(self, record, is_epic=False):
-        stubs = dict(check_bead_is_dispatchable=lambda b: [], check_no_inflight_work=lambda b: [],
+        stubs = dict(check_bead_is_dispatchable=lambda b: [], check_no_inflight_work=lambda b, **k: [], check_programme_route=lambda b, r: ([], None),
                      check_dependencies=lambda b: [], check_epic_has_children=lambda b: [],
                      check_client_triage_tree=lambda *a: [], check_headless_eligible=lambda *a: [],
                      check_bead_brief=lambda r: [], check_premise_tree=lambda *a: [],

@@ -6,7 +6,7 @@ import os
 import unittest
 from unittest import mock
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
@@ -155,7 +155,7 @@ class ForceReason(unittest.TestCase):
 
     def test_run_gate_includes_check_11_for_single_and_epic(self):
         with mock.patch.multiple(fd, check_bead_is_dispatchable=lambda b: [],
-                                 check_no_inflight_work=lambda b: [],
+                                 check_no_inflight_work=lambda b, **k: [], check_programme_route=lambda b, r: ([], None),
                                  check_dependencies=lambda b: [],
                                  check_epic_has_children=lambda b: [],
                                  check_client_triage_tree=lambda *a: [],

@@ -11,7 +11,7 @@ try:
 except ImportError:  # `python3 -m unittest discover` in this dir: pytest-style, skip cleanly
     raise unittest.SkipTest("needs pytest: uvx pytest ~/.claude/scripts/tests")
 
-SCRIPT = os.path.expanduser("~/.claude/scripts/fleet-dispatch.py")
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet-dispatch.py")
 spec = importlib.util.spec_from_file_location("fleet_dispatch_resources", SCRIPT)
 fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
@@ -144,7 +144,8 @@ def _stub_bead_checks(mp):
     for name in ("check_bead_is_dispatchable", "check_no_inflight_work",
                  "check_dependencies", "check_epic_has_children", "check_client_triage_tree",
                  "check_premise_tree"):
-        mp.setattr(fd, name, lambda b: [])
+        mp.setattr(fd, name, lambda b, **k: [])
+    mp.setattr(fd, "check_programme_route", lambda b, r: ([], None))
     mp.setattr(fd, "check_wip", lambda: ([], None, "0 pushed-not-landed goal/* branches (cap 10)"))
 
 
