@@ -186,6 +186,12 @@ Typecheck + lint + targeted/relevant Jest is the complete gate; nothing here nee
 is enforced technically (a watchdog kills any `next build` process it finds), so attempting it
 just wastes your own time.
 
+REVIEW GATE: the independent Claude review (and any "Opus/Claude review before commit" rule
+in AGENTS.md) is run by the dispatching Manager on your PUSHED tip, before anything lands.
+Your commands have no network, so do NOT try to run the `claude` CLI and do NOT treat its
+absence as a blocker: commit, push, and say in your final message that Claude review is pending.
+Tests that need a localhost listener or Docker (EPERM in the sandbox) are laptop gates: name them.
+
 If you are truly blocked, or the task needs a judgment call that only a human or Claude
 session can make, do not guess. Write a clear explanation to {worktree}/BLOCKED.md that
 states exactly what is blocking the task, then stop without pushing.
@@ -342,7 +348,13 @@ echo "starting Codex worker for $BEAD_ID on $BRANCH"
 # mode but not the second. Grant the WHOLE main repo .git/ dir instead: that's where
 # every shared write actually lands, and it still doesn't touch the worktree's own
 # checked-out files outside REPO_GIT_DIR, which stay sandboxed as normal.
-codex exec -s workspace-write --add-dir "$REPO_GIT_DIR" "$(cat "$PROMPT_FILE")"
+# ue3kw interim guard (5 Oct, Manager aestheticc-fc): the worker's own commands get NO
+# network. Verified live: with network_access=false, `nc -z 127.0.0.1 5432` fails even
+# while the prod cloud-sql-proxy listens there, and api.twilio.com does not resolve. So a
+# worker that reads the main repo .env.local still cannot reach prod or any gateway.
+# Cost: no npm install / docker pg lane inside the worker -> the pg lane is a laptop
+# review gate (it is anyway: feedback_manager_pass_needs_full_pg_lane).
+codex exec -s workspace-write -c sandbox_workspace_write.network_access=false --add-dir "$REPO_GIT_DIR" "$(cat "$PROMPT_FILE")"
 worker_exit=$?
 exit "$worker_exit"
 """
