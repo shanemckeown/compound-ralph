@@ -32,7 +32,7 @@ SLOTS = os.path.join(HOME, ".claude/scripts/fleet-slots.py")
 CLAUDE_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch.py")
 CODEX_DISPATCHER = os.path.join(HOME, ".claude/scripts/fleet-dispatch-codex.py")
 CLAUDE_ONLY_GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_only_guard.py")
-# Exit code for a Claude-only refusal: the queue drains re-enqueue it as kind "goal", not "codex".
+# Exit code for a Claude-only (patient-data) refusal: the queue drains re-enqueue it as kind "goal", not "codex".
 CLAUDE_ONLY_EXIT = 4
 WORKTREES_ROOT = os.path.join(HOME, ".claude/worktrees")
 WORKERS_ROOT = os.path.join(HOME, ".claude/fleet/codex-workers")
@@ -261,7 +261,7 @@ finish_worker() {{
         ;;
     esac
     if [[ $dispatch_exit -eq 4 && "$next_kind" == codex ]]; then
-      # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+      # Claude-only bead (LUCY-b3hf5): never back to codex; queue it for a Claude session.
       python3 "$SLOTS" enqueue "$next_bead" goal
       echo "fleet auto-drain: $next_bead is Claude-only; re-enqueued as kind=goal" >&2
     elif [[ $dispatch_exit -ne 0 ]]; then
@@ -389,7 +389,7 @@ def release_codex_slot(slot_token):
 
 def dispatch_command(bead, dry_run=False, force=False, pre_claimed=None, force_reason=None):
     validate_bead_id(bead)
-    # LUCY-b3hf5: a Claude-only client's bead is never handed to a Codex builder; --force
+    # LUCY-b3hf5: a Claude-only (patient-data) bead is never handed to a Codex builder; --force
     # does not override it. Dispatch it with fleet-dispatch.py (Claude) instead.
     guard_code, _guard_out, guard_err = sh(
         [sys.executable, CLAUDE_ONLY_GUARD, "check", bead], timeout=90

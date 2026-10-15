@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""claude_only_guard.py: keep Claude-only clients' beads away from codex/Astra/GLM (LUCY-b3hf5).
+"""claude_only_guard.py: keep patient-data beads away from codex/Astra/GLM (LUCY-b3hf5).
 
-Standing rule: some clients' work is reviewed by Claude only. On 15 Oct a /long-goal
-builder ran Astra six times on an Anita branch because the rule was prose. This makes
-it structure: one allowlist (claude-only-clients.json next to this file), read by every
-codex/GLM caller.
+Rule (Shane, 15 Oct): client business details may go to Codex/Astra; patient records,
+imports and exports may not. The rule was prose until now. This makes it structure:
+one allowlist (claude-only-beads.json next to this file), read by every codex/GLM caller.
 
 A bead is Claude-only when it, its parent chain, or a dotted-id ancestor carries a
-listed label, or is a listed bead id.
+listed label (patient-data, ...), or is a listed bead id.
 
 Usage:
   claude_only_guard.py route <bead>              # prints "claude" or "astra" + reason (dry run)
@@ -31,7 +30,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ALLOWLIST = os.environ.get("CLAUDE_ONLY_ALLOWLIST") or os.path.join(HERE, "claude-only-clients.json")
+ALLOWLIST = os.environ.get("CLAUDE_ONLY_ALLOWLIST") or os.path.join(HERE, "claude-only-beads.json")
 BD = os.environ.get("CLAUDE_ONLY_BD") or "bd"
 # Mirrors fleet-dispatch.py beads_dir(): LUCY-* is the vault, everything else the code repo.
 VAULT_BEADS = "/Users/shane/Documents/Obsidian/.beads"
@@ -186,10 +185,10 @@ def refusal(beads):
         try:
             why = why_claude_only(b)
         except LookupFailed as exc:
-            return (f"cannot confirm {b} is not a Claude-only client ({exc}). "
+            return (f"cannot confirm {b} is not a Claude-only (patient-data) bead ({exc}). "
                     "Refusing to send it to a non-Claude model; fix the lookup and retry.")
         if why:
-            return (f"{why}. This client's work is reviewed by Claude only: no codex/Astra/GLM. "
+            return (f"{why}. It handles patient data, so it is reviewed by Claude only: no codex/Astra/GLM. "
                     "Use a fresh-context Opus reviewer instead (/goal Phase 4, claude route).")
     return None
 
@@ -208,7 +207,7 @@ def main(argv):
         except LookupFailed as exc:
             print(f"claude\t(lookup failed, routing to the safe side: {exc})")
             return 0
-        print(f"claude\t{why}" if why else f"astra\t{rest[0]} is not a Claude-only client")
+        print(f"claude\t{why}" if why else f"astra\t{rest[0]} is not a Claude-only (patient-data) bead")
         return 0
     if cmd == "check":
         msg = refusal(rest)

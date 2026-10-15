@@ -1,6 +1,6 @@
 #!/bin/bash
 # codex PATH shim (LUCY-b3hf5): refuses any codex call attributable to a Claude-only
-# client's bead, then execs the real codex. bin/glm is a symlink to this file and does the
+# (patient-data) bead, then execs the real codex. bin/glm is a symlink to this file and does the
 # same for glm. Same pattern as bin/bd (bd-close-guard);
 # ~/.claude/bin is first on PATH via ~/.zshrc. The bead comes from $BEAD_ID/$EPIC_ID/
 # $CHILD_ID or the git branch of --cd/-C and the cwd (a detached checkout uses the branches

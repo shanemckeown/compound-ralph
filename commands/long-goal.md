@@ -42,11 +42,11 @@ case "$BEAD_ID" in
 esac
 # bin/codex attributes a codex call by the cwd's branch (and $BEAD_ID/$EPIC_ID if set in the
 # same Bash call; shell variables don't carry over between calls). Recompute the route at Phase 4.
-# LUCY-b3hf5: Claude-only clients are reviewed by Claude only (see /goal Phase 0a).
+# LUCY-b3hf5: patient-data beads are reviewed by Claude only (see /goal Phase 0a).
 REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
 
-🔴 **`REVIEW_ROUTE=claude` (an Anita epic, or anything in `claude-only-clients.json`): no
+🔴 **`REVIEW_ROUTE=claude` (a `patient-data` epic, or anything in `claude-only-beads.json`): no
 codex/Astra/GLM anywhere in the run**, including dual-model children and `/autoplan`'s outside
 voice. Phase 4 then uses `/goal` Phase 4's claude route (two independent fresh-context Opus
 reviewers). `bin/codex`, `fleet-guarded.sh` and `fleet-dispatch-codex.py` refuse such a bead
@@ -236,7 +236,7 @@ section) without disturbing the session.
 below are fresh-context Opus Agents (`/goal` Phase 4 claude route); no Codex pass, no GLM pass,
 for standard and sensitive children alike. Valid evidence is `/goal`'s claude-route clause:
 `claude-seat1-round-N.md` and `opus-h2h-round-N.md` both complete, with the `fallback used:
-claude-only client` line.
+claude-only` line.
 
 **Standard children:** Codex only, same as `/goal` Phase 4 — identical `EVIDENCE_DIR` convention, same `codex exec --sandbox read-only` pattern (routed through `fleet-guarded.sh`, same as `/goal` — see its Phase 4 note), same stdin-piping, same PASS/NEEDS_CHANGES/BLOCK parsing, same "valid evidence is mandatory" rule.
 
@@ -330,7 +330,7 @@ if [ "$NEXT_INFO" != "NONE" ]; then
   esac
   RC=$?
   if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then
-    # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+    # Claude-only bead (LUCY-b3hf5): never back to codex; queue it for a Claude session.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" goal
   elif [ $RC -ne 0 ]; then
     # Both dispatchers release their pre-claimed slot on any failure path.

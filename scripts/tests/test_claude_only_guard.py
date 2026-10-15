@@ -1,6 +1,7 @@
 """Tests for claude_only_guard.py, bin/codex and the fleet wrappers (LUCY-b3hf5).
 
-A Claude-only client's bead must never reach codex/Astra/GLM; every other bead routes as before.
+A patient-data bead must never reach codex/Astra/GLM; every other bead routes as before,
+including a client's ordinary work (Shane, 15 Oct: business details may go to Astra).
 
 Run: python3 -m unittest discover -s ~/.claude/scripts/tests -p 'test_claude_only_guard.py' -v
 """
@@ -20,11 +21,14 @@ SHIM = ROOT / "bin" / "codex"
 GLM_SHIM = ROOT / "bin" / "glm"
 FLEET_GUARDED = SCRIPTS / "fleet-guarded.sh"
 CODEX_DISPATCH = SCRIPTS / "fleet-dispatch-codex.py"
-REAL_ALLOWLIST = SCRIPTS / "claude-only-clients.json"
+REAL_ALLOWLIST = SCRIPTS / "claude-only-beads.json"
 
 # Fake bead DB: id -> {"labels": [...], "parent": ...}, or "ERROR" to simulate bd being down.
 BEADS = {
-    "AestheticcNext-anita1": {"labels": ["client:dr-anita-dhunna", "area:voice"], "parent": None},
+    "AestheticcNext-anita1": {"labels": ["patient-data", "client:dr-anita-dhunna"], "parent": None},
+    "AestheticcNext-anitabiz": {"labels": ["client:dr-anita-dhunna", "dr-anita-dhunna", "area:voice"],
+                                "parent": None},
+    "AestheticcNext-phi1": {"labels": ["phi"], "parent": None},
     "AestheticcNext-anita1.5": {"labels": ["area:voice"], "parent": None},  # dotted-id path only
     "AestheticcNext-kid": {"labels": [], "parent": "AestheticcNext-anita1"},
     "AestheticcNext-plain": {"labels": ["client:viso"], "parent": None},
@@ -96,6 +100,18 @@ class GuardTest(unittest.TestCase):
     def test_labelled_bead_routes_claude(self):
         self.assertEqual(self.route("AestheticcNext-anita1"), "claude")
 
+    def test_client_business_bead_routes_astra(self):
+        # Scope change 15 Oct: a client label alone is not patient data.
+        self.assertEqual(self.route("AestheticcNext-anitabiz"), "astra")
+
+    def test_client_business_bead_codex_call_passes(self):
+        code, out, err = self.run_cmd([SHIM, "exec", "-"], stdin="brief", BEAD_ID="AestheticcNext-anitabiz")
+        self.assertEqual(code, 0, err)
+        self.assertIn("REAL CODEX", out)
+
+    def test_phi_label_routes_claude(self):
+        self.assertEqual(self.route("AestheticcNext-phi1"), "claude")
+
     def test_unlabelled_bead_routes_astra(self):
         self.assertEqual(self.route("AestheticcNext-plain"), "astra")
 
@@ -113,8 +129,10 @@ class GuardTest(unittest.TestCase):
 
     def test_shipped_allowlist(self):
         data = json.loads(REAL_ALLOWLIST.read_text())
-        self.assertIn("client:dr-anita-dhunna", data["labels"])
+        self.assertIn("patient-data", data["labels"])
         self.assertIn("AestheticcNext-i6xyx", data["beads"])
+        self.assertNotIn("client:dr-anita-dhunna", data["labels"])
+        self.assertNotIn("dr-anita-dhunna", data["labels"])
 
     # --- bin/codex shim ---
     def test_shim_refuses_labelled_bead(self):
@@ -272,7 +290,7 @@ class GuardTest(unittest.TestCase):
         # Exit 4 from fleet-dispatch-codex must never go back on the queue as kind=codex.
         for path, pattern in (
             (CODEX_DISPATCH, 'if [[ $dispatch_exit -eq 4 && "$next_kind" == codex ]]; then\n'
-                             '      # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.\n'
+                             '      # Claude-only bead (LUCY-b3hf5): never back to codex; queue it for a Claude session.\n'
                              '      python3 "$SLOTS" enqueue "$next_bead" goal'),
             (ROOT / "commands" / "goal.md", 'if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then'),
             (ROOT / "commands" / "long-goal.md", 'if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then'),

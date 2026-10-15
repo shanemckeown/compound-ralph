@@ -57,8 +57,9 @@ case "$BEAD_ID" in
     echo "failed: unknown bead prefix in $BEAD_ID" && exit 1
     ;;
 esac
-# LUCY-b3hf5: Claude-only clients (Anita, and anything in claude-only-clients.json) are
-# reviewed by Claude only. "claude" = no codex/Astra/GLM anywhere in this run.
+# LUCY-b3hf5: patient-data beads (label patient-data, or listed in claude-only-beads.json)
+# are reviewed by Claude only. "claude" = no codex/Astra/GLM anywhere in this run.
+# Client business details alone (names, sites, prices) may go to Astra (Shane, 15 Oct).
 REVIEW_ROUTE=$(python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID" | cut -f1)
 ```
 
@@ -67,7 +68,8 @@ Phase 4 Step 1, not `/autoplan`'s or `/codex`'s outside voice, not GLM. Phase 4 
 claude route. This is structure, not prose: `~/.claude/bin/codex`, `fleet-guarded.sh` and
 `fleet-dispatch-codex.py` all refuse such a bead (exit 3) via `claude_only_guard.py`. A
 refusal from them is the gate working; never route around it. (15 Oct: Astra ran six times on
-an Anita branch when this was a prose rule.)
+an Anita branch when this was a prose rule.) A bead that touches patient records, imports or
+exports should carry the `patient-data` label; add it at plan time if it's missing.
 
 #### 0b. Load the bead
 
@@ -592,13 +594,13 @@ REVIEWER="astra-xhigh"
 # releases it on exit. Never remove the wrapper to "simplify" the command.
 ```
 
-**Claude route (`REVIEW_ROUTE=claude`, Claude-only client): skip the Astra call above.**
+**Claude route (`REVIEW_ROUTE=claude`, patient-data bead): skip the Astra call above.**
 Shell variables don't survive between Bash calls, so recompute the route here first:
 `python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID"` (line 1 `claude` or
 `astra`; save it to `$EVIDENCE_DIR/route-round-N.txt`). On `claude`, spawn a fresh-context Opus Agent (`model: opus`) on the same brief as the Astra-seat
 reviewer; it writes `$EVIDENCE_DIR/claude-seat1-round-N.md`. Step 2 below always runs too, so
-the gate is two independent Claude reviews. Set `REVIEWER="opus x2 (Claude-only client)"`,
-write `fallback used: claude-only client — <guard reason>` to
+the gate is two independent Claude reviews. Set `REVIEWER="opus x2 (Claude-only, patient data)"`,
+write `fallback used: claude-only — <guard reason>` to
 `$EVIDENCE_DIR/fallback-round-N.txt` (so the Step 4 checker drops the Astra log), and say so
 in Phase 7. This is not "Astra unavailable": the hold rule below does not apply.
 
@@ -723,7 +725,7 @@ exist, and the output must record the command that actually ran. **All** of thes
 (1) the QA exit-code file contains `0`, with no exceptions; (2) the Astra exit-code file
 contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
 `fallback used` alongside a completed Opus verdict, **or** on the claude route (any bead,
-sensitive included) `fallback-round-N.txt` says `fallback used: claude-only client` and
+sensitive included) `fallback-round-N.txt` says `fallback used: claude-only` and
 `claude-seat1-round-N.md` is complete; (3) where Step 2 applies, both the Astra
 and the Opus verdicts are complete (no Astra-unavailable fallback exists for these; on the
 claude route, `claude-seat1-round-N.md` and `opus-h2h-round-N.md` are both complete); (4) `mutants-round-N.txt`
@@ -934,7 +936,7 @@ if [ "$NEXT_INFO" != "NONE" ]; then
   esac
   RC=$?
   if [ $RC -eq 4 ] && [ "$NEXT_KIND" = codex ]; then
-    # Claude-only client (LUCY-b3hf5): never back to codex; queue it for a Claude session.
+    # Claude-only bead (LUCY-b3hf5): never back to codex; queue it for a Claude session.
     python3 ~/.claude/scripts/fleet-slots.py enqueue "$NEXT" goal
   elif [ $RC -ne 0 ]; then
     # Both dispatchers release their pre-claimed slot on any failure path.
