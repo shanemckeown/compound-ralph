@@ -1308,11 +1308,24 @@ def run_gate(bead, is_epic):
     target = next((r.split(" ", 1)[1] for r in resume if r.startswith("target ")), None)
     if target:
         _GATE_STATE["resume_target"] = target
+        _GATE_STATE["resume_cwd"] = resume_worktree(sh("git worktree list", cwd=REPO, bead=bead)[1], target)
     return failed, {k: v for k, v in results.items() if v}
 
 
+def resume_worktree(worktree_list, target, isdir=os.path.isdir):
+    """The worktree that already has `target` checked out (`git worktree list` output), else None.
+    A resumed worker starts THERE (LUCY-31lki): launched from REPO it had to `cd`/`git -C` into
+    the branch's worktree, a path outside its working dirs, and a headless worker then sat on the
+    permission prompt (9ift6, 15 Oct: 39 min, then 18 min)."""
+    for line in worktree_list.splitlines():
+        m = re.match(r"^(\S+)\s+[0-9a-f]+\s+\[(.+)\]$", line.strip())
+        if m and m.group(2) == target and isdir(m.group(1)):
+            return m.group(1)
+    return None
+
+
 # ------------------------------------------------------------- the dispatch ---
-def dispatch(bead, is_epic, dispatched_by):
+def dispatch(bead, is_epic, dispatched_by, cwd=REPO):
     before = {a.get("sessionId") for a in registry()}
 
     # 🔴 TIER A: a spawned code worker loads NO MCP servers.
@@ -1343,8 +1356,8 @@ def dispatch(bead, is_epic, dispatched_by):
     cmd = (f'claude --bg --name "{bead}" '
            f'--mcp-config "{TIER_A_MCP}" --strict-mcp-config '
            f'"/{"long-goal" if is_epic else "goal"} {bead}"')
-    print(f"\n── dispatching: {cmd}")
-    code, out, err = sh(cmd, cwd=REPO, timeout=120)
+    print(f"\n── dispatching: {cmd}" + (f"\n   cwd: {cwd} (resume worktree)" if cwd != REPO else ""))
+    code, out, err = sh(cmd, cwd=cwd, timeout=120)
     if code != 0:
         print(f"   ✗ dispatch failed: {err or out}")
         return None
@@ -1370,7 +1383,8 @@ def dispatch(bead, is_epic, dispatched_by):
     return session
 
 
-def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by, force_reason=None):
+def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by, force_reason=None,
+                   cwd=REPO):
     os.makedirs(os.path.dirname(MANIFEST), exist_ok=True)
     row = {
         "dispatched_at": datetime.datetime.now(datetime.timezone.utc)
@@ -1380,7 +1394,7 @@ def write_manifest(bead, is_epic, session, gate_failures, forced, dispatched_by,
         "session_id": session.get("sessionId") if session else None,
         "short_id": session.get("id") if session else None,
         "name": bead,
-        "cwd": REPO,
+        "cwd": cwd,
         # 🔴 An epic branches as long-goal/<bead>, NOT goal/<bead>. Lines above already
         # branch on is_epic for the command; this one did not, so every epic dispatched
         # before 2026-08-14 recorded a branch that never existed.
@@ -1478,19 +1492,22 @@ def main():
             sys.exit(1)
 
     target = _GATE_STATE.get("resume_target")
+    cwd = _GATE_STATE.get("resume_cwd") or REPO
     if target:
         # The worker only receives `/goal <bead>`; the bead is the durable channel (LUCY-6v5gv).
+        where = (f" Your cwd is its worktree {cwd}: work in place, never cd/git -C into another."
+                 if cwd != REPO else "")
         sh(f"bd comment {bead} \"RESUME: {target} — fleet-dispatch check 1: newest unlanded branch, "
-           f"no live session. Check out and push this exact branch; never a -rN sibling.\"",
+           f"no live session. Check out and push this exact branch; never a -rN sibling.{where}\"",
            cwd=REPO, bead=bead)
         print(f"   ✓ RESUME: {target} recorded on {bead} for /goal Phase 1")
-    session = dispatch(bead, is_epic, dispatched_by)
+    session = dispatch(bead, is_epic, dispatched_by, cwd)
     if session:
         sh(f"python3 {SLOTS} attach-session-id {bead} {session['sessionId']}")
     else:
         # dispatch itself failed -- don't let a phantom slot sit claimed forever.
         sh(f"python3 {SLOTS} release-agent-view {bead}")
-    write_manifest(bead, is_epic, session, failures, force, dispatched_by, force_reason)
+    write_manifest(bead, is_epic, session, failures, force, dispatched_by, force_reason, cwd=cwd)
     if not session:
         sys.exit(1)
 

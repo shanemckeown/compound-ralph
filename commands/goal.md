@@ -206,6 +206,10 @@ save/persist action, confirm .goal/PLAN.md names the new `promise_inventory.json
    Build on top of it and push to that same name. Never rename it, never start a fresh branch
    beside it. A live session on the bead makes check 1 refuse even with `--force`, so a resume
    never fights a running builder.
+   **If your cwd already is that worktree** (`fleet-dispatch.py` launches a resume there and the
+   `RESUME:` comment says so, LUCY-31lki), you are already isolated: work in place. Never `cd` or
+   `git -C` into another worktree to inspect it; that path sits outside your working directories
+   and a headless run waits on the permission prompt with nobody there (9ift6, 15 Oct).
 3. For each bead in scope:
    ```bash
    bd update <ID> --claim --status=in_progress
