@@ -1,0 +1,94 @@
+# Land gate (AestheticcNext-uqgwm): the full test gate, test-only. It builds no image, pushes
+# nothing and touches no Cloud Run service; tests/meta/cloudbuild-gate-deploys-nothing.test.ts
+# fails npm test if it ever gains a step that could. The runner submits it twice at once, with
+# _LANE=unit and _LANE=pg, so each lane gets a whole 32-vCPU builder (the unit lane is CPU-bound,
+# the pg lane is container I/O-bound, and together their workers would not fit in 32 GB).
+#
+# Step bodies are copied from cloudbuild.yaml; only the lane lines and --maxWorkers differ.
+# tests/meta/cloudbuild-parallel.test.ts fails if the two drift apart.
+#
+# _LANE is a Cloud Build substitution, expanded before bash runs. A shell variable here must
+# be written $$NAME, or Cloud Build rejects the build as an unknown substitution.
+timeout: 1800s
+options:
+  machineType: 'E2_HIGHCPU_32'
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _LANE: 'unit'
+
+steps:
+  # A lane name that matches neither guard would skip every test and go green, so refuse it.
+  - name: "node:20"
+    id: "npm-ci"
+    waitFor: ["-"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        case "$_LANE" in unit|pg) ;; *) echo "❌ _LANE must be unit or pg, got '$_LANE'"; exit 1 ;; esac
+        set -euo pipefail
+        npm ci --legacy-peer-deps
+
+  # Unit lane: node + dom Jest projects, lint + typecheck and mobile Jest, side by side.
+  - name: "node:20"
+    id: "unit-tests"
+    waitFor: ["npm-ci"]
+    timeout: "900s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = unit ] || exit 0
+        set -euo pipefail
+        # 20 workers: this lane has the builder to itself (12 in cloudbuild.yaml, which shares it).
+        npm test -- --forceExit --maxWorkers=20
+        echo "✅ All tests passed"
+
+  - name: "node:20"
+    id: "lint-typecheck"
+    waitFor: ["npm-ci"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = unit ] || exit 0
+        set -euo pipefail
+        echo "🔎 Lint (blocking)"
+        npx next lint
+        echo "✅ Lint passed"
+        echo "🔎 TypeScript typecheck (blocking)"
+        node --max-old-space-size=6144 ./node_modules/typescript/bin/tsc --noEmit
+        echo "✅ Typecheck passed"
+
+  - name: "node:20"
+    id: "mobile-tests"
+    waitFor: ["npm-ci"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = unit ] || exit 0
+        set -euo pipefail
+        bash scripts/ci/run-mobile-tests.sh
+        echo "✅ mobile tests passed"
+
+  # pg lane: the whole pg-tests project, one testcontainers Postgres per suite on this
+  # builder (test-only land gate; deploys nothing; no image push).
+  - name: "node:20"
+    id: "pg-tests"
+    waitFor: ["npm-ci"]
+    timeout: "1200s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = pg ] || exit 0
+        set -euo pipefail
+        echo "🐘 PostgreSQL integration tests (pg-tests project) [BLOCKING]"
+        export TZ=UTC
+        export RUN_PG_TESTS=true
+        npx jest --selectProjects pg-tests --maxWorkers=14
+        echo "✅ pg-tests passed"

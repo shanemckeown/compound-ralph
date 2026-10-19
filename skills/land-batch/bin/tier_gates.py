@@ -15,7 +15,9 @@ Per-merge scoped gates (scoped lint, related jest) run per candidate in Step 2 a
 listed here. The push-time gates, once on the combined tree, in list order, one at a time:
   every tier: full-project tsc; plus tests/config-effect when a beads export changed (it
          reads KNOWN_GAPS beads, so the export is a test input even in a UI batch).
-  full:  then the whole Cloud Build simulation (steps #0, #2 and #3). Its step #2 IS the
+  full:  then cloudbuild-full: with LAND_GATE_REMOTE on, two Cloud Build lanes of
+         cloudbuild-gate.yaml via ~/.claude/scripts/cloudbuild-gate-remote.py (LUCY-vxk2v);
+         otherwise the whole Cloud Build simulation (steps #0, #2 and #3). Its step #2 IS the
          full pg lane, run inside the upload tarball so a fixture .gcloudignore drops fails
          here and not in Cloud Build. One command under the laptop-wide pg-lane lock, never
          beside another pg lane: run concurrently on 12 Oct they produced 9 false pg
@@ -45,21 +47,48 @@ BEADS_SUITE = {"name": "beads-config-effect",
 CLOUDBUILD = {"name": "cloudbuild-full",
               # env -u: an inherited SKIP_PG_TESTS=1 would silently drop step #2 (the pg lane).
               "cmd": f"{PG_LOCK} env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
+# LUCY-vxk2v: the same gate on Cloud Build (two lanes of cloudbuild-gate.yaml). Nothing runs on
+# the laptop, so no pg-lane lock. The SKILL loop runs the cmd in the scratch, hence `--scratch .`.
+# `uv run --script` reads the script's inline metadata (PyYAML for its allow-list; system python3
+# has none). Without PyYAML the script refuses with exit 2; it never falls back to a text scan.
+CLOUDBUILD_REMOTE_CMD = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
+# LAND_GATE_REMOTE=1 / =0 picks remote / local; unset uses this. The Manager flips it to True
+# after the live acceptance run; =0 stays the Cloud Build outage fallback.
+REMOTE_DEFAULT = False
 
 
-def gates_for(tier, paths=()):
+def gate_remote(env=None):
+    value = (os.environ if env is None else env).get("LAND_GATE_REMOTE", "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return REMOTE_DEFAULT
+
+
+def cloudbuild_gate(env=None):
+    gate = dict(CLOUDBUILD)
+    if gate_remote(env):
+        gate["cmd"] = CLOUDBUILD_REMOTE_CMD
+    return gate
+
+
+def gates_for(tier, paths=(), env=None):
     """Ordered push-time gates. Run in list order, one at a time; stop at the first red."""
     gates = [TSC]
     if any(p.strip() in risk_tier.BEADS_EXPORTS for p in paths):
         gates.append(BEADS_SUITE)
     if tier == "full":
-        gates.append(CLOUDBUILD)
+        gates.append(cloudbuild_gate(env))
     return [dict(g) for g in gates]
 
 
-def plan(paths, repo=None):
+def plan(paths, repo=None, env=None):
     tier, reasons = risk_tier.classify(paths, repo)
-    return {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths)}
+    result = {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths, env)}
+    if gate_remote(env):  # review P4-1: the local plan stays byte-identical to the pre-vxk2v one
+        result["cloudbuild_remote"] = True
+    return result
 
 
 def push_problems(tier_plan, head, evidence_dir):
