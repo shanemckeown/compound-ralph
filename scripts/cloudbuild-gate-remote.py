@@ -16,7 +16,7 @@ code and stdout, exactly as for the local simulation. Needs PyYAML (tier_gates r
 
 1. Refuse (exit 2) before any gcloud call unless the config passes an ALLOW-LIST (review round 1,
    P1-1: a text deny-list was bypassed by flow style, flag order, substitutions and anchors):
-   it parses with yaml.safe_load; its top-level keys are a subset of steps/timeout/options/
+   it parses with a strict SafeLoader subclass that refuses duplicate and merge keys; its top-level keys are a subset of steps/timeout/options/
    substitutions; every step's name is node:<tag>; every entrypoint is bash/sh/npm/npx/node;
    no serviceAccount key anywhere; and the raw text (comments included, any case) never
    mentions gcloud, run.googleapis, docker, kubectl, metadata or 169.254.169.254. A file named
@@ -35,8 +35,9 @@ code and stdout, exactly as for the local simulation. Needs PyYAML (tier_gates r
 6. Exit 0 only if both SUCCESS; any FAILURE 1 (with a "FAILED LANE <lane>: <suites>" last line);
    otherwise TIMEOUT/INTERNAL_ERROR/CANCELLED/EXPIRED 137, which the SKILL treats as infra
    (rerun once, then HOLD). A gcloud that cannot run, or a submit that fails or prints no JSON,
-   is infra too: 137, never 1 (P3-1). SIGTERM/SIGINT cancel every submitted lane, exit 137
-   (P3-2). Never retries. Never touches traffic, never deploys.
+   is infra too: 137, never 1 (P3-1). Every gcloud call has a GCLOUD_TIMEOUT (a hung call is
+   infra). SIGTERM/SIGINT cancel every submitted lane, at most once each, and always exit 137
+   (P3-2), within SIGNAL_JOIN_BOUND even when a submit is hung. Never retries. Never touches traffic, never deploys.
 
 Every gcloud call goes through one runner (`run_gcloud`); CLOUDBUILD_GATE_GCLOUD names another
 binary, and tests inject a fake runner into main().
@@ -70,6 +71,14 @@ JEST_FAIL = re.compile(r"\bFAIL\s+(.*)$")
 TEST_PATH = re.compile(r"\S+\.(?:test|spec)\.[cm]?[jt]sx?\b")
 EXIT_REFUSED, EXIT_FAILED, EXIT_INFRA = 2, 1, 137
 EXEC_ERROR = 127  # run_gcloud's code when gcloud itself could not be executed
+TIMED_OUT = 124  # run_gcloud's code when a gcloud call outlived GCLOUD_TIMEOUT
+# Well over a slow (~2 min) source upload; a call still running then is hung, and hung is infra.
+GCLOUD_TIMEOUT = 600
+# How long the signal path waits for in-flight submits to return (and cancel their own build)
+# before it kills their gcloud and exits 137 anyway.
+SIGNAL_JOIN_BOUND = 20.0
+_LIVE = set()  # gcloud processes still running, so the signal path can kill a hung one
+_LIVE_LOCK = threading.Lock()
 
 
 class Interrupted(Exception):
@@ -80,10 +89,33 @@ def run_gcloud(args):
     """The only place gcloud runs. Returns (returncode, stdout, stderr); never raises on exec."""
     binary = os.environ.get("CLOUDBUILD_GATE_GCLOUD") or "gcloud"
     try:
-        proc = subprocess.run([binary, *args], capture_output=True, text=True)
+        proc = subprocess.Popen([binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except OSError as exc:  # FileNotFoundError, PermissionError, ...
         return EXEC_ERROR, "", f"could not execute {binary}: {exc}"
-    return proc.returncode, proc.stdout, proc.stderr
+    with _LIVE_LOCK:
+        _LIVE.add(proc)
+    try:
+        out, err = proc.communicate(timeout=GCLOUD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return TIMED_OUT, "", f"gcloud {' '.join(args[:2])} timed out after {GCLOUD_TIMEOUT}s"
+    finally:
+        with _LIVE_LOCK:
+            _LIVE.discard(proc)
+    return proc.returncode, out, err
+
+
+def kill_live_gcloud():
+    """Kill every gcloud call still running (the signal path's last resort for a hung submit)."""
+    with _LIVE_LOCK:
+        live = list(_LIVE)
+    for proc in live:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    return len(live)
 
 
 def guarded(runner):
@@ -291,14 +323,16 @@ def _interrupt(signum, _frame):
 class LaneState:
     """Submitted builds, shared by the submit threads and the main thread's signal path.
 
-    `stopped` and `builds` change only under `lock`, so every submitted build is cancelled exactly
-    once: either it is in the main thread's snapshot when the stop is set, or its submit thread
-    sees `stopped` when it records the id and cancels the build itself.
+    `stopped` and `builds` change only under `lock`, so every submitted build is cancelled: either
+    it is in the main thread's snapshot when the stop is set, or its submit thread sees `stopped`
+    when it records the id and cancels the build itself. Every cancel goes through cancel_once,
+    so no path (signal, submit error, ceiling, or a signal during one of those) cancels twice.
     """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.builds, self.urls, self.errors = {}, {}, {}
+        self.cancelled = set()
         self.stopped = False
         self.threads = []
 
@@ -306,6 +340,35 @@ class LaneState:
         with self.lock:
             self.stopped = True
             return dict(self.builds)
+
+    def cancel_once(self, call, build_id, args):
+        """Cancel build_id unless some path already has. Claimed before the call, so at most once."""
+        with self.lock:
+            if build_id in self.cancelled:
+                return
+            self.cancelled.add(build_id)
+        cancel(call, build_id, args.project, args.region)
+
+    def join_submits(self, bound):
+        """Wait up to `bound` seconds (real time) for the submit threads that started.
+
+        A thread whose start() was cut short by the signal never ran, so it is skipped rather than
+        joined (joining it raises RuntimeError, which would exit 1, a red). Returns the threads
+        still running at the bound.
+        """
+        deadline = time.monotonic() + bound
+        alive = []
+        for thread in list(self.threads):
+            while True:
+                try:
+                    thread.join(max(0.0, min(0.05, deadline - time.monotonic())))
+                except RuntimeError:  # never started
+                    break
+                if not thread.is_alive() or time.monotonic() >= deadline:
+                    break
+            if thread.is_alive():
+                alive.append(thread)
+        return alive
 
 
 def main(argv=None, runner=run_gcloud, sleep=time.sleep, clock=time.monotonic, out=None):
@@ -346,9 +409,15 @@ def main(argv=None, runner=run_gcloud, sleep=time.sleep, clock=time.monotonic, o
         submitted = state.stop()
         say(f"INTERRUPTED by {exc}; cancelling {len(submitted)} submitted lane build(s)")
         for build_id in submitted.values():
-            cancel(call, build_id, args.project, args.region)
-        for thread in state.threads:  # an in-flight submit cancels its own build when it returns
-            thread.join()
+            state.cancel_once(call, build_id, args)
+        # An in-flight submit cancels its own build when it returns; a hung one must not hold the
+        # exit, so the wait is bounded and its gcloud is killed after it.
+        hung = state.join_submits(SIGNAL_JOIN_BOUND)
+        if hung:
+            killed = kill_live_gcloud()
+            say(f"{len(hung)} submit(s) still running after {SIGNAL_JOIN_BOUND:.0f}s "
+                f"({', '.join(t.name for t in hung)}); killed {killed} gcloud call(s)")
+            state.join_submits(2.0)
         return EXIT_INFRA
     finally:
         for sig, handler in previous.items():
@@ -366,7 +435,7 @@ def _submit_lane(call, scratch, config, lane, args, service_account, state, say)
         state.builds[lane], state.urls[lane] = build_id, log_url
         late = state.stopped
     if late:
-        cancel(call, build_id, args.project, args.region)
+        state.cancel_once(call, build_id, args)
         say(f"LANE {lane} build {build_id} submitted after the stop; cancelled")
     else:
         say(f"LANE {lane} build {build_id} {log_url}")
@@ -387,7 +456,10 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
 
     # Both source uploads at once (they took ~85 s each, one after the other).
     for lane in LANES:
-        thread = threading.Thread(target=_submit_lane, name=f"submit-{lane}",
+        # Daemon, so a hung submit can never hold the process open after main() returns 137.
+        # Tracked before start(): a signal inside start() may still leave it running, and
+        # join_submits skips one that never started.
+        thread = threading.Thread(target=_submit_lane, name=f"submit-{lane}", daemon=True,
                                   args=(call, scratch, config, lane, args, service_account, state, say))
         state.threads.append(thread)
         thread.start()
@@ -399,7 +471,7 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
             if lane in state.errors:
                 say(f"SUBMIT FAILED: {state.errors[lane]}")
         for started in state.stop().values():
-            cancel(call, started, args.project, args.region)
+            state.cancel_once(call, started, args)
         return EXIT_INFRA
     builds = state.builds
 
@@ -415,7 +487,7 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
         if clock() - started > args.ceiling:
             say(f"CEILING {args.ceiling:.0f}s passed; cancelling both builds")
             for lane in LANES:
-                cancel(call, builds[lane], args.project, args.region)
+                state.cancel_once(call, builds[lane], args)
             return EXIT_INFRA
         sleep(args.poll)
 

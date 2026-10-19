@@ -635,3 +635,106 @@ def test_main_flushes_every_line_it_says(scratch):
     clock, out = Clock(), Sink()
     gr.main(["--scratch", str(scratch)], runner=fake, sleep=clock.sleep, clock=clock, out=out)
     assert Sink.flushes >= len(out.getvalue().splitlines()) - 2  # summaries join lines in one say
+
+
+# ---- LUCY-zp23t review round 1
+
+def test_signal_between_thread_append_and_start_exits_137_never_1(scratch, monkeypatch):
+    # P2-1: the pg thread is in state.threads but not started when the signal lands. Joining it
+    # raised RuntimeError, which escaped main() as exit 1 (a red) instead of 137 (infra).
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    real_start = threading.Thread.start
+
+    def start(self):
+        if self.name == "submit-pg":
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.1)  # the handler runs in the main thread, before the real start
+        return real_start(self)
+    monkeypatch.setattr(threading.Thread, "start", start)
+    out = io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=fake, sleep=lambda _s: None, clock=lambda: 0.0, out=out)
+    assert code == 137 and "INTERRUPTED by SIGTERM" in out.getvalue()
+    assert [c[2] for c in fake.verbs("cancel")] == ["build-unit"]
+    assert not any("_LANE=pg" in a for c in fake.verbs("submit") for a in c)
+
+
+def test_sigterm_with_a_hung_submit_exits_137_within_the_bound(scratch, monkeypatch):
+    # P3-1: the pg upload never returns. SIGTERM must still end the run, within the join bound.
+    monkeypatch.setattr(gr, "SIGNAL_JOIN_BOUND", 0.5, raising=False)
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    release = threading.Event()
+
+    def hung(args):
+        if args[1] == "submit" and "--substitutions=_LANE=pg" in args:
+            release.wait(6)  # "never" for this test; released in finally so no thread outlives it
+            return 1, "", "hung"
+        return fake(args)
+    timer = threading.Timer(0.2, os.kill, (os.getpid(), signal.SIGTERM))
+    out = io.StringIO()
+    started = time.monotonic()
+    try:
+        timer.start()
+        code = gr.main(["--scratch", str(scratch)], runner=hung, sleep=lambda _s: None,
+                       clock=lambda: 0.0, out=out)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        timer.cancel()
+    assert code == 137 and "INTERRUPTED by SIGTERM" in out.getvalue()
+    assert elapsed < 4, elapsed
+    assert "submit(s) still running" in out.getvalue()
+    assert [c[2] for c in fake.verbs("cancel")] == ["build-unit"]
+
+
+def test_a_hung_gcloud_call_times_out_as_infra(scratch, tmp_path, monkeypatch):
+    # P3-1: the real runner bounds every gcloud call; a submit past the bound is infra (137).
+    fake_bin = tmp_path / "slow-gcloud"
+    fake_bin.write_text('#!/bin/sh\ncase "$2" in submit) exec sleep 30 ;; esac\necho "{}"\n')
+    fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("CLOUDBUILD_GATE_GCLOUD", str(fake_bin))
+    monkeypatch.setattr(gr, "GCLOUD_TIMEOUT", 0.5, raising=False)
+    started = time.monotonic()
+    code, out = run(scratch, gr.run_gcloud)
+    assert code == 137 and "SUBMIT FAILED" in out and "timed out after 0.5s" in out
+    assert time.monotonic() - started < 10
+
+
+def test_gcloud_timeout_is_well_over_a_slow_upload():
+    assert gr.GCLOUD_TIMEOUT >= 300
+
+
+def _cancel_signals_once(fake):
+    """A runner whose first cancel delivers SIGTERM, i.e. the signal lands inside a cancel loop."""
+    fired = []
+
+    def runner(args):
+        result = fake(args)
+        if args[1] == "cancel" and not fired:
+            fired.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return result
+    return runner
+
+
+def test_signal_during_the_ceiling_cancel_loop_cancels_each_build_once(scratch):
+    # P4-1: the ceiling loop and then the signal path both cancelled build-unit.
+    fake = FakeGcloud({"unit": ["WORKING"], "pg": ["WORKING"]})
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch), "--ceiling", "10"], runner=_cancel_signals_once(fake),
+                   sleep=clock.sleep, clock=clock, out=out)
+    assert code == 137
+    assert sorted(c[2] for c in fake.verbs("cancel")) == ["build-pg", "build-unit"]
+
+
+def test_signal_during_the_submit_error_cleanup_cancels_the_build_once(scratch):
+    # P4-1: the submit-error loop and then the signal path both cancelled build-unit.
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]}, submit_fail_lane="pg")
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=_cancel_signals_once(fake),
+                   sleep=clock.sleep, clock=clock, out=out)
+    assert code == 137
+    assert [c[2] for c in fake.verbs("cancel")] == ["build-unit"]
+
+
+def test_docstring_names_the_strict_loader_not_safe_load():
+    assert "yaml.safe_load" not in gr.__doc__ and "strict SafeLoader" in gr.__doc__
