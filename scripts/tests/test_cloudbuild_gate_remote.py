@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -37,8 +38,9 @@ class FakeGcloud:
     """Scripted gcloud: lane -> list of describe statuses (last one repeats), plus logs."""
 
     def __init__(self, statuses, logs=None, steps=None, submit_fail_lane=None, sa_exists=True,
-                 submit_out=None):
+                 submit_out=None, filtered=None):
         self.sa_exists = sa_exists
+        self.filtered = filtered or {}  # lane -> `gcloud logging read` textPayload output
         self.submit_out = submit_out
         self.statuses = {lane: list(s) for lane, s in statuses.items()}
         self.logs = logs or {}
@@ -53,6 +55,9 @@ class FakeGcloud:
             if self.sa_exists:
                 return 0, json.dumps({"email": args[3]}), ""
             return 1, "", f"ERROR: NOT_FOUND: Unknown service account {args[3]}"
+        if args[0] == "logging":
+            build_id = re.search(r'build_id="([^"]+)"', args[2]).group(1)
+            return 0, self.filtered.get(self.lane_of[build_id], ""), ""
         verb = args[1]
         if verb == "submit":
             lane = next(a for a in args if a.startswith("--substitutions=")).split("=")[-1]
@@ -545,20 +550,25 @@ def test_both_submits_start_before_either_finishes(scratch):
     assert len(fake.verbs("submit")) == 2
 
 
-def test_lane_logs_are_fetched_in_parallel(scratch):
+def test_lane_log_fetches_never_overlap(scratch):
+    # LUCY-tdbtv: parallel reads tripped the Cloud Logging read quota (429); fetch one at a time.
     fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
-    barrier = threading.Barrier(2, timeout=5)
+    lock, overlaps = threading.Lock(), []
+    in_flight = [0]
 
-    def parallel_logs(args):
+    def watched(args):
         if args[1] == "log":
-            try:
-                barrier.wait()
-            except threading.BrokenBarrierError:
-                return 1, "", "logs fetched one after the other"
+            with lock:
+                in_flight[0] += 1
+                if in_flight[0] > 1:
+                    overlaps.append(args[2])
+            time.sleep(0.2)
+            with lock:
+                in_flight[0] -= 1
         return fake(args)
     clock, out = Clock(), io.StringIO()
-    code = gr.main(["--scratch", str(scratch)], runner=parallel_logs, sleep=clock.sleep, clock=clock, out=out)
-    assert code == 0 and "fetched one after the other" not in out.getvalue()
+    code = gr.main(["--scratch", str(scratch)], runner=watched, sleep=clock.sleep, clock=clock, out=out)
+    assert code == 0 and overlaps == []
     assert len(fake.verbs("log")) == 2
 
 
@@ -754,3 +764,113 @@ def test_a_timed_out_service_account_check_is_infra_not_a_refusal(scratch):
     assert code == 137, out.getvalue()
     assert "GCLOUD UNAVAILABLE" in out.getvalue() and "not found" not in out.getvalue()
     assert not fake.verbs("submit")
+
+
+# ---- LUCY-tdbtv: 429 log fetches, incomplete evidence (build 9c17d03e)
+
+UNIT_FAIL_STEPS = [{"id": "npm-ci", "status": "SUCCESS"}, {"id": "unit-tests", "status": "FAILURE"}]
+UNIT_FAIL_FULL = """\
+Step #2 - "unit-tests": PASS tests/a.test.ts
+Step #2 - "unit-tests": FAIL tests/api/ai-entitlement-webhooks.test.ts
+Step #2 - "unit-tests": Test Suites: 1 failed, 411 passed, 412 total
+Step #2 - "unit-tests": Tests:       1 failed, 5119 passed, 5120 total
+"""
+UNIT_TRUNCATED = """\
+Step #2 - "unit-tests": PASS tests/a.test.ts
+Step #2 - "unit-tests": PASS tests/b.test.ts
+"""
+QUOTA_ERR = ("ERROR: (gcloud.builds.log) HttpError accessing <logging.googleapis.com/v2/entries:list>: "
+             "response: <{'status': '429'}>, content <Quota exceeded for quota metric 'Read requests'>")
+
+
+def scripted_logs(fake, lane, results):
+    """A runner whose `builds log` for `lane` returns `results` in turn (the last repeats)."""
+    queue = list(results)
+
+    def runner(args):
+        if args[1] == "log" and fake.lane_of.get(args[2]) == lane:
+            fake.calls.append(list(args))
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+        return fake(args)
+    return runner
+
+
+def run_with(scratch, runner, *extra):
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch), *extra], runner=runner, sleep=clock.sleep, clock=clock, out=out)
+    return code, out.getvalue(), clock
+
+
+def test_a_429_on_the_first_fetch_is_retried_and_the_full_log_names_the_suite(scratch):
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS})
+    runner = scripted_logs(fake, "unit", [(1, UNIT_TRUNCATED, QUOTA_ERR), (0, UNIT_FAIL_FULL, "")])
+    code, out, clock = run_with(scratch, runner)
+    assert code == 1
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: tests/api/ai-entitlement-webhooks.test.ts"
+    assert "LOG INCOMPLETE" not in out and "Test Suites: 1 failed" in out
+    assert len([c for c in fake.verbs("log") if c[2] == "build-unit"]) == 2
+    assert clock.now == gr.FETCH_DELAYS[0]
+
+
+def test_a_429_with_exit_0_is_still_retried(scratch):
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS})
+    runner = scripted_logs(fake, "unit", [(0, UNIT_FAIL_FULL, QUOTA_ERR), (0, UNIT_FAIL_FULL, "")])
+    code, out, _ = run_with(scratch, runner)
+    assert code == 1 and len([c for c in fake.verbs("log") if c[2] == "build-unit"]) == 2
+
+
+def test_a_log_missing_the_jest_summary_is_retried_then_flagged_incomplete(scratch):
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS})
+    runner = scripted_logs(fake, "unit", [(0, UNIT_TRUNCATED, "")])
+    code, out, _ = run_with(scratch, runner)
+    assert code == 1  # the build status is authoritative
+    tries = len(gr.FETCH_DELAYS) + 1
+    assert len([c for c in fake.verbs("log") if c[2] == "build-unit"]) == tries
+    assert ("LOG INCOMPLETE for unit: 2 lines fetched, no jest summary for unit-tests; "
+            "see https://console/build-unit") in out
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: unit-tests"
+
+
+def test_the_filtered_read_adds_a_suite_the_truncated_log_missed(scratch):
+    truncated = UNIT_TRUNCATED + 'Step #2 - "unit-tests": FAIL tests/early.test.ts\n'
+    filtered = ('Step #2 - "unit-tests": FAIL tests/early.test.ts\n'
+                'Step #2 - "unit-tests": FAIL tests/api/ai-entitlement-webhooks.test.ts\n')
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS},
+                      logs={"unit": truncated}, filtered={"unit": filtered})
+    code, out = run(scratch, fake)
+    assert code == 1
+    assert out.rstrip().splitlines()[-1] == (
+        "FAILED LANE unit: tests/early.test.ts tests/api/ai-entitlement-webhooks.test.ts")
+    reads = [c for c in fake.calls if c[:2] == ["logging", "read"]]
+    assert len(reads) == 1
+    assert ('resource.type="build"' in reads[0][2] and 'resource.labels.build_id="build-unit"' in reads[0][2]
+            and 'textPayload:"FAIL "' in reads[0][2])
+
+
+def test_no_filtered_read_for_a_green_lane(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    run(scratch, fake)
+    assert not [c for c in fake.calls if c[0] == "logging"]
+
+
+def test_backoff_gives_up_after_n_tries_without_hanging(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["TIMEOUT"]})
+    runner = scripted_logs(fake, "pg", [(1, "partial\n", QUOTA_ERR)])
+    started = time.monotonic()
+    code, out, clock = run_with(scratch, runner)
+    assert time.monotonic() - started < 5
+    assert code == 137
+    tries = len(gr.FETCH_DELAYS) + 1
+    assert tries >= 5
+    assert len([c for c in fake.verbs("log") if c[2] == "build-pg"]) == tries
+    assert clock.now == sum(gr.FETCH_DELAYS)
+    assert gr.FETCH_DELAYS[0] <= 15 and gr.FETCH_DELAYS[-1] >= 100
+    assert list(gr.FETCH_DELAYS) == sorted(gr.FETCH_DELAYS)
+    assert f"LOG INCOMPLETE for pg: 1 lines fetched, fetch failed after {tries} tries" in out
+
+
+def test_fetch_with_retry_uses_the_patchable_sleep(monkeypatch):
+    monkeypatch.setattr(gr, "FETCH_DELAYS", (1, 2))
+    slept = []
+    result, problem = gr.fetch_with_retry(lambda _a: (1, "", "boom"), ["builds", "log", "x"], slept.append)
+    assert slept == [1, 2] and problem.startswith("exit 1")
