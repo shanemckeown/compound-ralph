@@ -11,6 +11,8 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -101,10 +103,11 @@ def test_both_lanes_success_exits_0_with_ids_and_urls_first(scratch):
     fake = FakeGcloud({"unit": ["QUEUED", "WORKING", "SUCCESS"], "pg": ["WORKING", "SUCCESS"]})
     code, out = run(scratch, fake)
     assert code == 0
-    first = out.splitlines()[:2]
-    assert first == ["LANE unit build build-unit https://console/build-unit",
-                     "LANE pg build build-pg https://console/build-pg"]
-    assert "===== LANE unit build build-unit status SUCCESS =====" in out and "pg log body" in out
+    first = sorted(out.splitlines()[:2])  # the lanes submit concurrently, so either may print first
+    assert first == ["LANE pg build build-pg https://console/build-pg",
+                     "LANE unit build build-unit https://console/build-unit"]
+    assert "===== LANE unit build build-unit status SUCCESS =====" in out
+    assert "pg log body" not in out  # a green lane prints its summary, not its log
     assert out.rstrip().splitlines()[-1] == "RESULT unit=SUCCESS pg=SUCCESS exit 0"
     submits = fake.verbs("submit")
     assert [c[3] for c in submits] == [f"--config={scratch / 'cloudbuild-gate.yaml'}"] * 2
@@ -207,7 +210,7 @@ def test_cli_uses_the_gcloud_named_by_env(scratch, tmp_path):
     proc = subprocess.run([sys.executable, str(SCRIPT), "--scratch", str(scratch), "--poll", "0"],
                           env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.splitlines()[0] == "LANE unit build b-unit u"
+    assert sorted(proc.stdout.splitlines()[:2]) == ["LANE pg build b-pg u", "LANE unit build b-unit u"]
     calls = (tmp_path / "calls.txt").read_text()
     assert "builds submit" in calls and "run deploy" not in calls and "update-traffic" not in calls
 
@@ -414,16 +417,221 @@ def test_sigterm_while_polling_cancels_both_lanes_and_exits_137(scratch):
     assert signal.getsignal(signal.SIGTERM) == before  # handler restored
 
 
-def test_sigint_during_the_second_submit_cancels_only_the_first_lane(scratch):
+def test_sigint_during_concurrent_submit_cancels_whatever_was_submitted(scratch):
+    # The signal lands while the pg upload is still in flight (unit has already returned). The
+    # build pg's submit returns AFTER the stop must be cancelled too, by its own thread.
     fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    unit_done = threading.Event()
 
     def interrupted(args):
         if args[1] == "submit" and "--substitutions=_LANE=pg" in args:
+            assert unit_done.wait(5)
             os.kill(os.getpid(), signal.SIGINT)
-        return fake(args)
+            time.sleep(0.3)  # the main thread's handler runs and snapshots before this submit returns
+        result = fake(args)
+        if args[1] == "submit" and "--substitutions=_LANE=unit" in args:
+            unit_done.set()
+        return result
     before = signal.getsignal(signal.SIGINT)
     clock, out = Clock(), io.StringIO()
     code = gr.main(["--scratch", str(scratch)], runner=interrupted, sleep=clock.sleep, clock=clock, out=out)
     assert code == 137 and "INTERRUPTED by SIGINT" in out.getvalue()
-    assert [c[2] for c in fake.verbs("cancel")] == ["build-unit"]
+    assert sorted(c[2] for c in fake.verbs("cancel")) == ["build-pg", "build-unit"]
+    assert len(fake.verbs("cancel")) == 2  # each exactly once
+    assert "LANE pg build build-pg submitted after the stop; cancelled" in out.getvalue()
+    assert not fake.verbs("describe")
     assert signal.getsignal(signal.SIGINT) == before
+
+
+def test_sigterm_before_any_submit_returns_cancels_both_late_builds(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    barrier = threading.Barrier(2, timeout=5)
+
+    def both_in_flight(args):
+        if args[1] == "submit":
+            if barrier.wait() == 0:
+                os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.3)
+        return fake(args)
+    out = io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=both_in_flight, sleep=lambda _s: None,
+                   clock=lambda: 0.0, out=out)
+    assert code == 137 and "cancelling 0 submitted lane build(s)" in out.getvalue()
+    assert sorted(c[2] for c in fake.verbs("cancel")) == ["build-pg", "build-unit"]
+
+
+# ---- LUCY-zp23t item 1: duplicate keys and merge keys (review round 2, P3-R2-1)
+
+def test_duplicate_top_level_steps_is_refused(tmp_path):
+    text = "steps:\n  - name: gcr.io/kaniko-project/executor:latest\nsteps:\n  - name: node:20\n"
+    refused(tmp_path, text, "duplicate key 'steps' at line 3 (first at line 1)")
+
+
+def test_duplicate_name_inside_one_step_is_refused(tmp_path):
+    text = "steps:\n  - name: google/cloud-sdk\n    name: node:20\n    entrypoint: bash\n"
+    refused(tmp_path, text, "duplicate key 'name' at line 3")
+
+
+def test_duplicate_key_inside_options_is_refused(tmp_path):
+    text = REAL_GATE_YAML.replace("options:\n", "options:\n  logging: NONE\n", 1)
+    refused(tmp_path, text, "duplicate key 'logging'")
+
+
+def test_duplicate_key_inside_substitutions_is_refused(tmp_path):
+    text = REAL_GATE_YAML.replace("substitutions:\n", "substitutions:\n  _LANE: 'pg'\n", 1)
+    refused(tmp_path, text, "duplicate key '_LANE'")
+
+
+def test_merge_key_is_refused_outright(tmp_path):
+    # `<<` then an override of `name` is the duplicate-key split by another name; refuse any merge.
+    text = ("substitutions: {_X: x}\nbase: &base {name: 'gcr.io/x/y'}\n"
+            "steps:\n  - <<: *base\n    name: node:20\n")
+    refused(tmp_path, text, "merge key '<<' at line 4 is not allowed")
+
+
+def test_merge_key_without_override_is_refused_too(tmp_path):
+    text = "steps:\n  - <<: {name: node:20}\n    entrypoint: bash\n"
+    refused(tmp_path, text, "merge key '<<'")
+
+
+def test_anchors_and_aliases_still_resolve(tmp_path):
+    path = tmp_path / "cloudbuild-gate.yaml"
+    path.write_text("substitutions: {_I: &img 'node:20'}\nsteps:\n  - name: *img\n  - name: *img\n")
+    assert gr.config_problems(path) == []
+
+
+# ---- LUCY-zp23t item 2: the options allow-list (review round 2, P4-R2-1)
+
+@pytest.mark.parametrize("line, key", [
+    ("  pool: {name: projects/aestheticc/locations/europe-west2/workerPools/p}\n", "pool"),
+    ("  workerPool: projects/aestheticc/locations/europe-west2/workerPools/p\n", "workerPool"),
+    ("  env: ['NODE_OPTIONS=--require=/x.js']\n", "env"),
+    ("  secretEnv: ['TOKEN']\n", "secretEnv"),
+    ("  volumes: [{name: v, path: /v}]\n", "volumes"),
+    ("  requestedVerifyOption: VERIFIED\n", "requestedVerifyOption"),
+])
+def test_options_key_outside_the_allow_list_is_refused(tmp_path, line, key):
+    refused(tmp_path, REAL_GATE_YAML.replace("options:\n", "options:\n" + line, 1),
+            f"options key {key!r} is not allowed (only diskSizeGb, logging, machineType)")
+
+
+def test_options_disk_size_is_allowed(tmp_path):
+    path = tmp_path / "cloudbuild-gate.yaml"
+    path.write_text(REAL_GATE_YAML.replace("options:\n", "options:\n  diskSizeGb: 200\n", 1))
+    assert gr.config_problems(path) == []
+
+
+def test_options_that_is_not_a_mapping_is_refused(tmp_path):
+    refused(tmp_path, "options: [pool]\nsteps:\n  - name: node:20\n", "options is not a mapping")
+
+
+# ---- LUCY-zp23t item 3: runner plumbing
+
+def test_both_submits_start_before_either_finishes(scratch):
+    # Sequential submits would deadlock on the barrier (BrokenBarrierError after 5 s).
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    barrier = threading.Barrier(2, timeout=5)
+
+    def concurrent(args):
+        if args[1] == "submit":
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                return 1, "", "submits ran one after the other"
+        return fake(args)
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=concurrent, sleep=clock.sleep, clock=clock, out=out)
+    assert code == 0, out.getvalue()
+    assert len(fake.verbs("submit")) == 2
+
+
+def test_lane_logs_are_fetched_in_parallel(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    barrier = threading.Barrier(2, timeout=5)
+
+    def parallel_logs(args):
+        if args[1] == "log":
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                return 1, "", "logs fetched one after the other"
+        return fake(args)
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=parallel_logs, sleep=clock.sleep, clock=clock, out=out)
+    assert code == 0 and "fetched one after the other" not in out.getvalue()
+    assert len(fake.verbs("log")) == 2
+
+
+UNIT_OK_LOG = """\
+Step #2 - "unit-tests": PASS tests/a.test.ts
+Step #2 - "unit-tests": noisy line one
+Step #2 - "unit-tests": Test Suites: 412 passed, 412 total
+Step #2 - "unit-tests": Tests:       5120 passed, 5120 total
+Step #2 - "unit-tests": Snapshots:   3 passed, 3 total
+Step #2 - "unit-tests": Time:        301.2 s
+"""
+
+
+def test_success_lane_prints_a_summary_and_a_failure_lane_its_full_log(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["FAILURE"]}, logs={"unit": UNIT_OK_LOG, "pg": PG_FAIL_LOG})
+    code, out = run(scratch, fake)
+    assert code == 1
+    assert "===== LANE unit build build-unit status SUCCESS =====\nlog: https://console/build-unit\n" in out
+    assert "Test Suites: 412 passed" in out and "Tests:       5120 passed" in out and "Time:        301.2 s" in out
+    assert "noisy line one" not in out and "Snapshots:" not in out and "PASS tests/a.test.ts" not in out
+    assert PG_FAIL_LOG.rstrip() in out  # the red lane's whole log
+    assert out.rstrip().splitlines()[-1].startswith("FAILED LANE pg: ")
+
+
+def test_infra_lane_prints_its_full_log(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["TIMEOUT"]}, logs={"pg": "step a\nstep b timed out\n"})
+    code, out = run(scratch, fake)
+    assert code == 137 and "step a\nstep b timed out" in out
+
+
+def test_failed_lane_lines_stay_last_when_both_lanes_fail(scratch):
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["FAILURE"]},
+                      logs={"unit": "FAIL tests/u.test.ts\n", "pg": PG_FAIL_LOG})
+    code, out = run(scratch, fake)
+    assert code == 1
+    assert out.rstrip().splitlines()[-2:] == [
+        "FAILED LANE unit: tests/u.test.ts",
+        "FAILED LANE pg: tests/pg-integration/comms-claim.test.ts tests/pg-integration/other.test.ts"]
+
+
+def test_build_lines_reach_a_redirected_evidence_file_before_the_run_ends(scratch, tmp_path):
+    # stdout goes to a file (block-buffered by default). The stub reads that file on its first
+    # describe: both LANE lines must already be there, not held back until exit.
+    evidence = tmp_path / "evidence.log"
+    fake_bin = tmp_path / "fake-gcloud"
+    fake_bin.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        '  submit) lane=$(echo "$@" | sed -n "s/.*_LANE=\\([a-z]*\\).*/\\1/p");'
+        ' echo "{\\"id\\": \\"b-$lane\\", \\"logUrl\\": \\"u\\"}" ;;\n'
+        '  describe) [ -f "$(dirname "$0")/seen.txt" ] || cp "$EVIDENCE" "$(dirname "$0")/seen.txt";'
+        ' echo \'{"status": "SUCCESS"}\' ;;\n'
+        '  log) echo "Tests: 1 passed" ;;\n'
+        "esac\n")
+    fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IEXEC)
+    env = {**os.environ, "CLOUDBUILD_GATE_GCLOUD": str(fake_bin), "EVIDENCE": str(evidence)}
+    env.pop("PYTHONUNBUFFERED", None)
+    with evidence.open("w") as sink:
+        proc = subprocess.run([sys.executable, str(SCRIPT), "--scratch", str(scratch), "--poll", "0"],
+                              env=env, stdout=sink, stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    seen = (tmp_path / "seen.txt").read_text().splitlines()
+    assert sorted(seen) == ["LANE pg build b-pg u", "LANE unit build b-unit u"]
+
+
+def test_main_flushes_every_line_it_says(scratch):
+    class Sink(io.StringIO):
+        flushes = 0
+
+        def flush(self):
+            Sink.flushes += 1
+            super().flush()
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+    clock, out = Clock(), Sink()
+    gr.main(["--scratch", str(scratch)], runner=fake, sleep=clock.sleep, clock=clock, out=out)
+    assert Sink.flushes >= len(out.getvalue().splitlines()) - 2  # summaries join lines in one say

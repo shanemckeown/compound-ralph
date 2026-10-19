@@ -24,9 +24,14 @@ code and stdout, exactly as for the local simulation. Needs PyYAML (tier_gates r
 2. Refuse (exit 2) unless the test-only gate service account exists (`gcloud iam
    service-accounts describe`); both lanes run as it, never as the default Cloud Build SA
    that can deploy (P2-1).
-3. Submit both lanes (_LANE=unit, _LANE=pg) from DIR with --async; print ids and log URLs first.
+   The YAML loads with a strict SafeLoader: a repeated key at any depth, or a `<<` merge key,
+   is refused (gcloud keeps a duplicate's first value, PyYAML its last). `options` keys are
+   allow-listed too: machineType, logging, diskSizeGb only.
+3. Submit both lanes (_LANE=unit, _LANE=pg) from DIR with --async, concurrently (one thread each);
+   print each id and log URL as soon as it is known. stdout is flushed line by line.
 4. Poll `gcloud builds describe` until both are terminal. Past the ceiling: cancel both, exit 137.
-5. Append each lane's full `gcloud builds log`, headed by lane and status.
+5. Fetch both lanes' `gcloud builds log` in parallel. A SUCCESS lane prints a summary only (status,
+   id, log URL, the jest "Test Suites:"/"Tests:"/"Time:" lines); any other lane its full log.
 6. Exit 0 only if both SUCCESS; any FAILURE 1 (with a "FAILED LANE <lane>: <suites>" last line);
    otherwise TIMEOUT/INTERNAL_ERROR/CANCELLED/EXPIRED 137, which the SKILL treats as infra
    (rerun once, then HOLD). A gcloud that cannot run, or a submit that fails or prints no JSON,
@@ -43,7 +48,9 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 LANES = ("unit", "pg")
@@ -51,6 +58,10 @@ INFRA = {"TIMEOUT", "INTERNAL_ERROR", "CANCELLED", "EXPIRED"}
 TERMINAL = {"SUCCESS", "FAILURE"} | INFRA
 ALLOWED_TOP_LEVEL = {"steps", "timeout", "options", "substitutions"}
 ALLOWED_ENTRYPOINTS = {"bash", "sh", "npm", "npx", "node"}
+# No pool/workerPool (a private pool), env/secretEnv/volumes (inputs the allow-list cannot see).
+ALLOWED_OPTIONS = {"machineType", "logging", "diskSizeGb"}
+JEST_SUMMARY = re.compile(r"\b(?:Test Suites|Tests|Time):")
+SAY_LOCK = threading.Lock()
 STEP_IMAGE = re.compile(r"node:[A-Za-z0-9][A-Za-z0-9._-]*")
 # Anywhere in the raw file, comments included, any case. A gate config has no reason to name any.
 FORBIDDEN_TEXT = ("gcloud", "run.googleapis", "docker", "kubectl", "metadata", "169.254.169.254")
@@ -101,13 +112,21 @@ def config_problems(config_path):
     except ImportError:
         return problems + ["PyYAML is not installed, so the config cannot be checked"]
     try:
-        config = yaml.safe_load(text)
+        config = yaml.load(text, Loader=strict_loader(yaml))  # noqa: S506 (a SafeLoader subclass)
+    except StrictYamlError as exc:
+        return problems + [str(exc)]
     except yaml.YAMLError as exc:
         return problems + [f"config does not parse as YAML: {str(exc).splitlines()[0]}"]
     if not isinstance(config, dict):
         return problems + ["config is not a mapping"]
     problems += [f"top-level key {key!r} is not allowed (only {', '.join(sorted(ALLOWED_TOP_LEVEL))})"
                  for key in config if key not in ALLOWED_TOP_LEVEL]
+    options = config.get("options", {})
+    if not isinstance(options, dict):
+        problems.append("options is not a mapping")
+    else:
+        problems += [f"options key {key!r} is not allowed (only {', '.join(sorted(ALLOWED_OPTIONS))})"
+                     for key in options if key not in ALLOWED_OPTIONS]
     problems += [f"a serviceAccount key at {where} (the runner picks the build's account)"
                  for where in service_account_keys(config)]
     steps = config.get("steps")
@@ -124,6 +143,48 @@ def config_problems(config_path):
             problems.append(f"step {i} entrypoint {step['entrypoint']!r} is not one of "
                             f"{', '.join(sorted(ALLOWED_ENTRYPOINTS))}")
     return problems
+
+
+class StrictYamlError(Exception):
+    """A config shape the two parsers could read differently (duplicate key, merge key)."""
+
+
+def strict_loader(yaml):
+    """A SafeLoader that refuses a repeated key at any depth, and refuses `<<` merge keys.
+
+    PyYAML keeps the LAST value of a repeated key; gcloud's ruamel loader keeps the FIRST, so the
+    allow-list could approve one image while gcloud runs another (review round 2, P3-R2-1). A merge
+    key is refused outright: its override semantics are the same split by another name, and a gate
+    config has no need for one. Anchors and aliases still resolve.
+    """
+    merge_tag = "tag:yaml.org,2002:merge"
+
+    class StrictSafeLoader(yaml.SafeLoader):
+        def flatten_mapping(self, node):
+            for key_node, _ in node.value:
+                if key_node.tag == merge_tag:
+                    raise StrictYamlError(f"merge key '<<' at line {key_node.start_mark.line + 1} "
+                                          "is not allowed (gcloud and PyYAML can resolve it differently)")
+            super().flatten_mapping(node)
+
+        def construct_mapping(self, node, deep=False):
+            if isinstance(node, yaml.MappingNode):
+                self.flatten_mapping(node)
+                seen = {}
+                for key_node, _ in node.value:
+                    key = self.construct_object(key_node, deep=deep)
+                    try:
+                        first = seen.get(key)
+                    except TypeError:
+                        continue  # unhashable; the base constructor raises its own error
+                    if first is not None:
+                        raise StrictYamlError(
+                            f"duplicate key {key!r} at line {key_node.start_mark.line + 1} (first at line "
+                            f"{first}): gcloud keeps the first value and PyYAML the last, so refused")
+                    seen[key] = key_node.start_mark.line + 1
+            return super().construct_mapping(node, deep=deep)
+
+    return StrictSafeLoader
 
 
 def service_account_keys(node, where="config"):
@@ -227,9 +288,33 @@ def _interrupt(signum, _frame):
     raise Interrupted(signal.Signals(signum).name)
 
 
+class LaneState:
+    """Submitted builds, shared by the submit threads and the main thread's signal path.
+
+    `stopped` and `builds` change only under `lock`, so every submitted build is cancelled exactly
+    once: either it is in the main thread's snapshot when the stop is set, or its submit thread
+    sees `stopped` when it records the id and cancels the build itself.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.builds, self.urls, self.errors = {}, {}, {}
+        self.stopped = False
+        self.threads = []
+
+    def stop(self):
+        with self.lock:
+            self.stopped = True
+            return dict(self.builds)
+
+
 def main(argv=None, runner=run_gcloud, sleep=time.sleep, clock=time.monotonic, out=None):
     out = out or sys.stdout
-    say = lambda *parts: print(*parts, file=out, flush=True)  # noqa: E731
+
+    def say(*parts):
+        with SAY_LOCK:  # lines from the submit threads never interleave
+            print(*parts, file=out, flush=True)
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scratch", required=True)
     ap.add_argument("--config", default="cloudbuild-gate.yaml")
@@ -250,21 +335,49 @@ def main(argv=None, runner=run_gcloud, sleep=time.sleep, clock=time.monotonic, o
         return EXIT_REFUSED
 
     call = guarded(runner)
-    builds = {}
-    previous = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
+    state = LaneState()
+    sigs = (signal.SIGTERM, signal.SIGINT)
+    previous = {sig: signal.signal(sig, _interrupt) for sig in sigs}
     try:
-        return _run(args, scratch, config, call, say, sleep, clock, builds)
+        return _run(args, scratch, config, call, say, sleep, clock, state)
     except Interrupted as exc:
-        say(f"INTERRUPTED by {exc}; cancelling {len(builds)} submitted lane build(s)")
-        for build_id in builds.values():
+        for sig in sigs:  # a second signal must not cut the cancels short
+            signal.signal(sig, signal.SIG_IGN)
+        submitted = state.stop()
+        say(f"INTERRUPTED by {exc}; cancelling {len(submitted)} submitted lane build(s)")
+        for build_id in submitted.values():
             cancel(call, build_id, args.project, args.region)
+        for thread in state.threads:  # an in-flight submit cancels its own build when it returns
+            thread.join()
         return EXIT_INFRA
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
 
-def _run(args, scratch, config, call, say, sleep, clock, builds):
+def _submit_lane(call, scratch, config, lane, args, service_account, state, say):
+    try:
+        build_id, log_url = submit(call, scratch, config, lane, args.project, args.region, service_account)
+    except Exception as exc:  # noqa: BLE001 (any submit error is infra, never a red)
+        with state.lock:
+            state.errors[lane] = exc
+        return
+    with state.lock:
+        state.builds[lane], state.urls[lane] = build_id, log_url
+        late = state.stopped
+    if late:
+        cancel(call, build_id, args.project, args.region)
+        say(f"LANE {lane} build {build_id} submitted after the stop; cancelled")
+    else:
+        say(f"LANE {lane} build {build_id} {log_url}")
+
+
+def lane_summary(log_text):
+    """The jest summary lines of a green lane's log."""
+    return [line for line in log_text.splitlines() if JEST_SUMMARY.search(line)]
+
+
+def _run(args, scratch, config, call, say, sleep, clock, state):
     refusal = sa_check(call, args.service_account, args.project)
     if refusal:
         code, message = refusal
@@ -272,17 +385,23 @@ def _run(args, scratch, config, call, say, sleep, clock, builds):
         return code
     service_account = sa_resource(args.service_account, args.project)
 
+    # Both source uploads at once (they took ~85 s each, one after the other).
     for lane in LANES:
-        try:
-            build_id, log_url = submit(call, scratch, config, lane, args.project, args.region,
-                                       service_account)
-        except RuntimeError as exc:
-            say(f"SUBMIT FAILED: {exc}")
-            for started in builds.values():
-                cancel(call, started, args.project, args.region)
-            return EXIT_INFRA
-        builds[lane] = build_id
-        say(f"LANE {lane} build {build_id} {log_url}")
+        thread = threading.Thread(target=_submit_lane, name=f"submit-{lane}",
+                                  args=(call, scratch, config, lane, args, service_account, state, say))
+        state.threads.append(thread)
+        thread.start()
+    for thread in state.threads:
+        while thread.is_alive():  # a short timeout keeps the main thread responsive to signals
+            thread.join(0.05)
+    if state.errors:
+        for lane in LANES:
+            if lane in state.errors:
+                say(f"SUBMIT FAILED: {state.errors[lane]}")
+        for started in state.stop().values():
+            cancel(call, started, args.project, args.region)
+        return EXIT_INFRA
+    builds = state.builds
 
     started, final = clock(), {}
     while len(final) < len(LANES):
@@ -300,14 +419,23 @@ def _run(args, scratch, config, call, say, sleep, clock, builds):
             return EXIT_INFRA
         sleep(args.poll)
 
+    def fetch(lane):
+        return call(["builds", "log", builds[lane], f"--project={args.project}", f"--region={args.region}"])
+
+    with ThreadPoolExecutor(max_workers=len(LANES)) as pool:
+        fetched = dict(zip(LANES, pool.map(fetch, LANES)))
     logs = {}
     for lane in LANES:
         status = final[lane]["status"]
-        _, log_text, log_err = call(["builds", "log", builds[lane],
-                                     f"--project={args.project}", f"--region={args.region}"])
+        _, log_text, log_err = fetched[lane]
         logs[lane] = log_text or ""
         say(f"===== LANE {lane} build {builds[lane]} status {status} =====")
-        say(logs[lane].rstrip() or f"(no log: {log_err.strip()[-300:]})")
+        if status == "SUCCESS":  # a green lane's full log is noise; the URL keeps it one click away
+            say(f"log: {state.urls.get(lane) or final[lane].get('logUrl', '')}")
+            summary = lane_summary(logs[lane])
+            say("\n".join(summary) if summary else "(no jest summary lines in the log)")
+        else:
+            say(logs[lane].rstrip() or f"(no log: {(log_err or '').strip()[-300:]})")
 
     statuses = [final[lane]["status"] for lane in LANES]
     code = exit_code(statuses)
@@ -323,4 +451,6 @@ def _run(args, scratch, config, call, say, sleep, clock, builds):
 
 
 if __name__ == "__main__":
+    # Line-buffered even when redirected, so the build id/URL lines reach the evidence file at once.
+    sys.stdout.reconfigure(line_buffering=True)
     sys.exit(main())
