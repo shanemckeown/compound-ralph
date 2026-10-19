@@ -248,7 +248,7 @@ def sa_check(runner, service_account, project):
     """None if the gate SA exists; otherwise (exit code, message)."""
     code, _, err = runner(["iam", "service-accounts", "describe", sa_email(service_account),
                            f"--project={project}", "--format=json"])
-    if code == EXEC_ERROR:
+    if code in (EXEC_ERROR, TIMED_OUT):  # "could not check" is infra, never "SA missing"
         return EXIT_INFRA, f"GCLOUD UNAVAILABLE: {err.strip()[-500:]}"
     if code != 0:
         return EXIT_REFUSED, (f"REFUSED: gate service account {sa_email(service_account)} not found in "

@@ -738,3 +738,19 @@ def test_signal_during_the_submit_error_cleanup_cancels_the_build_once(scratch):
 
 def test_docstring_names_the_strict_loader_not_safe_load():
     assert "yaml.safe_load" not in gr.__doc__ and "strict SafeLoader" in gr.__doc__
+
+
+def test_a_timed_out_service_account_check_is_infra_not_a_refusal(scratch):
+    # Review round 2 P3: a describe that timed out could not check the SA; that is infra (137).
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
+
+    def slow_iam(args):
+        if args[0] == "iam":
+            fake.calls.append(list(args))
+            return 124, "", "gcloud iam service-accounts timed out after 600s"
+        return fake(args)
+    clock, out = Clock(), io.StringIO()
+    code = gr.main(["--scratch", str(scratch)], runner=slow_iam, sleep=clock.sleep, clock=clock, out=out)
+    assert code == 137, out.getvalue()
+    assert "GCLOUD UNAVAILABLE" in out.getvalue() and "not found" not in out.getvalue()
+    assert not fake.verbs("submit")
