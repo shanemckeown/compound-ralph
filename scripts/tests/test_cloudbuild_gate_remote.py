@@ -191,6 +191,14 @@ def test_second_submit_failure_cancels_the_first_and_exits_137(scratch):
      "deploy"),
     ("  - name: x\n    args: ['bash', '-c', 'gcloud run services update-traffic x --to-latest']\n",
      "update-traffic"),
+    # Astra round 1: the standard builder forms split the command into args.
+    ("  - name: node:20\n    entrypoint: gcloud\n    args: ['run', 'services', 'replace', 'service.yaml']\n",
+     "entrypoint is the gcloud builder"),
+    ("  - name: 'gcr.io/cloud-builders/docker'\n    args: ['push', 'europe-west2-docker.pkg.dev/x']\n",
+     "name is the docker builder"),
+    ("  - name: node:20\n    args:\n      - push\n      - x\n", "'push' arg"),
+    ("  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim\n    args: ['bash', '-c', 'true']\n",
+     "cloud-sdk builder"),
 ])
 def test_deploying_config_is_refused_before_any_gcloud_call(tmp_path, bad, reason):
     (tmp_path / "cloudbuild-gate.yaml").write_text(GATE_YAML + bad)

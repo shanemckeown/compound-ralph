@@ -36,6 +36,11 @@ TERMINAL = {"SUCCESS", "FAILURE"} | INFRA
 FORBIDDEN = ("docker push", "gcloud run", "update-traffic", "--to-latest", "deploy")
 TOP_LEVEL_FORBIDDEN = re.compile(r"^(images|artifacts)\s*:", re.M)
 TOP_LEVEL_KEY = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+# Builder steps split a command into args (`entrypoint: gcloud`, `args: ['run', ...]`), so the
+# phrase scan alone misses them. A gate runs tests in plain images: no deploy-capable builder.
+BUILDER = re.compile(r"^[\s-]*(name|entrypoint)\s*:\s*['\"]?([^'\"\s#]+)", re.M)
+DEPLOY_BUILDERS = {"gcloud", "docker", "cloud-sdk", "kubectl", "gke-deploy", "gsutil"}
+WORD = re.compile(r"[a-z0-9_.@/-]+")
 JEST_FAIL = re.compile(r"\bFAIL\s+(.*)$")
 TEST_PATH = re.compile(r"\S+\.(?:test|spec)\.[cm]?[jt]sx?\b")
 EXIT_REFUSED, EXIT_FAILED, EXIT_INFRA = 2, 1, 137
@@ -65,6 +70,12 @@ def config_problems(config_path):
     else:
         lowered = steps.lower()
         problems += [f"a step mentions {word!r}" for word in FORBIDDEN if word in lowered]
+        if "push" in WORD.findall(lowered):
+            problems.append("a step passes a 'push' arg")
+        for key, value in BUILDER.findall(steps):
+            builder = value.rsplit("/", 1)[-1].split(":", 1)[0].split("@", 1)[0].lower()
+            if builder in DEPLOY_BUILDERS:
+                problems.append(f"a step's {key} is the {builder} builder")
     return problems
 
 
