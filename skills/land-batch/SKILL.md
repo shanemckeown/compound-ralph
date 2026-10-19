@@ -721,6 +721,8 @@ jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
 GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
 ~~~
 
+With `LAND_GATE_REMOTE=1` in the lander's shell (LUCY-vxk2v), `cloudbuild-full` runs `~/.claude/scripts/cloudbuild-gate-remote.py` instead: two Cloud Build lanes of `cloudbuild-gate.yaml`, the same evidence files, exit 137 = infra, and no Colima or pg-lane lock. `LAND_GATE_REMOTE=0` is the Cloud Build outage fallback (note "fallback used" in evidence); the tier JSON records `cloudbuild_remote`.
+
 For a full tier run `colima start` first (step #2 needs Docker). Then run each gate in list order, detached,
 waiting for its exit file before starting the next (never two at once). Each gate's
 command already takes the pg-lane lock, so a full lane anywhere else on the laptop
