@@ -49,7 +49,9 @@ CLOUDBUILD = {"name": "cloudbuild-full",
               "cmd": f"{PG_LOCK} env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
 # LUCY-vxk2v: the same gate on Cloud Build (two lanes of cloudbuild-gate.yaml). Nothing runs on
 # the laptop, so no pg-lane lock. The SKILL loop runs the cmd in the scratch, hence `--scratch .`.
-CLOUDBUILD_REMOTE_CMD = 'python3 "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
+# `uv run --script` reads the script's inline metadata (PyYAML for its allow-list; system python3
+# has none). Without PyYAML the script refuses with exit 2; it never falls back to a text scan.
+CLOUDBUILD_REMOTE_CMD = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
 # LAND_GATE_REMOTE=1 / =0 picks remote / local; unset uses this. The Manager flips it to True
 # after the live acceptance run; =0 stays the Cloud Build outage fallback.
 REMOTE_DEFAULT = False
@@ -83,8 +85,10 @@ def gates_for(tier, paths=(), env=None):
 
 def plan(paths, repo=None, env=None):
     tier, reasons = risk_tier.classify(paths, repo)
-    return {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths, env),
-            "cloudbuild_remote": gate_remote(env)}
+    result = {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths, env)}
+    if gate_remote(env):  # review P4-1: the local plan stays byte-identical to the pre-vxk2v one
+        result["cloudbuild_remote"] = True
+    return result
 
 
 def push_problems(tier_plan, head, evidence_dir):

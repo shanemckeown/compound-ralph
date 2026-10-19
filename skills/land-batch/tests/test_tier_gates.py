@@ -185,7 +185,7 @@ def test_check_cli_exit_codes(tmp_path):
 
 # LUCY-vxk2v: LAND_GATE_REMOTE swaps only the cloudbuild-full cmd; name and push check unchanged.
 
-REMOTE = 'python3 "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
+REMOTE = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
 
 
 def test_land_gate_remote_switches_only_the_cloudbuild_cmd():
@@ -198,7 +198,7 @@ def test_land_gate_remote_switches_only_the_cloudbuild_cmd():
     assert remote["gates"][1]["cmd"] == REMOTE
     # Remote runs nothing on the laptop: no pg-lane lock, no local simulation.
     assert "pg-lane-lock" not in remote["gates"][1]["cmd"] and "simulate" not in remote["gates"][1]["cmd"]
-    assert (local["cloudbuild_remote"], remote["cloudbuild_remote"]) == (False, True)
+    assert "cloudbuild_remote" not in local and remote["cloudbuild_remote"] is True
 
 
 def test_land_gate_remote_unset_uses_the_one_default_constant(monkeypatch):
@@ -219,3 +219,15 @@ def test_remote_plan_passes_and_fails_the_push_check_like_the_local_one(tmp_path
     assert tg.push_problems(tier_plan, HEAD, tmp_path) == []
     (tmp_path / f"cloudbuild-full-{HEAD}.exit").write_text("137\n")
     assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["cloudbuild-full:137"]
+
+
+def test_unset_land_gate_remote_plan_is_exactly_the_pre_vxk2v_local_plan():
+    # Review P4-1: no stray key, same gates, same cmd strings as main before LUCY-vxk2v.
+    pre_vxk2v_cloudbuild = {"name": "cloudbuild-full",
+                            "cmd": 'python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- '
+                                   "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
+    for env in ({}, {"LAND_GATE_REMOTE": ""}, {"LAND_GATE_REMOTE": "0"}):
+        full, light = tg.plan(FULL, env=env), tg.plan(LIGHT, env=env)
+        assert set(full) == set(light) == {"tier", "reasons", "sequential", "gates"}
+        assert full["gates"] == [tg.TSC, pre_vxk2v_cloudbuild]
+        assert light["gates"] == [tg.TSC]
