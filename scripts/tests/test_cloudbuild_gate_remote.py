@@ -57,7 +57,8 @@ class FakeGcloud:
             return 1, "", f"ERROR: NOT_FOUND: Unknown service account {args[3]}"
         if args[0] == "logging":
             build_id = re.search(r'build_id="([^"]+)"', args[2]).group(1)
-            return 0, self.filtered.get(self.lane_of[build_id], ""), ""
+            result = self.filtered.get(self.lane_of[build_id], "")
+            return result if isinstance(result, tuple) else (0, result, "")
         verb = args[1]
         if verb == "submit":
             lane = next(a for a in args if a.startswith("--substitutions=")).split("=")[-1]
@@ -72,13 +73,19 @@ class FakeGcloud:
         if verb == "describe":
             queue = self.statuses[lane]
             status = queue.pop(0) if len(queue) > 1 else queue[0]
-            return 0, json.dumps({"id": args[2], "status": status, "steps": self.steps.get(lane, [])}), ""
+            return 0, json.dumps({"id": args[2], "status": status, "steps": self.steps.get(lane, []),
+                                  "createTime": "2026-10-20T02:17:10.5Z"}), ""
         if verb == "log":
             return 0, self.logs.get(lane, f"{lane} log body\n"), ""
         return 0, "", ""  # cancel
 
     def verbs(self, verb):
         return [c for c in self.calls if c[1] == verb]
+
+    def reads(self, lane=None):
+        """The `gcloud logging read` calls (for one lane's build, if given)."""
+        return [c for c in self.calls if c[:2] == ["logging", "read"]
+                and (lane is None or f'build_id="build-{lane}"' in c[2])]
 
 
 class Clock:
@@ -557,7 +564,7 @@ def test_lane_log_fetches_never_overlap(scratch):
     in_flight = [0]
 
     def watched(args):
-        if args[1] == "log":
+        if args[1] in ("log", "read"):
             with lock:
                 in_flight[0] += 1
                 if in_flight[0] > 1:
@@ -569,7 +576,7 @@ def test_lane_log_fetches_never_overlap(scratch):
     clock, out = Clock(), io.StringIO()
     code = gr.main(["--scratch", str(scratch)], runner=watched, sleep=clock.sleep, clock=clock, out=out)
     assert code == 0 and overlaps == []
-    assert len(fake.verbs("log")) == 2
+    assert len(fake.reads()) == 2 and not fake.verbs("log")  # LUCY-csdds: green lanes never fetch the log
 
 
 UNIT_OK_LOG = """\
@@ -583,7 +590,8 @@ Step #2 - "unit-tests": Time:        301.2 s
 
 
 def test_success_lane_prints_a_summary_and_a_failure_lane_its_full_log(scratch):
-    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["FAILURE"]}, logs={"unit": UNIT_OK_LOG, "pg": PG_FAIL_LOG})
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["FAILURE"]}, logs={"pg": PG_FAIL_LOG},
+                      filtered={"unit": UNIT_OK_LOG})
     code, out = run(scratch, fake)
     assert code == 1
     assert "===== LANE unit build build-unit status SUCCESS =====\nlog: https://console/build-unit\n" in out
@@ -831,7 +839,7 @@ def test_a_log_missing_the_jest_summary_is_retried_then_flagged_incomplete(scrat
     assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: unit-tests"
 
 
-def test_the_filtered_read_adds_a_suite_the_truncated_log_missed(scratch):
+def test_the_filtered_read_names_the_suites_without_a_full_fetch(scratch):
     truncated = UNIT_TRUNCATED + 'Step #2 - "unit-tests": FAIL tests/early.test.ts\n'
     filtered = ('Step #2 - "unit-tests": FAIL tests/early.test.ts\n'
                 'Step #2 - "unit-tests": FAIL tests/api/ai-entitlement-webhooks.test.ts\n')
@@ -841,16 +849,11 @@ def test_the_filtered_read_adds_a_suite_the_truncated_log_missed(scratch):
     assert code == 1
     assert out.rstrip().splitlines()[-1] == (
         "FAILED LANE unit: tests/early.test.ts tests/api/ai-entitlement-webhooks.test.ts")
-    reads = [c for c in fake.calls if c[:2] == ["logging", "read"]]
+    reads = fake.reads("unit")
     assert len(reads) == 1
     assert ('resource.type="build"' in reads[0][2] and 'resource.labels.build_id="build-unit"' in reads[0][2]
-            and 'textPayload:"FAIL "' in reads[0][2])
-
-
-def test_no_filtered_read_for_a_green_lane(scratch):
-    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]})
-    run(scratch, fake)
-    assert not [c for c in fake.calls if c[0] == "logging"]
+            and f'textPayload=~"{gr.FAILURE_LINES}"' in reads[0][2])
+    assert not fake.verbs("log")  # LUCY-csdds: the filtered read named the suites, so no full fetch
 
 
 def test_backoff_gives_up_after_n_tries_without_hanging(scratch):
@@ -874,3 +877,83 @@ def test_fetch_with_retry_uses_the_patchable_sleep(monkeypatch):
     slept = []
     result, problem = gr.fetch_with_retry(lambda _a: (1, "", "boom"), ["builds", "log", "x"], slept.append)
     assert slept == [1, 2] and problem.startswith("exit 1")
+
+
+# LUCY-csdds: the full log is fetched only when the filtered Cloud Logging read cannot name the red
+# suites. Two runs on 20 Oct spent ~16 min re-downloading 5 MB logs under 429s.
+def test_a_success_lane_makes_no_builds_log_call_and_prints_the_jest_summary(scratch):
+    pg_ok = UNIT_OK_LOG.replace('#2 - "unit-tests"', '#3 - "pg-tests"').replace("412", "57")
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]}, filtered={"unit": UNIT_OK_LOG, "pg": pg_ok})
+    code, out = run(scratch, fake)
+    assert code == 0 and not fake.verbs("log")
+    assert ("===== LANE unit build build-unit status SUCCESS =====\nlog: https://console/build-unit\n"
+            'Step #2 - "unit-tests": Test Suites: 412 passed, 412 total\n') in out
+    assert "Tests:       5120 passed" in out and "Time:        301.2 s" in out
+    assert 'Step #3 - "pg-tests": Test Suites: 57 passed, 57 total' in out
+    assert "noisy line one" not in out and "Snapshots:" not in out
+    reads = fake.reads()
+    assert len(reads) == 2  # ONE read per lane
+    for lane, read in zip(gr.LANES, reads):
+        assert f'resource.labels.build_id="build-{lane}"' in read[2]
+        assert f'textPayload=~"{gr.SUMMARY_LINES}"' in read[2]
+        assert 'timestamp>="2026-10-20T02:17:10.5Z"' in read[2]
+        assert "--order=asc" in read
+    assert out.rstrip().splitlines()[-1] == "RESULT unit=SUCCESS pg=SUCCESS exit 0"
+
+
+def test_a_success_lane_whose_summary_read_fails_says_unavailable_and_keeps_exit_0(scratch):
+    fake = FakeGcloud({"unit": ["SUCCESS"], "pg": ["SUCCESS"]},
+                      filtered={"unit": (1, "", QUOTA_ERR), "pg": UNIT_OK_LOG})
+    code, out, clock = run_with(scratch, fake)
+    assert code == 0 and not fake.verbs("log")
+    tries = len(gr.FETCH_DELAYS) + 1
+    assert len(fake.reads("unit")) == tries and clock.now == sum(gr.FETCH_DELAYS)
+    assert "===== LANE unit build build-unit status SUCCESS =====\nlog: https://console/build-unit\nsummary unavailable (exit 1" in out
+    assert "Test Suites: 412 passed" in out  # the pg lane's summary still prints
+
+
+def test_a_failure_lane_names_the_suite_from_the_filtered_read_without_a_full_fetch(scratch):
+    filtered = ('Step #2 - "unit-tests":   ● Console\n'
+                'Step #2 - "unit-tests": FAIL tests/api/ai-entitlement-webhooks.test.ts (12 s)\n'
+                'Step #2 - "unit-tests":   ● webhook › grants the entitlement\n'
+                'Step #2 - "unit-tests":     Expected: 200\n'
+                'Step #2 - "unit-tests":     Received: 500\n'
+                'Step #2 - "unit-tests": Test Suites: 1 failed, 411 passed, 412 total\n'
+                'Step #2 - "unit-tests": Tests:       1 failed, 5119 passed, 5120 total\n'
+                'ERROR: build step 2 "node:20" failed: step exited with non-zero status: 1\n')
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS},
+                      logs={"unit": UNIT_TRUNCATED}, filtered={"unit": filtered, "pg": UNIT_OK_LOG})
+    code, out = run(scratch, fake)
+    assert code == 1 and not fake.verbs("log")
+    assert len(fake.reads("unit")) == 1
+    assert "Expected: 200" in out and "Received: 500" in out and "ERROR: build step 2" in out
+    assert "● Console" not in out  # jest's console-block headers are noise, not evidence
+    assert "● webhook › grants the entitlement" in out
+    assert "LOG INCOMPLETE" not in out
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: tests/api/ai-entitlement-webhooks.test.ts"
+
+
+def test_a_failure_lane_whose_filtered_read_has_no_fail_line_falls_back_to_the_full_fetch(scratch):
+    filtered = 'ERROR: build step 1 "node:20" failed: step exited with non-zero status: 2\n'
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, logs={"unit": "tsc: error TS2322\n"},
+                      steps={"unit": [{"id": "npm-ci", "status": "SUCCESS"},
+                                      {"id": "lint-typecheck", "status": "FAILURE"}]},
+                      filtered={"unit": filtered})
+    code, out = run(scratch, fake)
+    assert code == 1
+    assert len(fake.reads("unit")) == 1
+    assert [c[2] for c in fake.verbs("log")] == ["build-unit"]  # the full fetch, unit lane only
+    assert "tsc: error TS2322" in out
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: lint-typecheck"
+
+
+def test_a_failed_filtered_read_falls_back_to_the_full_fetch_and_keeps_log_incomplete(scratch):
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS},
+                      logs={"unit": UNIT_TRUNCATED}, filtered={"unit": (1, "", QUOTA_ERR)})
+    code, out = run(scratch, fake)
+    assert code == 1
+    tries = len(gr.FETCH_DELAYS) + 1
+    assert len(fake.reads("unit")) == tries
+    assert len([c for c in fake.verbs("log") if c[2] == "build-unit"]) == tries
+    assert "LOG INCOMPLETE for unit: 2 lines fetched, no jest summary for unit-tests" in out
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: unit-tests"

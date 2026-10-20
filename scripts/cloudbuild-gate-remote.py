@@ -30,15 +30,22 @@ code and stdout, exactly as for the local simulation. Needs PyYAML (tier_gates r
 3. Submit both lanes (_LANE=unit, _LANE=pg) from DIR with --async, concurrently (one thread each);
    print each id and log URL as soon as it is known. stdout is flushed line by line.
 4. Poll `gcloud builds describe` until both are terminal. Past the ceiling: cancel both, exit 137.
-5. Fetch the lanes' `gcloud builds log` one after the other (LUCY-tdbtv: parallel reads hit the
-   Cloud Logging read quota, HTTP 429, and gcloud exited with a partial log). A fetch that fails
-   (non-zero exit, 429 or other error text) is retried with exponential backoff (FETCH_DELAYS).
-   For a FAILURE lane whose failed step is a jest step, a log without that step's "Test Suites:"
-   line is incomplete and is retried the same way; still incomplete, it prints "LOG INCOMPLETE
-   for <lane>: ..." (the exit code is unchanged: the build status is authoritative). A FAILURE
-   lane also gets one server-side `gcloud logging read` of its "FAIL " lines, a second source of
-   suite names. A SUCCESS lane prints a summary only (status, id, log URL, the jest
-   "Test Suites:"/"Tests:"/"Time:" lines); any other lane its full log.
+5. Read the lanes' evidence one after the other (LUCY-tdbtv: parallel reads hit the Cloud Logging
+   read quota, HTTP 429). LUCY-csdds: the full log (`gcloud builds log`, ~5 MB for the unit lane)
+   is fetched only when nothing smaller will do, because re-downloading it under 429s cost ~16 min
+   of wall time. Every read goes through fetch_with_retry: a failed read (non-zero exit, 429 or
+   other error text) is retried with exponential backoff (FETCH_DELAYS).
+   - SUCCESS lane: never `gcloud builds log`. One server-side `gcloud logging read` of that build's
+     "Test Suites:"/"Tests:"/"Time:" lines; it prints status, id, log URL and those lines, or
+     "summary unavailable (...)" when the read fails (the exit code is unchanged).
+   - FAILURE lane: first one filtered `gcloud logging read` of the lines that matter ("FAIL ",
+     "  ● ", "Test Suites:", "Tests:", "Expected", "Received", step ERROR lines). When it names a
+     failed suite (a "FAIL <path>" line), those lines are the evidence and the full log is never
+     fetched. Otherwise (a non-jest step failed, or the read failed) the full log is fetched as
+     before: a log without a failed jest step's "Test Suites:" line is incomplete and retried;
+     still incomplete, it prints "LOG INCOMPLETE for <lane>: ..." (the exit code is unchanged).
+   - Infra lane: its full log, as before.
+   Filtered reads are bounded below by the build's createTime (1 s instead of ~30 s per read).
 6. Exit 0 only if both SUCCESS; any FAILURE 1 (with a "FAILED LANE <lane>: <suites>" last line);
    otherwise TIMEOUT/INTERNAL_ERROR/CANCELLED/EXPIRED 137, which the SKILL treats as infra
    (rerun once, then HOLD). A gcloud that cannot run, or a submit that fails or prints no JSON,
@@ -489,13 +496,28 @@ def fetch_with_retry(call, args, sleep, complete=None):
     return best, problem
 
 
-def filtered_fail_lines(call, args, build_id, sleep):
-    """The build's "FAIL " lines, read server-side from Cloud Logging (a second source of suites)."""
-    log_filter = (f'resource.type="build" AND resource.labels.build_id="{build_id}" '
-                  f'AND textPayload:"FAIL "')
-    result, _ = fetch_with_retry(call, ["logging", "read", log_filter, f"--project={args.project}",
-                                        "--format=value(textPayload)", "--limit=2000"], sleep)
-    return (result[1] or "") if fetch_failed(result) is None else ""
+# Cloud Logging regex matches (=~) are case-sensitive; the ":" operator is not, and matched every
+# console.error line of a real failed build.
+SUMMARY_LINES = r"Test Suites:|Tests:|Time:"
+FAILURE_LINES = r"FAIL |  ● |Test Suites:|Tests:|Expected|Received|^(Step #[0-9]+[^:]*: )?ERROR"
+JEST_CONSOLE = re.compile(r"(?:^|: )\s*● Console\s*$")
+
+
+def filtered_read(call, args, build_id, build, sleep, pattern):
+    """The build's lines matching `pattern`, read server-side from Cloud Logging, oldest first.
+
+    Returns (text, problem): problem is None when the read completed, else why it did not (after
+    fetch_with_retry's backoff). The build's createTime bounds the scan (it is ~30x faster).
+    """
+    log_filter = f'resource.type="build" AND resource.labels.build_id="{build_id}"'
+    created = (build or {}).get("createTime")
+    if created:
+        log_filter += f' AND timestamp>="{created}"'
+    log_filter += f' AND textPayload=~"{pattern}"'
+    result, problem = fetch_with_retry(call, ["logging", "read", log_filter, f"--project={args.project}",
+                                              "--order=asc", "--format=value(textPayload)", "--limit=2000"],
+                                       sleep)
+    return ("" if problem else (result[1] or "")), problem
 
 
 def lane_summary(log_text):
@@ -551,6 +573,24 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
     logs, extra_suites = {}, {}
     for lane in LANES:  # one after the other: parallel reads trip the Cloud Logging read quota
         status = final[lane]["status"]
+        url = state.urls.get(lane) or final[lane].get("logUrl", "")
+        logs[lane] = ""
+        if status == "SUCCESS":  # never the full log: a filtered read of the jest summary lines
+            text, problem = filtered_read(call, args, builds[lane], final[lane], sleep, SUMMARY_LINES)
+            summary = lane_summary(text)
+            say(f"===== LANE {lane} build {builds[lane]} status {status} =====")
+            say(f"log: {url}")
+            say("\n".join(summary) if summary else
+                f"summary unavailable ({problem or 'no jest summary lines in Cloud Logging'})")
+            continue
+        if status == "FAILURE":  # the lines that matter first; the full log only if they name no suite
+            text, _ = filtered_read(call, args, builds[lane], final[lane], sleep, FAILURE_LINES)
+            extra_suites[lane] = failed_suites(text)
+            if extra_suites[lane]:
+                say(f"===== LANE {lane} build {builds[lane]} status {status} =====")
+                say(f"log: {url}")
+                say("\n".join(line for line in text.rstrip().splitlines() if not JEST_CONSOLE.search(line)))
+                continue
         jest_steps = [s for s in failed_steps(final[lane]) if s in JEST_STEPS] if status == "FAILURE" else []
 
         def complete(text, jest_steps=jest_steps):
@@ -560,14 +600,8 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
             call, ["builds", "log", builds[lane], f"--project={args.project}", f"--region={args.region}"],
             sleep, complete)
         logs[lane] = log_text or ""
-        url = state.urls.get(lane) or final[lane].get("logUrl", "")
         say(f"===== LANE {lane} build {builds[lane]} status {status} =====")
-        if status == "SUCCESS":  # a green lane's full log is noise; the URL keeps it one click away
-            say(f"log: {url}")
-            summary = lane_summary(logs[lane])
-            say("\n".join(summary) if summary else "(no jest summary lines in the log)")
-        else:
-            say(logs[lane].rstrip() or f"(no log: {(log_err or '').strip()[-300:]})")
+        say(logs[lane].rstrip() or f"(no log: {(log_err or '').strip()[-300:]})")
         if problem:
             lines = len(logs[lane].splitlines())
             missing = [s for s in jest_steps if not has_jest_summary(logs[lane], s)]
@@ -577,8 +611,6 @@ def _run(args, scratch, config, call, say, sleep, clock, state):
             else:
                 say(f"LOG INCOMPLETE for {lane}: {lines} lines fetched, fetch failed after "
                     f"{len(FETCH_DELAYS) + 1} tries ({problem}); see {url}")
-        if status == "FAILURE":
-            extra_suites[lane] = failed_suites(filtered_fail_lines(call, args, builds[lane], sleep))
 
     statuses = [final[lane]["status"] for lane in LANES]
     code = exit_code(statuses)
