@@ -39,7 +39,8 @@ code and stdout, exactly as for the local simulation. Needs PyYAML (tier_gates r
      "Test Suites:"/"Tests:"/"Time:" lines; it prints status, id, log URL and those lines, or
      "summary unavailable (...)" when the read fails (the exit code is unchanged).
    - FAILURE lane: first one filtered `gcloud logging read` of the lines that matter ("FAIL ",
-     "  ● ", "Test Suites:", "Tests:", "Expected", "Received", step ERROR lines). When it names a
+     "  ● ", "Test Suites:", "Tests:", "Expected", "Received", "thrown: ", "Exceeded timeout",
+     step ERROR lines). When it names a
      failed suite (a "FAIL <path>" line), those lines are the evidence and the full log is never
      fetched. Otherwise (a non-jest step failed, or the read failed) the full log is fetched as
      before: a log without a failed jest step's "Test Suites:" line is incomplete and retried;
@@ -499,7 +500,8 @@ def fetch_with_retry(call, args, sleep, complete=None):
 # Cloud Logging regex matches (=~) are case-sensitive; the ":" operator is not, and matched every
 # console.error line of a real failed build.
 SUMMARY_LINES = r"Test Suites:|Tests:|Time:"
-FAILURE_LINES = r"FAIL |  ● |Test Suites:|Tests:|Expected|Received|^(Step #[0-9]+[^:]*: )?ERROR"
+FAILURE_LINES = (r"FAIL |  ● |Test Suites:|Tests:|Expected|Received|thrown: |Exceeded timeout|"
+                 r"^(Step #[0-9]+[^:]*: )?ERROR")
 JEST_CONSOLE = re.compile(r"(?:^|: )\s*● Console\s*$")
 
 

@@ -957,3 +957,18 @@ def test_a_failed_filtered_read_falls_back_to_the_full_fetch_and_keeps_log_incom
     assert len([c for c in fake.verbs("log") if c[2] == "build-unit"]) == tries
     assert "LOG INCOMPLETE for unit: 2 lines fetched, no jest summary for unit-tests" in out
     assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: unit-tests"
+
+
+def test_a_jest_timeout_failure_evidence_includes_the_thrown_exceeded_timeout_line(scratch):
+    # Live run on unit build 442cc56d: the evidence named the test but not why it failed.
+    assert "thrown: " in gr.FAILURE_LINES and "Exceeded timeout" in gr.FAILURE_LINES
+    filtered = ('Step #2 - "unit-tests": FAIL tests/components/room-picker.test.tsx (31 s)\n'
+                'Step #2 - "unit-tests":   ● a suggested room is not submitted as a choice › keeps it a hint\n'
+                'Step #2 - "unit-tests":     thrown: "Exceeded timeout of 5000 ms for a test.\n'
+                'Step #2 - "unit-tests": Test Suites: 1 failed, 411 passed, 412 total\n')
+    fake = FakeGcloud({"unit": ["FAILURE"], "pg": ["SUCCESS"]}, steps={"unit": UNIT_FAIL_STEPS},
+                      filtered={"unit": filtered, "pg": UNIT_OK_LOG})
+    code, out = run(scratch, fake)
+    assert code == 1 and not fake.verbs("log")
+    assert 'thrown: "Exceeded timeout of 5000 ms for a test.' in out
+    assert out.rstrip().splitlines()[-1] == "FAILED LANE unit: tests/components/room-picker.test.tsx"
