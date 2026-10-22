@@ -59,13 +59,18 @@ if [ "$acquired" -ne 1 ]; then
   exit 3
 fi
 
-cleanup() { rm -rf "$LOCK"; }
+missing=0
+cleanup() { rc=$?; rm -rf "$LOCK"; if [ "$rc" = 0 ] && [ "${missing:-0}" = 1 ]; then echo "closeout-commit: exit 5 - committed the paths that exist, but some named paths were missing" >&2; exit 5; fi; }
 trap cleanup EXIT INT TERM
 
 # ---- stage + commit ---------------------------------------------------------
 existing=()
 for p in "${PATHS[@]}"; do
-  if [ -e "$p" ]; then existing+=("$p"); else echo "closeout-commit: skipping missing path $p" >&2; fi
+  # Paths are relative to the vault root ($VAULT). Callers in Aestheticc/ often pass
+  # Aestheticc-relative paths (LUCY_SESSION_STATE.md, Sessions/closeouts): try that prefix too.
+  if [ -e "$p" ]; then existing+=("$p")
+  elif [ -e "Aestheticc/$p" ]; then existing+=("Aestheticc/$p")
+  else echo "closeout-commit: MISSING path $p (not under $VAULT or $VAULT/Aestheticc) - NOT staged" >&2; missing=1; fi
 done
 
 if [ ${#existing[@]} -eq 0 ]; then

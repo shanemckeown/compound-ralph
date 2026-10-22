@@ -88,6 +88,12 @@ cd <scratch worktree at tip> && codex exec -c model_reasoning_effort=xhigh -s re
   "$(cat /path/to/review-brief.md)" </dev/null > "$SCRATCH/astra-<bead>.txt" 2>&1
 ```
 
+**Parallel reviews never share a brief path (22 Oct, ul5ts).** Two Astra review subagents wrote the same
+scratchpad `brief.md`, and the first run reviewed the wrong branch. Each review gets its own
+`$SCRATCH/<bead>-<tip7>/review-brief.md` and its own detached worktree. The brief's first line is
+`REVIEWING: <branch> @ <full tip sha>`, and the reviewer's verdict must echo that line back. If the echo
+differs from the intended branch/tip, the review is void: discard it and re-run.
+
 The brief must include:
 - bead + comments
 - `git diff <base>...<tip>`
