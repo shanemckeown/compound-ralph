@@ -641,3 +641,45 @@ def test_index_columns_parse():
     assert migration_batch._index_columns(
         'CREATE UNIQUE INDEX x ON public.t USING btree (business_id, "Phone" DESC) WHERE (active)') == [
         "business_id", "phone"]
+
+
+def test_inherited_partial_index_with_the_wrong_predicate_fails(tmp_path):
+    """Astra r26: WHERE id < 0 where the snapshot says id > 0 protects the wrong rows."""
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id) WHERE id < 0;\n")
+    snap_path = repo / "drizzle/meta/0003_whatsapp_active_number_unique_snapshot.json"
+    snap = json.loads(snap_path.read_text())
+    snap["tables"]["public.social_accounts"]["indexes"]["social_accounts_id_unique"]["where"] = '"social_accounts"."id" > 0'
+    _write_json(snap_path, snap)
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="predicate"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_inherited_partial_index_matching_predicate_is_inherited(tmp_path):
+    """q41ar's real 0368 shape: drizzle's qualified predicate vs pg_get_indexdef's casts and parens."""
+    repo = _make_broken_base_repo(
+        tmp_path, 'CREATE UNIQUE INDEX "social_accounts_id_unique" ON "social_accounts" USING btree ("id") '
+                  "WHERE \"social_accounts\".\"id\" > 0 AND \"social_accounts\".\"id\" IS NOT NULL;\n")
+    snap_path = repo / "drizzle/meta/0003_whatsapp_active_number_unique_snapshot.json"
+    snap = json.loads(snap_path.read_text())
+    snap["tables"]["public.social_accounts"]["indexes"]["social_accounts_id_unique"]["where"] = (
+        '"social_accounts"."id" > 0 AND "social_accounts"."id" IS NOT NULL')
+    _write_json(snap_path, snap)
+
+    proof = migration_batch.prove_migration_chain(repo, "main")
+
+    assert proof["valid"] is True
+    assert proof["inherited_failures"]
+
+
+def test_multiline_index_definition_row_does_not_crash():
+    """aestheticc-a4, 23 Oct: an index definition row with fewer fields is skipped, never IndexError."""
+    actual = {"tables": [], "columns": [], "constraints": [], "indexes": [("public", "t", "i")],
+              "index_definitions": [("public", "t", "i", "t"), ("WHERE x",)]}
+    expected = {"tables": {}, "columns": {}, "constraints": {},
+                "indexes": {("public", "t", "i"): {"isUnique": True, "columns": []}}}
+    assert migration_batch._verify_expected_objects(expected, actual) == []
+    assert "unreadable" in migration_batch._verify_expected_objects(expected, actual, strict=True)[0]
+    assert migration_batch._normal_predicate("((platform = 'whatsapp'::text) AND (disconnected_at IS NULL))") == \
+        migration_batch._normal_predicate('"social_accounts"."platform" = \'whatsapp\' AND "social_accounts"."disconnected_at" IS NULL')

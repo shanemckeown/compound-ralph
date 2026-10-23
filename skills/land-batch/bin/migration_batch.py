@@ -1105,14 +1105,16 @@ def _database_objects(server: dict[str, Any], database: str) -> dict[str, Any]:
         "constraints": "SELECT n.nspname, c.relname, con.conname FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
         "indexes": "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
         # Uniqueness and definition, so an index is checked for what it enforces, not just its name.
-        "index_definitions": "SELECT n.nspname, t.relname, i.relname, CASE WHEN x.indisunique THEN 't' ELSE 'f' END, pg_get_indexdef(x.indexrelid) FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
+        "index_definitions": "SELECT n.nspname, t.relname, i.relname, CASE WHEN x.indisunique THEN 't' ELSE 'f' END, regexp_replace(pg_get_indexdef(x.indexrelid), E'[\\n\\r\\t\\x1e]+', ' ', 'g') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
     }
     result: dict[str, Any] = {}
     for kind, query in queries.items():
-        command = _psql(server, database, "-At", "-F", "\t", "-c", query)
+        command = _psql(server, database, "-At", "-F", "\t", "-R", "\x1e", "-c", query)
         if command.returncode != 0:
             raise MigrationBatchError(command.stderr.decode("utf-8", errors="replace").strip())
-        rows = [tuple(line.split("\t")) for line in command.stdout.decode().splitlines() if line]
+        # Record separator \x1e, not newline: an index definition can span lines (a4, 23 Oct).
+        rows = [tuple(record.strip("\n").split("\t"))
+                for record in command.stdout.decode().split("\x1e") if record.strip("\n")]
         result[kind] = rows
     return result
 
@@ -1120,6 +1122,7 @@ def _database_objects(server: dict[str, Any], database: str) -> dict[str, Any]:
 def _verify_expected_objects(
     expected: dict[str, dict[Any, Any]],
     actual: dict[str, Any],
+    strict: bool = False,
 ) -> list[str]:
     errors = []
     actual_tables = {tuple(row) for row in actual["tables"]}
@@ -1141,13 +1144,17 @@ def _verify_expected_objects(
     for key in expected["constraints"]:
         if key not in actual_constraints:
             errors.append(f"missing constraint {'.'.join(key)}")
-    definitions = {tuple(row[:3]): (row[3] == "t", row[4]) for row in actual.get("index_definitions", [])}
+    definitions = {tuple(row[:3]): (row[3] == "t", row[4])
+                   for row in actual.get("index_definitions", []) if len(row) >= 5}
     for key, definition in expected["indexes"].items():
         if key not in actual_indexes:
             errors.append(f"missing index {'.'.join(key)}")
             continue
+        if not strict:
+            continue  # from-empty: name-only, as before; strict is the baseline proof for inheritance
         if key not in definitions:
-            continue  # backend without definitions (PGlite): name-only, never grants inheritance
+            errors.append(f"index {'.'.join(key)}: definition unreadable, cannot prove it")
+            continue
         unique, indexdef = definitions[key]
         if bool(definition.get("isUnique")) != unique:
             errors.append(f"index {'.'.join(key)} unique={unique}, expected {bool(definition.get('isUnique'))}")
@@ -1155,7 +1162,23 @@ def _verify_expected_objects(
         if wanted and not any(c.get("isExpression") for c in definition.get("columns", [])):
             if _index_columns(indexdef) != [w.lower() for w in wanted]:
                 errors.append(f"index {'.'.join(key)} columns {_index_columns(indexdef)}, expected {wanted}")
+        # Partial index: the predicate decides which rows it protects (Astra r26).
+        want_where = _normal_predicate(definition.get("where") or "")
+        have = re.search(r"\sWHERE\s(.*)$", indexdef)
+        have_where = _normal_predicate(have.group(1) if have else "")
+        if want_where != have_where:
+            errors.append(f"index {'.'.join(key)} predicate {have_where or 'none'!r}, expected "
+                          f"{want_where or 'none'!r}")
     return errors
+
+
+def _normal_predicate(text: str) -> str:
+    """Compare predicates the way pg_get_indexdef prints them: no table qualifiers, quotes,
+    parentheses, ::casts or spacing differences. Unequal after this = not proven equal."""
+    text = re.sub(r'"?[A-Za-z_][\w$]*"?\s*\.\s*(?="?[A-Za-z_])', "", text)
+    text = re.sub(r"::[\w ]+?(?=[\s)=<>!,]|$)", "", text)
+    text = text.replace('"', "").replace("(", "").replace(")", "")
+    return re.sub(r"\s+", "", text).lower()
 
 
 def _index_columns(indexdef: str) -> list[str]:
@@ -1395,7 +1418,7 @@ def classify_inherited_failures(
                 real.append({"tag": tag, "error": "fails on the prod schema baseline: " + error})
     # Objects by table identity: a broken table's expected objects are excused only when the
     # baseline replay has no object error at all for that table; its baseline errors are real.
-    baseline_errors = _verify_expected_objects(expected, baseline["actual"]) if available else []
+    baseline_errors = _verify_expected_objects(expected, baseline["actual"], strict=True) if available else []
     clean_on_baseline = {table for table in broken
                          if available and not any(_error_table(e) == table for e in baseline_errors)}
     inherited_objects, real_objects = [], []
