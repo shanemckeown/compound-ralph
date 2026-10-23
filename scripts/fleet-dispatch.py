@@ -52,7 +52,8 @@ resumable (the gate prints `resume: <branch>`); /goal Phase 1 checks it out. Onl
 owning it refuses.
 
 Check 12 (credit pace, LUCY-r1lyy): when Claude weekly usage runs ahead of elapsed time
-(used_pct / elapsed_pct > 1.25, read from Aestheticc/Ops/CREDIT_PACE.json), P2/P3/P4 beads are
+(used_pct / elapsed_pct > 1.25, read from the live seat snapshots in ~/.claude/state/seat-usage/,
+falling back to Aestheticc/Ops/CREDIT_PACE.json), P2/P3/P4 beads are
 refused; P0/P1 and dated client commitments still pass. Fails OPEN: a missing, unreadable or stale
 (> 24h) file never blocks. Override: --force --force-reason="<why this can't wait for the pace>".
 """
@@ -832,11 +833,53 @@ def _aware(ts):
     return stamp
 
 
-def credit_pace(path=None, now=None):
-    """(pace, note). pace is a dict with used_pct, elapsed_pct, ratio when the file is usable,
-    else None with the reason in note (the caller warns and does not refuse)."""
-    path = path or CREDIT_PACE_FILE
+# Since 23 Oct the status line writes real per-seat usage to SEAT_USAGE_DIR/<seat>.json (Anthropic
+# startup program: 5 Team seats, each with its own 7-day window). The pool pace is the sum of the fresh
+# seats' 7-day used % over the sum of their elapsed %. CREDIT_PACE.json stays as the fallback.
+SEAT_USAGE_DIR = os.path.expanduser("~/.claude/state/seat-usage")
+
+
+def seat_pace(seat_dir=None, now=None):
+    """(pace, note) from the per-seat snapshots, or (None, note) when no seat is fresh."""
+    seat_dir = seat_dir or SEAT_USAGE_DIR
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    used = elapsed = 0.0
+    seats = []
+    for name in sorted(os.listdir(seat_dir)) if os.path.isdir(seat_dir) else []:
+        if not (name.startswith("seat") and name.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(seat_dir, name)) as fh:
+                data = json.load(fh)
+            at = _aware(data["at"])
+            week = data["rate_limits"]["seven_day"]
+            resets = datetime.datetime.fromtimestamp(float(week["resets_at"]), datetime.timezone.utc)
+            seat_used = float(week["used_percentage"])
+        except Exception:
+            continue
+        left_h = (resets - now).total_seconds() / 3600
+        if (now - at).total_seconds() / 3600 > PACE_STALE_HOURS or not 0 < left_h < 168:
+            continue
+        used += seat_used
+        elapsed += (168 - left_h) / 168 * 100
+        seats.append(name[:-5])
+    if not seats or elapsed <= 0:
+        return None, f"no fresh seat snapshot in {seat_dir}"
+    n = len(seats)
+    return {"used_pct": used / n, "elapsed_pct": elapsed / n, "ratio": used / elapsed,
+            "seats": seats}, None
+
+
+def credit_pace(path=None, now=None, seat_dir=None):
+    """(pace, note). pace is a dict with used_pct, elapsed_pct, ratio when usable, else None with
+    the reason in note (the caller warns and does not refuse). With no explicit path the live
+    seat snapshots win; CREDIT_PACE.json is the fallback."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if path is None:
+        pace, _ = seat_pace(seat_dir, now)
+        if pace:
+            return pace, None
+    path = path or CREDIT_PACE_FILE
     try:
         with open(path) as fh:
             data = json.load(fh)
@@ -877,7 +920,8 @@ def check_credit_pace(bead, record=None, pace_path=None, now=None):
     pace, note = credit_pace(pace_path, now)
     if pace is None:
         return [], note, None
-    detail = (f"Claude weekly use {pace['used_pct']:.0f}% at {pace['elapsed_pct']:.0f}% of the window "
+    source = f" across {', '.join(pace['seats'])}" if pace.get("seats") else ""
+    detail = (f"Claude weekly use {pace['used_pct']:.0f}% at {pace['elapsed_pct']:.0f}% of the window{source} "
               f"= {pace['ratio']:.2f}x pace (limit {PACE_LIMIT}x)")
     if pace["ratio"] <= PACE_LIMIT or pace["used_pct"] < PACE_MIN_USED_PCT:
         return [], None, detail

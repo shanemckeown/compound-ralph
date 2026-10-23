@@ -175,7 +175,7 @@ class Pace(unittest.TestCase):
                      check_client_triage_tree=lambda *a: [], check_headless_eligible=lambda *a: [],
                      check_bead_brief=lambda r: [], check_premise_tree=lambda *a: [],
                      load_bead_record=lambda b: (record, None), list_open_children=lambda b: [],
-                     check_resources=lambda: ({}, {}, {}), CREDIT_PACE_FILE=self.path,
+                     check_resources=lambda: ({}, {}, {}), CREDIT_PACE_FILE=self.path, SEAT_USAGE_DIR=os.path.join(self.dir.name, 'no-seats'),
                      check_wip=lambda: ([], None, "0 pushed-not-landed goal/* branches (cap 10)"))
         with mock.patch.multiple(fd, **stubs), mock.patch("builtins.print") as out, \
              mock.patch.object(fd.datetime, "datetime", wraps=datetime.datetime) as dt:
@@ -201,6 +201,46 @@ class Pace(unittest.TestCase):
         self.assertFalse(failed)
         self.assertIn("⚠ 12 credit pace — WARN (not refusing)", printed)
 
+
+
+class SeatPace(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory(dir="/private/tmp")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def seat(self, name, used, hours_left, age_h=0):
+        resets = NOW + datetime.timedelta(hours=hours_left)
+        with open(os.path.join(self.dir.name, f"{name}.json"), "w") as fh:
+            json.dump({"seat": name, "at": (NOW - datetime.timedelta(hours=age_h)).isoformat(),
+                       "rate_limits": {"seven_day": {"used_percentage": used,
+                                                     "resets_at": resets.timestamp()}}}, fh)
+
+    def test_pool_ratio_is_sum_used_over_sum_elapsed(self):
+        self.seat("seat3", 54, 84)    # 50% elapsed
+        self.seat("seat5", 47, 126)   # 25% elapsed
+        pace, note = fd.credit_pace(None, NOW, seat_dir=self.dir.name)
+        self.assertIsNone(note)
+        self.assertAlmostEqual(pace["ratio"], 101 / 75)
+        self.assertEqual(pace["seats"], ["seat3", "seat5"])
+
+    def test_stale_seat_is_ignored(self):
+        self.seat("seat2", 90, 84, age_h=30)
+        self.seat("seat3", 10, 84)
+        pace, _ = fd.credit_pace(None, NOW, seat_dir=self.dir.name)
+        self.assertEqual(pace["seats"], ["seat3"])
+
+    def test_no_fresh_seat_falls_back_to_file(self):
+        with mock.patch.object(fd, "CREDIT_PACE_FILE", os.path.join(self.dir.name, "missing.json")):
+            pace, note = fd.credit_pace(None, NOW, seat_dir=self.dir.name)
+        self.assertIsNone(pace)
+        self.assertIn("missing.json", note)
+
+    def test_explicit_path_ignores_seats(self):
+        self.seat("seat3", 99, 160)
+        pace, note = fd.credit_pace(os.path.join(self.dir.name, "missing.json"), NOW, seat_dir=self.dir.name)
+        self.assertIsNone(pace)
 
 if __name__ == "__main__":
     unittest.main()
