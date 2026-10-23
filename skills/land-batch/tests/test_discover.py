@@ -100,13 +100,49 @@ def _push_remote_only_branch(repo, tmp_path, branch, filename="feature.txt"):
     return tip_sha
 
 
+GATE_SIGNATURE = "- Checker: review_lead_check.py via review-gate.sh:"
+
+
+def _gate_record(home, bead_id, tip_sha, verdict="PASS"):
+    """What review-gate.sh writes into Ops/reviews (discovery reads $HOME's copy)."""
+    _write(
+        Path(home) / "Documents" / "Obsidian" / "Aestheticc" / "Ops" / "reviews"
+        / f"REVIEW_{bead_id}_gate_{tip_sha[:10]}_20261023T000000Z.md",
+        f"REVIEWING: {bead_id} @ {tip_sha}\n\n{GATE_SIGNATURE} BLOCKING=0 ESCALATE=0\n\nVerdict: {verdict}\n",
+    )
+
+
+def _fake_bd_comments(home, bead_id, text):
+    """`bd comments <bead>` answers from $HOME/fake-bd/<bead>.txt (a fake bd on PATH)."""
+    _write(Path(home) / "fake-bd" / f"{bead_id}.txt", text)
+
+
 def _discover(repo, home, extra_env=None):
     env = os.environ.copy()
     env["HOME"] = str(home)
+    fake_bin = Path(home) / "fake-bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    (fake_bin / "bd").write_text(
+        "#!/bin/sh\n[ \"$1\" = comments ] && cat \"$HOME/fake-bd/$2.txt\" 2>/dev/null\nexit 0\n")
+    (fake_bin / "bd").chmod(0o755)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
     if extra_env:
         env.update(extra_env)
     result = _run(["bash", str(DISCOVER), str(repo)], env=env)
     return json.loads(result.stdout)
+
+
+def _discover_reviewed(repo, home, extra_env=None):
+    """Discovery with a recorded independent PASS for every candidate's exact tip, so a test of
+    another gate (session, dirt, conflicts) is not answered first by held-no-review-pass."""
+    first = _discover(repo, home, extra_env)
+    for c in first["candidates"]:
+        bead_id, tip = c.get("bead_id"), c.get("tip_sha")
+        if not bead_id or not tip:
+            continue
+        _fake_bd_comments(home, bead_id, f"[Encrypted-S] at 2099-01-01 00:00\n  PASS @{tip}\n\n")
+        _gate_record(home, bead_id, tip)
+    return _discover(repo, home, extra_env)
 
 
 def _candidate(report, branch):
@@ -225,7 +261,7 @@ def test_remote_only_goal_branch_is_discovered_with_nullable_worktree_fields(tmp
     _add_origin(repo, tmp_path)
     tip_sha = _push_remote_only_branch(repo, tmp_path, "goal/aestheticcnext-rmt01")
 
-    report = _discover(repo, tmp_path / "home")
+    report = _discover_reviewed(repo, tmp_path / "home")
     candidate = _candidate(report, "goal/aestheticcnext-rmt01")
 
     assert report["ref_snapshot"] == {
@@ -317,7 +353,7 @@ def test_closed_patch_unique_remote_branch_is_finished_but_never_auto_lands(tmp_
         [{"id": "AestheticcNext-done1", "status": "closed"}],
     )
 
-    candidate = _candidate(_discover(repo, tmp_path / "home"), branch)
+    candidate = _candidate(_discover_reviewed(repo, tmp_path / "home"), branch)
 
     assert candidate["tip_sha"] == tip_sha
     assert candidate["bead_resolution"] == "exact"
@@ -348,7 +384,7 @@ def test_remote_child_branch_finds_exact_session_among_shared_cwd_sessions(tmp_p
     _named_active_session(home, home, "parent", "goal AestheticcNext-sess1", 2000)
     _named_active_session(home, home, "child", "goal AestheticcNext-sess1.2", 1000)
 
-    candidate = _candidate(_discover(repo, home), branch)
+    candidate = _candidate(_discover_reviewed(repo, home), branch)
 
     assert candidate["session"]["session_id"] == "child"
     assert candidate["session"]["joined_by"] == "bead-id"
@@ -457,7 +493,7 @@ def test_283_ref_fixture_discards_merged_remote_refs_before_candidate_analysis(t
         _commit_all(wt, branch)
 
     started = time.perf_counter()
-    report = _discover(repo, tmp_path / "home")
+    report = _discover_reviewed(repo, tmp_path / "home")
     elapsed = time.perf_counter() - started
 
     assert report["ref_snapshot"]["goal_ref_count"] == 281
@@ -473,18 +509,148 @@ def test_283_ref_fixture_discards_merged_remote_refs_before_candidate_analysis(t
     assert elapsed < 20
 
 
-def test_clean_ahead_non_active_non_sensitive_without_marker_auto_lands(tmp_path):
-    repo = _init_repo(tmp_path)
-    wt = _add_worktree(repo, tmp_path, "fix/AestheticcNext-l7ioe")
+def _record_review(tmp_path, bead_id, comments, review_verdict=None, tip_sha=None):
+    """Review evidence for discovery under the test HOME: fake bd comments plus an optional
+    review-gate record. Returns no env: discovery reads only the real (HOME-relative) places."""
+    home = tmp_path / "home"
+    _fake_bd_comments(home, bead_id, comments)
+    for stale in (home / "Documents" / "Obsidian" / "Aestheticc" / "Ops" / "reviews").glob("*"):
+        stale.unlink()
+    if review_verdict:
+        _gate_record(home, bead_id, tip_sha, review_verdict)
+    return {}
+
+
+def _bd_comment(ts, body):
+    return f"[Encrypted-S] at {ts}\n" + "".join(f"  {line}\n" for line in body.splitlines()) + "\n"
+
+
+def _finished_worktree_branch(repo, tmp_path, branch):
+    wt = _add_worktree(repo, tmp_path, branch)
     _write(wt / "feature.txt", "done\n")
     _commit_all(wt, "feature")
+    return _git(wt, "rev-parse", "HEAD").stdout.strip()
 
-    report = _discover(repo, tmp_path / "home")
-    candidate = _candidate(report, "fix/AestheticcNext-l7ioe")
+
+def test_clean_ahead_non_sensitive_branch_auto_lands_on_recorded_independent_pass(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _finished_worktree_branch(repo, tmp_path, "fix/AestheticcNext-l7ioe")
+    env = _record_review(
+        tmp_path,
+        "AestheticcNext-l7ioe",
+        _bd_comment("2099-01-01 00:00", f"PASS @{tip}\nreview-gate: BLOCKING=0 ESCALATE=0"),
+        review_verdict="PASS",
+        tip_sha=tip,
+    )
+
+    candidate = _candidate(_discover(repo, tmp_path / "home", env), "fix/AestheticcNext-l7ioe")
 
     assert candidate["has_marker"] is False
+    assert candidate["review_pass"] is True
     assert candidate["auto_land"] is True
     assert candidate["finish_signal"] == "finished"
+
+
+def test_clean_non_sensitive_branch_without_review_is_held(tmp_path):
+    repo = _init_repo(tmp_path)
+    _finished_worktree_branch(repo, tmp_path, "fix/AestheticcNext-nrv01")
+
+    candidate = _candidate(_discover(repo, tmp_path / "home"), "fix/AestheticcNext-nrv01")
+
+    assert candidate["auto_land"] is False
+    assert candidate["finish_signal"] == "held-no-review-pass"
+
+
+def test_builder_own_gate_pass_comment_never_qualifies(tmp_path):
+    """ul5ts @4be6c71efe, 22 Oct: the builder's own-gate note read as a review PASS."""
+    repo = _init_repo(tmp_path)
+    tip = _finished_worktree_branch(repo, tmp_path, "goal/aestheticcnext-ul5tx")
+    own_gate = (
+        f"round 5 STRUCTURAL done 2026-10-22T20:22:48+01:00: pushed {tip[:10]}. Own-gate review "
+        "(NOT the independent review): r3 Astra PASS 0 findings, Opus PASS 0 findings, 16/16 "
+        "mutants, lead BLOCKING=0 ESCALATE=0. Orchestrator: run independent aestheticc-review code."
+    )
+    env = _record_review(tmp_path, "AestheticcNext-ul5tx", _bd_comment("2026-10-22 19:22", own_gate))
+
+    candidate = _candidate(_discover(repo, tmp_path / "home", env), "goal/aestheticcnext-ul5tx")
+
+    assert candidate["auto_land"] is False
+    assert candidate["finish_signal"] == "held-no-review-pass"
+    assert "first line is exactly PASS @<tip>" in candidate["review_evidence"]
+
+
+def test_pass_line_not_first_or_without_review_file_never_qualifies(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _finished_worktree_branch(repo, tmp_path, "fix/AestheticcNext-pl001")
+    buried = _bd_comment("2026-10-23 09:00", f"Own gate done.\nPASS @{tip}")
+    env = _record_review(tmp_path, "AestheticcNext-pl001", buried, review_verdict="PASS", tip_sha=tip)
+    candidate = _candidate(_discover(repo, tmp_path / "home", env), "fix/AestheticcNext-pl001")
+    assert candidate["auto_land"] is False
+
+    no_file = _bd_comment("2026-10-23 09:00", f"PASS @{tip}")
+    env = _record_review(tmp_path, "AestheticcNext-pl001", no_file)
+    candidate = _candidate(_discover(repo, tmp_path / "home", env), "fix/AestheticcNext-pl001")
+    assert candidate["auto_land"] is False
+    assert "no review-gate record" in candidate["review_evidence"]
+
+
+def test_pass_line_for_an_older_tip_never_qualifies(tmp_path):
+    repo = _init_repo(tmp_path)
+    tip = _finished_worktree_branch(repo, tmp_path, "fix/AestheticcNext-old01")
+    old = "0123456789abcdef0123456789abcdef01234567"
+    env = _record_review(
+        tmp_path, "AestheticcNext-old01", _bd_comment("2026-10-23 09:00", f"PASS @{old}"),
+        review_verdict="PASS", tip_sha=old,
+    )
+    candidate = _candidate(_discover(repo, tmp_path / "home", env), "fix/AestheticcNext-old01")
+    assert tip != old
+    assert candidate["auto_land"] is False
+
+
+def test_unreviewed_auto_branch_stays_held(tmp_path):
+    """auto/AestheticcNext-x2jpv, 23 Oct: auto_land=true with no PASS at all."""
+    repo = _init_repo(tmp_path)
+    _finished_worktree_branch(repo, tmp_path, "auto/AestheticcNext-x2jpw")
+
+    candidate = _candidate(_discover(repo, tmp_path / "home"), "auto/AestheticcNext-x2jpw")
+
+    assert candidate["auto_land"] is False
+    assert candidate["recommendation"] == "held-no-review-pass"
+
+
+def test_closed_superseded_bead_branch_is_retired(tmp_path):
+    repo = _init_repo(tmp_path)
+    _add_origin(repo, tmp_path)
+    branch = "goal/aestheticcnext-sup01"
+    _push_remote_only_branch(repo, tmp_path, branch)
+    _write_beads(
+        repo / ".beads" / "issues.jsonl",
+        [{"id": "AestheticcNext-sup01", "status": "closed",
+          "close_reason": "SUPERSEDED: About photo already live; branch stays unlanded."}],
+    )
+
+    candidate = _candidate(_discover(repo, tmp_path / "home"), branch)
+
+    assert candidate["retired_by_superseded"] is True
+    assert candidate["retired_by_pattern"] is False
+    assert candidate["recommendation"] == "skip-retired"
+    assert candidate["auto_land"] is False
+
+
+def test_closed_done_bead_is_not_retired_by_superseded_rule(tmp_path):
+    repo = _init_repo(tmp_path)
+    _add_origin(repo, tmp_path)
+    branch = "goal/aestheticcnext-don01"
+    _push_remote_only_branch(repo, tmp_path, branch)
+    _write_beads(
+        repo / ".beads" / "issues.jsonl",
+        [{"id": "AestheticcNext-don01", "status": "closed", "close_reason": "Done: pushed, see notes"}],
+    )
+
+    candidate = _candidate(_discover(repo, tmp_path / "home"), branch)
+
+    assert candidate["retired_by_superseded"] is False
+    assert candidate["recommendation"] != "skip-retired"
 
 
 def test_auto_land_blocked_by_sensitive_files(tmp_path):
@@ -588,7 +754,7 @@ def test_auto_land_blocked_by_active_session(tmp_path):
     home = tmp_path / "home"
     _active_session(home, wt)
 
-    report = _discover(repo, home)
+    report = _discover_reviewed(repo, home)
     candidate = _candidate(report, "fix/AestheticcNext-actv1")
 
     assert candidate["session"]["active"] is True
@@ -603,7 +769,7 @@ def test_auto_land_blocked_by_real_uncommitted_dirt(tmp_path):
     _commit_all(wt, "feature")
     _write(wt / "PLAN.md", "real uncommitted work\n")
 
-    report = _discover(repo, tmp_path / "home")
+    report = _discover_reviewed(repo, tmp_path / "home")
     candidate = _candidate(report, "fix/AestheticcNext-dirt1")
 
     assert candidate["clean"] is False
@@ -620,7 +786,7 @@ def test_auto_land_blocked_by_base_conflict(tmp_path):
     _write(repo / "app.txt", "main change\n")
     _commit_all(repo, "main change")
 
-    report = _discover(repo, tmp_path / "home")
+    report = _discover_reviewed(repo, tmp_path / "home")
     candidate = _candidate(report, "fix/AestheticcNext-conf1")
 
     assert candidate["conflicts_with_base"] is True
@@ -663,7 +829,7 @@ def test_alive_exact_worktree_process_blocks_even_when_transcript_is_stale(tmp_p
     record["status"] = "waiting"
     session_file.write_text(json.dumps(record), encoding="utf-8")
 
-    candidate = _candidate(_discover(repo, home), "fix/AestheticcNext-live1")
+    candidate = _candidate(_discover_reviewed(repo, home), "fix/AestheticcNext-live1")
 
     assert candidate["session"]["process_alive"] is True
     assert candidate["live_session"] is True
@@ -791,7 +957,7 @@ def test_generated_baseline_base_conflict_can_reach_regeneration_gate(tmp_path):
     _commit_all(wt, 'feature baseline')
     _write(repo / path, '{"version":1,"files":{"lib/schema.ts":4},"growAllowances":{}}\n')
     _commit_all(repo, 'main baseline')
-    candidate = _candidate(_discover(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
+    candidate = _candidate(_discover_reviewed(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
     assert candidate['conflicts_with_base'] is True
     assert candidate['conflicting_files'] == [path]
     assert candidate['baseline_regeneration_required'] is True
@@ -802,7 +968,7 @@ def test_generated_baseline_base_conflict_can_reach_regeneration_gate(tmp_path):
     _commit_all(wt, 'authored feature')
     _write(repo / 'app.txt', 'main authored edit\n')
     _commit_all(repo, 'authored main')
-    candidate = _candidate(_discover(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
+    candidate = _candidate(_discover_reviewed(repo, tmp_path / 'home'), 'goal/aestheticcnext-ratchet')
     assert candidate['baseline_regeneration_required'] is False
     assert candidate['auto_land'] is False
     assert candidate['recommendation'] == 'held-conflict'
@@ -818,7 +984,7 @@ def test_generated_baseline_sibling_pair_is_labelled_not_authored_conflict(tmp_p
         wt = _add_worktree(repo, tmp_path, branch)
         _write(wt / path, json.dumps({'version': 1, 'files': {'lib/schema.ts': count}, 'growAllowances': {}}) + '\n')
         _commit_all(wt, 'branch baseline')
-    report = _discover(repo, tmp_path / 'home')
+    report = _discover_reviewed(repo, tmp_path / 'home')
     assert all(_candidate(report, branch)['auto_land'] for branch in branches)
     assert report['sibling_conflicts'] == [{
         'kind': 'generated-baseline', 'branch_a': branches[0],

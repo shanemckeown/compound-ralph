@@ -7,6 +7,7 @@ Fixtures are real ``bd comments`` output captured 2026-10-08:
                                     false-held 7 Oct)
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -169,3 +170,140 @@ def test_bead_comments_queries_the_repo_beads_dir_when_beads_dir_unset(monkeypat
     monkeypatch.setenv("BEADS_DIR", "/explicit/.beads")
     lbs._bead_comments("AestheticcNext-uynmv")
     assert seen["beads_dir"] == "/explicit/.beads"
+
+
+# --- independent_pass_for: what discovery accepts for auto_land (LUCY-qymwm) ---------
+
+IND_TIP = "7649f85281ef8012cae27cd56d1a3f6cea301c2c"
+
+
+def _reviews(tmp_path, verdict="PASS", bead="AestheticcNext-q41ar", tip=IND_TIP):
+    """A review-gate record (what review-gate.sh writes)."""
+    root = tmp_path / "reviews"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md").write_text(
+        f"REVIEWING: {bead} @ {tip}\n\n{lbs.GATE_SIGNATURE} BLOCKING=0 ESCALATE=0\n\nVerdict: {verdict}\n")
+    return root
+
+
+def test_independent_pass_needs_exact_first_line_and_review_file(tmp_path):
+    root = _reviews(tmp_path)
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                      comments_text=_comment("2026-10-23 09:00", f"PASS @{IND_TIP}\nreview-gate: BLOCKING=0 ESCALATE=0"))
+    assert ok is True, ev
+    assert ev.startswith(f"PASS @{IND_TIP} + ")
+
+
+def test_independent_pass_accepts_a_tip_prefix_but_nothing_after_it_on_the_line(tmp_path):
+    root = _reviews(tmp_path)
+    ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                     comments_text=_comment("2026-10-23 09:00", "PASS @7649f85281"))
+    assert ok is True
+    ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                     comments_text=_comment("2026-10-23 09:00", "PASS @7649f85281 (own gate)"))
+    assert ok is False
+
+
+def test_independent_pass_own_gate_prose_is_not_a_pass(tmp_path):
+    root = _reviews(tmp_path)
+    own = ("r10 PUSHED: goal/aestheticcnext-q41ar @7649f85281. Own-gate review (NOT independent): "
+           "Astra xhigh PASS 0 findings, Opus h2h PASS 0, review lead BLOCKING=0 ESCALATE=0.")
+    assert lbs.review_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=tmp_path / "none",
+                               comments_text=_comment("2026-10-22 20:48", own))[0] is True  # the old hole
+    ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                     comments_text=_comment("2026-10-22 20:48", own))
+    assert ok is False
+
+
+def test_independent_pass_held_by_later_void_or_fail_review_file_only(tmp_path):
+    root = _reviews(tmp_path)
+    comments = (_comment("2026-10-23 09:00", f"PASS @{IND_TIP}")
+                + _comment("2026-10-23 09:30", f"PASS @{IND_TIP} VOID: wrong brief"))
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root, comments_text=comments)
+    assert ok is False and "VOID" in ev
+    fail_root = _reviews(tmp_path / "f", verdict="FAIL")
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=fail_root,
+                                      comments_text=_comment("2026-10-23 09:00", f"PASS @{IND_TIP}"))
+    assert ok is False and "Verdict: PASS" in ev
+
+
+def test_independent_pass_not_reset_by_own_gate_prose_after_a_fail(tmp_path):
+    """Astra r2: old PASS pair, then FAIL, then builder prose citing review_lead_check.py passed."""
+    root = _reviews(tmp_path)
+    old = (tmp_path / "reviews" / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md")
+    os.utime(old, (1761123600, 1761123600))  # 2025-10-22 09:00 UTC, well before the comments
+    comments = (_comment("2026-10-23 09:00", f"PASS @{IND_TIP}")
+                + _comment("2026-10-23 09:10", f"ASTRA REVIEW (tip {IND_TIP}): FAIL — 1 P1")
+                + _comment("2026-10-23 09:20", f"Own-gate (NOT independent) tip {IND_TIP}: "
+                                               "review_lead_check.py passed: BLOCKING=0 ESCALATE=0"))
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root, comments_text=comments)
+    assert ok is False and "after the last review-gate PASS" in ev
+
+
+def test_independent_pass_vetoed_by_newer_fail_file_in_any_format(tmp_path):
+    for fail_body in ("FAIL\nP1 lib/x.ts:1 — bad — fix\n",
+                      '```review-verdict\n{"verdict": "FAIL", "findings": [{"severity": "P1", "text": "x"}]}\n```\n',
+                      "**Verdict: FAIL**\n"):
+        root = _reviews(tmp_path / str(abs(hash(fail_body))))
+        os.utime(root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md", (1761123600, 1761123600))
+        newer = root / "REVIEW_q41ar_astra_r11.md"
+        newer.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {IND_TIP}\nAestheticcNext-q41ar\n" + fail_body)
+        ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                          comments_text=_comment("2025-10-22 09:30", f"PASS @{IND_TIP}"))
+        assert ok is False, fail_body
+
+
+def test_independent_pass_after_fail_with_fresh_pass_pair_lands(tmp_path):
+    root = _reviews(tmp_path)  # gate file written now
+    comments = (_comment("2026-10-22 21:14", f"FAIL @{IND_TIP}\nASTRA REVIEW (tip {IND_TIP}): FAIL — 0 P1, 1 P2")
+                + _comment("2099-01-01 00:00", f"PASS @{IND_TIP}\nreview-gate round 10: BLOCKING=0 ESCALATE=0"))
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root, comments_text=comments)
+    assert ok is True, ev
+
+
+def test_no_env_can_stand_in_for_live_comments_or_reviews(monkeypatch):
+    """Astra r2/r3: a fixture env replaced live comments in production discovery. It is gone."""
+    monkeypatch.setenv("LAND_BEAD_COMMENTS_DIR", "/tmp/fake")
+    monkeypatch.setattr(lbs.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "LIVE", ""))
+    assert lbs._bead_comments("AestheticcNext-q41ar") == "LIVE"
+
+
+def test_reviewer_pass_file_without_gate_signature_is_not_approval(tmp_path):
+    root = tmp_path / "reviews"
+    root.mkdir()
+    (root / "REVIEW_q41ar_sonnet.md").write_text(f"REVIEWING: goal/x @ {IND_TIP}\nAestheticcNext-q41ar\nVerdict: PASS\n")
+    ok, ev = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                      comments_text=_comment("2099-01-01 00:00", f"PASS @{IND_TIP}"))
+    assert ok is False and "no review-gate record" in ev
+
+
+def test_gate_record_for_another_tip_with_this_tip_as_base_is_not_approval(tmp_path):
+    other = "d60331cb15581e5dc1ff7f6551f050e10e6c5550"
+    root = _reviews(tmp_path, tip=other)
+    (root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md").write_text((root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md").read_text()
+                                               + f"Delta {IND_TIP}..{other}\n")
+    ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                     comments_text=_comment("2099-01-01 00:00", f"PASS @{IND_TIP}"))
+    assert ok is False
+
+
+def test_any_later_comment_naming_the_tip_with_a_veto_token_holds(tmp_path):
+    root = _reviews(tmp_path)
+    os.utime(root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md", (1761123600, 1761123600))
+    for veto in (f"FAIL @{IND_TIP}", f"**Verdict: FAIL** (tip {IND_TIP})", f"PASS @{IND_TIP}\nPASS @{IND_TIP} VOID: wrong brief",
+                 f"lead tip {IND_TIP}: BLOCKING=1 ESCALATE=0"):
+        comments = _comment("2025-10-22 09:30", f"PASS @{IND_TIP}") + _comment("2025-10-22 09:40", veto)
+        ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root, comments_text=comments)
+        assert ok is False, veto
+
+
+def test_fail_review_quoting_the_gate_signature_still_vetoes(tmp_path):
+    """Astra r4: a FAIL review that quotes the gate signature was skipped as a 'gate record'."""
+    root = _reviews(tmp_path)
+    os.utime(root / "REVIEW_q41ar_gate_7649f85281_20261023T000000Z.md", (1761123600, 1761123600))
+    (root / "REVIEW_q41ar_astra_r11.md").write_text(
+        f"REVIEWING: goal/aestheticcnext-q41ar @ {IND_TIP}\nAestheticcNext-q41ar\n"
+        f"The gate wrote '{lbs.GATE_SIGNATURE} BLOCKING=0' but:\nFAIL\nP1 lib/pay.ts:9 — bad — fix\n")
+    ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
+                                     comments_text=_comment("2025-10-22 09:30", f"PASS @{IND_TIP}"))
+    assert ok is False

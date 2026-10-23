@@ -121,13 +121,25 @@ Take the session ID from the output. Never start a fresh session. Never backgrou
 
 **Step 4: landing check.** Run `git merge-tree $(git merge-base origin/main <tip>) origin/main <tip>` and also check the other pushed-not-landed branches. List the conflicts. VERSION, CHANGELOG, file-length-baseline and migration-number collisions are expected but must be named.
 
-**Step 5: verdict.** Line 1 is `PASS` or `FAIL`. Then one finding per line, in the form `P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix`. After that, list VERIFIED OK and UNVERIFIED items; unverified items are never called verified. Then record it:
+**Step 5: verdict.** Line 1 is `PASS` or `FAIL`. Then one finding per line, in the form `P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix`. After that, list VERIFIED OK and UNVERIFIED items; unverified items are never called verified. In a re-review, confirm each earlier-round finding you checked is fixed with its own VERIFIED OK line, exactly `- r<N> <sev> <file:line> closed: <how you checked>` (no "but"/"still"/"partially"): that line is what lets the lead grade it `fixed`. Notes under VERIFIED OK may discuss a listed finding, but never state a new one there. **End with the structured block. It is required:** `review-gate.sh` refuses any review written after 2026-10-23 12:00 UTC that lacks it (LUCY-p4pjf). The checker reads it as the whole input, and the prose before it must agree (same verdict word, every finding in the block):
+
+````
+```review-verdict
+{"verdict": "FAIL", "findings": [{"severity": "P2", "text": "lib/x.ts:12 — failure scenario — fix"}]}
+```
+````
+
+Then record it:
 
 ```bash
-bd comment <id> "<ASTRA XHIGH|OPUS HEAD-TO-HEAD> REVIEW <YYYY-MM-DD> (tip <sha>): <PASS|FAIL> — <n> P1, <n> P2, <n> P3. <findings>"
+bd comment <id> "<PASS|FAIL> @<full tip sha>
+<path of the Ops/reviews file>
+<ASTRA XHIGH|OPUS HEAD-TO-HEAD> REVIEW <YYYY-MM-DD> (tip <sha>): <PASS|FAIL> — <n> P1, <n> P2, <n> P3. <findings, copied verbatim>"
 ```
 
-**Before acting on a FAIL**, run the review lead on it: a fresh-context Opus agent following `~/.claude/references/review-lead/LEAD.md`, gated by `review_lead_check.py` (the same step as /goal Phase 4, Step 4). Only its `lead-actions` file counts toward a re-dispatch. A FAIL whose lead output is BLOCKING=0 and ESCALATE=0 is landable, and its dismissals file goes in the bead comment.
+A FAIL comment in exactly that shape is the review's mirror, and `review-gate.sh` lets the review be gated after the lead's clearance. Any other FAIL, VOID or withdrawal comment on the tip vetoes it. A reviewer's raw `PASS @<tip>` line on its own never lands: `review-gate.sh` writes the landable pair.
+
+**Before acting on a FAIL**, run the review lead on it: a fresh-context Opus agent following `~/.claude/references/review-lead/LEAD.md`, gated by `review_lead_check.py` (the same step as /goal Phase 4, Step 4). Only its `lead-actions` file counts toward a re-dispatch. A FAIL whose lead output is BLOCKING=0 and ESCALATE=0 is landable, and its dismissals file goes in the bead comment. The PASS itself is recorded only by `~/.claude/scripts/review-gate.sh` (it writes the `Ops/reviews` gate file and the `PASS @<tip>` first-line comment the lander requires; see /goal Phase 4 Step 4).
 
 **On FAIL**, the orchestrator writes `REFLECTION <date>: attempt N (tip <sha>)` before any re-dispatch. It covers:
 - **Preserve:** what was proven right

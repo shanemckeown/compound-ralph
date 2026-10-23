@@ -1104,6 +1104,8 @@ def _database_objects(server: dict[str, Any], database: str) -> dict[str, Any]:
         "columns": "SELECT table_schema, table_name, column_name, is_nullable FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,ordinal_position",
         "constraints": "SELECT n.nspname, c.relname, con.conname FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
         "indexes": "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
+        # Uniqueness and definition, so an index is checked for what it enforces, not just its name.
+        "index_definitions": "SELECT n.nspname, t.relname, i.relname, CASE WHEN x.indisunique THEN 't' ELSE 'f' END, pg_get_indexdef(x.indexrelid) FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
     }
     result: dict[str, Any] = {}
     for kind, query in queries.items():
@@ -1139,10 +1141,32 @@ def _verify_expected_objects(
     for key in expected["constraints"]:
         if key not in actual_constraints:
             errors.append(f"missing constraint {'.'.join(key)}")
-    for key in expected["indexes"]:
+    definitions = {tuple(row[:3]): (row[3] == "t", row[4]) for row in actual.get("index_definitions", [])}
+    for key, definition in expected["indexes"].items():
         if key not in actual_indexes:
             errors.append(f"missing index {'.'.join(key)}")
+            continue
+        if key not in definitions:
+            continue  # backend without definitions (PGlite): name-only, never grants inheritance
+        unique, indexdef = definitions[key]
+        if bool(definition.get("isUnique")) != unique:
+            errors.append(f"index {'.'.join(key)} unique={unique}, expected {bool(definition.get('isUnique'))}")
+        wanted = [c.get("expression") for c in definition.get("columns", []) if isinstance(c, dict)]
+        if wanted and not any(c.get("isExpression") for c in definition.get("columns", [])):
+            if _index_columns(indexdef) != [w.lower() for w in wanted]:
+                errors.append(f"index {'.'.join(key)} columns {_index_columns(indexdef)}, expected {wanted}")
     return errors
+
+
+def _index_columns(indexdef: str) -> list[str]:
+    match = re.search(r"USING \w+ \((.*?)\)(?:\s+(?:INCLUDE|WITH|WHERE|NULLS)\b|$)", indexdef)
+    if not match:
+        return []
+    columns = []
+    for part in match.group(1).split(","):
+        name = part.strip().split()[0] if part.strip() else ""
+        columns.append(name.strip('"').lower())
+    return columns
 
 
 def _archive_drizzle(repo: Path, base_ref: str, destination: Path) -> Path:
@@ -1249,6 +1273,145 @@ def _tail_snapshot(drizzle_dir: Path) -> dict[str, Any]:
     return _read_json(_snapshot_for_entry(drizzle_dir, entries[-1]))
 
 
+_IDENT = r'(?:"((?:[^"]|"")+)"|([A-Za-z_][\w$]*))'
+_MISSING_RELATION = re.compile(r'relation "(?:([^".]+)\.)?([^"]+)" does not exist')
+_CREATE_TABLE = re.compile(
+    r"CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _IDENT + r"(?:\s*\.\s*" + _IDENT + r")?",
+    re.I,
+)
+
+
+def _ident(quoted: str | None, bare: str | None) -> str:
+    # PostgreSQL identity: a quoted name keeps its case, a bare one folds to lower case.
+    return quoted.replace('""', '"') if quoted is not None else (bare or "").lower()
+
+
+def _created_tables(sql_path: Path) -> set[tuple[str, str]]:
+    try:
+        text = sql_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    tables = set()
+    for q1, b1, q2, b2 in _CREATE_TABLE.findall(text):
+        first = _ident(q1 or None, b1 or None)
+        if q2 or b2:
+            tables.add((first, _ident(q2 or None, b2 or None)))
+        else:
+            tables.add(("public", first))
+    return tables
+
+
+def _missing_relation(error: str) -> tuple[str, str] | None:
+    match = _MISSING_RELATION.search(error or "")
+    if not match:
+        return None
+    return (match.group(1) or "public", match.group(2))
+
+
+def _baseline_replay(server: dict[str, Any], base_dir: Path, integration_dir: Path) -> dict[str, Any]:
+    """Load main's prod schema baseline into a fresh database (as scripts/migrate.mjs provisions a
+    fresh one), then apply every integration journal entry newer than the baseline's watermark."""
+    schema = base_dir / "baseline/schema.sql"
+    meta_path = base_dir / "baseline/BASELINE.json"
+    if not schema.is_file() or not meta_path.is_file():
+        return {"available": False, "reason": "drizzle/baseline/schema.sql or BASELINE.json absent on base"}
+    watermark = _read_json(meta_path).get("journalTag")
+    entries = _read_json(integration_dir / "meta/_journal.json").get("entries", [])
+    tags = [entry["tag"] for entry in entries]
+    if watermark not in tags:
+        return {"available": False, "reason": f"baseline watermark {watermark!r} is not in the journal"}
+    _create_database(server, "land_batch_baseline")
+    loaded = _psql(server, "land_batch_baseline", "-q", "-v", "ON_ERROR_STOP=1", "-1", "-f", str(schema),
+                   timeout=300)
+    if loaded.returncode != 0:
+        return {"available": False,
+                "reason": "baseline schema did not load: "
+                + loaded.stderr.decode("utf-8", errors="replace").strip()[-500:]}
+    failures: dict[str, str] = {}
+    applied = []
+    for tag in tags[tags.index(watermark) + 1:]:
+        result = _psql(server, "land_batch_baseline", "-q", "-v", "ON_ERROR_STOP=1", "-1", "-f",
+                       str(integration_dir / f"{tag}.sql"), timeout=120)
+        if result.returncode == 0:
+            applied.append(tag)
+        else:
+            failures[tag] = result.stderr.decode("utf-8", errors="replace").strip()[-1000:]
+    return {"available": True, "watermark": watermark, "applied": applied, "failures": failures,
+            "actual": _database_objects(server, "land_batch_baseline")}
+
+
+def classify_inherited_failures(
+    base_dir: Path,
+    integration_dir: Path,
+    base_failures: list[dict[str, Any]],
+    new_failures: list[dict[str, Any]],
+    object_errors: list[str],
+    expected: dict[str, dict[Any, Any]],
+    baseline: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+    """Split new failures into (inherited, real) and object errors likewise (orchestrator, 23 Oct).
+
+    A candidate is a new migration whose from-empty error is a missing relation (schema + name, by
+    PostgreSQL identity) CREATEd by a migration main itself fails to replay (or by an inherited new
+    migration). It is INHERITED only when it applies cleanly in the baseline replay: on main's prod
+    schema baseline, with everything newer than the baseline applied in order. That replay runs
+    every statement the from-empty replay never reached, so a typo after the missing table still
+    fails. An expected-object error is excused only for a broken table whose object the baseline
+    replay does have. No baseline replay (PGlite fallback, absent or unloadable baseline) = no
+    inheritance: the failure stays real.
+    """
+    broken: dict[tuple[str, str], str] = {}
+    for failure in base_failures:
+        for table in _created_tables(base_dir / f"{failure['tag']}.sql"):
+            broken.setdefault(table, failure["tag"])
+    available = bool(baseline and baseline.get("available"))
+    inherited, real = [], []
+    for failure in new_failures:
+        relation = _missing_relation(failure.get("error") or "")
+        if not relation or relation not in broken:
+            real.append(failure)
+            continue
+        if not available:
+            real.append({**failure, "error": failure.get("error", "") + " | inherited candidate, unproven: "
+                         + ((baseline or {}).get("reason") or "no baseline replay on this backend")})
+            continue
+        baseline_error = baseline["failures"].get(failure["tag"])
+        if baseline_error is not None or failure["tag"] not in baseline["applied"]:
+            real.append({**failure, "error": "fails on the prod schema baseline too: "
+                         + (baseline_error or "not applied")})
+            continue
+        inherited.append({**failure, "classification": "INHERITED", "missing_relation": ".".join(relation),
+                          "created_by_base_failed": broken[relation],
+                          "proven_on_baseline": baseline["watermark"]})
+        for created in _created_tables(integration_dir / f"{failure['tag']}.sql"):
+            broken.setdefault(created, failure["tag"])
+    if available and inherited:
+        # Once anything is inherited, the baseline replay is the proof: every NEW migration must
+        # apply there (one that passed from empty can still fail on prod's schema).
+        base_tags = {entry["tag"] for entry in _read_json(base_dir / "meta/_journal.json").get("entries", [])}
+        seen = {f["tag"] for f in new_failures}
+        for tag, error in baseline["failures"].items():
+            if tag not in base_tags and tag not in seen:
+                real.append({"tag": tag, "error": "fails on the prod schema baseline: " + error})
+    # Objects by table identity: a broken table's expected objects are excused only when the
+    # baseline replay has no object error at all for that table; its baseline errors are real.
+    baseline_errors = _verify_expected_objects(expected, baseline["actual"]) if available else []
+    clean_on_baseline = {table for table in broken
+                         if available and not any(_error_table(e) == table for e in baseline_errors)}
+    inherited_objects, real_objects = [], []
+    for error in object_errors:
+        (inherited_objects if inherited and _error_table(error) in clean_on_baseline else real_objects).append(error)
+    if inherited:
+        # Inheritance rests on the baseline proof, so every expected object must check out there.
+        real_objects += [f"on the prod schema baseline: {e}" for e in baseline_errors if e not in real_objects]
+    return inherited, real, inherited_objects, real_objects
+
+
+def _error_table(error: str) -> tuple[str, str] | None:
+    match = re.match(r"^(?:missing \w+|column|index) ([^.\s]+)\.([^.\s]+)", error)
+    return (match.group(1), match.group(2)) if match else None
+
+
 def prove_migration_chain(repo: str | Path, base_ref: str) -> dict[str, Any]:
     """Replay base and integration chains in distinct databases created empty."""
     root = Path(repo).resolve()
@@ -1274,7 +1437,16 @@ def prove_migration_chain(repo: str | Path, base_ref: str) -> dict[str, Any]:
                 integration_result = _apply_chain(server, "land_batch_integration", integration_dir)
                 actual = _database_objects(server, "land_batch_integration")
                 backend = "native-postgresql"
+                base_tags = {failure["tag"] for failure in base_result["failures"]}
+                baseline = None
+                if any(f["tag"] not in base_tags for f in integration_result["failures"]):
+                    try:
+                        baseline = _baseline_replay(server, base_dir, integration_dir)
+                    except MigrationBatchError as baseline_error:
+                        # Never falls back to the from-empty-only backend: no replay = no inheritance.
+                        baseline = {"available": False, "reason": f"baseline replay failed: {baseline_error}"}
         except MigrationBatchError as native_error:
+            baseline = None
             fallback = _prove_with_pglite(base_dir, integration_dir, temporary_path)
             base_result = fallback["base"]
             integration_result = fallback["integration"]
@@ -1282,13 +1454,16 @@ def prove_migration_chain(repo: str | Path, base_ref: str) -> dict[str, Any]:
             backend = fallback["backend"]
             native_backend_error = str(native_error)
         object_errors = _verify_expected_objects(expected, actual)
-
-    base_failures = {failure["tag"] for failure in base_result["failures"]}
-    new_failures = [
-        failure
-        for failure in integration_result["failures"]
-        if failure["tag"] not in base_failures
-    ]
+        base_failures = {failure["tag"] for failure in base_result["failures"]}
+        all_new_failures = [
+            failure
+            for failure in integration_result["failures"]
+            if failure["tag"] not in base_failures
+        ]
+        inherited, new_failures, inherited_objects, object_errors = classify_inherited_failures(
+            base_dir, integration_dir, base_result["failures"], all_new_failures, object_errors,
+            expected, baseline,
+        )
     if new_failures or object_errors:
         detail = []
         if new_failures:
@@ -1310,6 +1485,10 @@ def prove_migration_chain(repo: str | Path, base_ref: str) -> dict[str, Any]:
             "failures": integration_result["failures"],
         },
         "new_failure_count": 0,
+        # Replayed from empty these cannot run: the table they need is created by a migration
+        # main itself fails to replay. Inherited, not proven; prod has the table.
+        "inherited_failures": inherited,
+        "inherited_object_errors": inherited_objects,
         "expected_objects": {kind: len(values) for kind, values in expected.items()},
         "object_errors": [],
     }

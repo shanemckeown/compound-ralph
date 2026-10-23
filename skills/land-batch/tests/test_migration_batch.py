@@ -474,3 +474,170 @@ def test_single_branch_reusing_a_base_number_is_a_collision(tmp_path):
         "BASE:main",
         "goal/reuses-base-number",
     ]
+
+
+def _make_broken_base_repo(tmp_path, new_sql, baseline=True):
+    """Base chain whose 0001 CREATEs social_accounts but fails from empty (as main's 0056 does), then
+    one new migration 0003 on top (orchestrator, 23 Oct: q41ar 0368 held on inherited breakage)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run(["git", "init", "-b", "main"], cwd=repo)
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    drizzle = repo / "drizzle"
+    meta = drizzle / "meta"
+    meta.mkdir(parents=True)
+    sqls = {
+        "0000_base": "SELECT 1;\n",
+        "0001_optimal_paladin": "CREATE TABLE social_accounts (id integer NOT NULL);\nSELECT no_such_fn();\n",
+        "0002_base": "SELECT 1;\n",
+    }
+    entries = []
+    for index, (tag, sql) in enumerate(sqls.items()):
+        entries.append({"idx": index, "version": "7", "when": 1_700_000_000_000 + index, "tag": tag,
+                        "breakpoints": True})
+        (drizzle / f"{tag}.sql").write_text(sql, encoding="utf-8")
+    table = _table("social_accounts")
+    table["checkConstraints"] = {}
+    _write_json(meta / "_journal.json", {"version": "7", "dialect": "pg", "entries": entries})
+    _write_json(meta / "0002_base_snapshot.json",
+                _snapshot("base-0002", "base-0001", {"public.social_accounts": table}))
+    if baseline:
+        (drizzle / "baseline").mkdir()
+        (drizzle / "baseline/schema.sql").write_text(
+            "CREATE TABLE public.social_accounts (id integer NOT NULL);\n", encoding="utf-8")
+        _write_json(drizzle / "baseline/BASELINE.json", {"journalTag": "0002_base"})
+    _git(repo, "add", "drizzle")
+    _git(repo, "commit", "-m", "base chain with a from-empty failure")
+    new_table = json.loads(json.dumps(table))
+    new_table["indexes"] = {"social_accounts_id_unique": {
+        "name": "social_accounts_id_unique", "columns": [{"expression": "id", "isExpression": False,
+                                                          "asc": True, "nulls": "last"}],
+        "isUnique": True, "concurrently": False, "method": "btree", "with": {}}}
+    entries.append({"idx": 3, "version": "7", "when": 1_800_000_000_000, "tag": "0003_whatsapp_active_number_unique",
+                    "breakpoints": True})
+    (drizzle / "0003_whatsapp_active_number_unique.sql").write_text(new_sql, encoding="utf-8")
+    _write_json(meta / "_journal.json", {"version": "7", "dialect": "pg", "entries": entries})
+    _write_json(meta / "0003_whatsapp_active_number_unique_snapshot.json",
+                _snapshot("new-0003", "base-0002", {"public.social_accounts": new_table}))
+    return repo
+
+
+def test_new_migration_on_a_table_main_fails_to_create_is_inherited(tmp_path):
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id);\n")
+
+    proof = migration_batch.prove_migration_chain(repo, "main")
+
+    assert proof["valid"] is True
+    assert proof["new_failure_count"] == 0
+    [inherited] = proof["inherited_failures"]
+    assert inherited["tag"] == "0003_whatsapp_active_number_unique"
+    assert inherited["classification"] == "INHERITED"
+    assert inherited["missing_relation"] == "public.social_accounts"
+    assert inherited["created_by_base_failed"] == "0001_optimal_paladin"
+    assert inherited["proven_on_baseline"] == "0002_base"
+    assert proof["inherited_object_errors"]
+
+
+def test_missing_relation_nobody_creates_is_still_a_new_failure(tmp_path):
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX ghost_id_unique ON ghost_accounts (id);\n")
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="new migration failures: 0003_"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_own_sql_error_in_a_new_migration_is_still_a_new_failure(tmp_path):
+    repo = _make_broken_base_repo(tmp_path, "CREATE UNIQUE INDEX broken ON (id;\n")
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="new migration failures: 0003_"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+@pytest.mark.parametrize("new_sql", [
+    "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (typo_column);\n",
+    "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id);\nSELECT no_such_new_function();\n",
+    "CREATE UNIQUE INDEX social_accounts_id_unique ON audit.social_accounts (id);\n",
+    'CREATE UNIQUE INDEX social_accounts_id_unique ON "SOCIAL_ACCOUNTS" (id);\n',
+])
+def test_inherited_candidate_with_its_own_defect_still_fails(tmp_path, new_sql):
+    """Astra r22: the from-empty replay stops at the missing table, so the baseline replay must
+    prove every later statement (and the target's real identity) before it counts as inherited."""
+    repo = _make_broken_base_repo(tmp_path, new_sql)
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="new migration failures: 0003_"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_without_a_baseline_an_inherited_candidate_stays_unproven(tmp_path):
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id);\n", baseline=False)
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="new migration failures: 0003_"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_new_migration_failing_only_on_the_baseline_is_a_failure(tmp_path):
+    """Astra r23: 0004 passes from empty (it creates the table) but cannot apply on prod's schema."""
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id);\n")
+    drizzle = repo / "drizzle"
+    journal = json.loads((drizzle / "meta/_journal.json").read_text())
+    journal["entries"].append({"idx": 4, "version": "7", "when": 1_800_000_000_001,
+                               "tag": "0004_recreate", "breakpoints": True})
+    _write_json(drizzle / "meta/_journal.json", journal)
+    (drizzle / "0004_recreate.sql").write_text("CREATE TABLE public.social_accounts (id integer NOT NULL);\n",
+                                                encoding="utf-8")
+    shutil.copy(drizzle / "meta/0003_whatsapp_active_number_unique_snapshot.json",
+                drizzle / "meta/0004_recreate_snapshot.json")
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="0004_recreate"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_baseline_object_defect_on_an_inherited_table_is_a_failure(tmp_path):
+    """Astra r23: from empty says 'missing column', the baseline says 'nullable=YES, expected NO'."""
+    repo = _make_broken_base_repo(tmp_path, "ALTER TABLE social_accounts ADD COLUMN phone text;\n")
+    snap_path = repo / "drizzle/meta/0003_whatsapp_active_number_unique_snapshot.json"
+    snap = json.loads(snap_path.read_text())
+    table = snap["tables"]["public.social_accounts"]
+    table["indexes"] = {}
+    table["columns"]["phone"] = {"name": "phone", "type": "text", "primaryKey": False, "notNull": True}
+    _write_json(snap_path, snap)
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="nullable"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_baseline_object_defect_on_another_table_is_a_failure(tmp_path):
+    """Astra r24: with something inherited, a baseline object error on any table holds the proof."""
+    repo = _make_broken_base_repo(
+        tmp_path, "CREATE UNIQUE INDEX social_accounts_id_unique ON social_accounts (id);\n"
+                  "CREATE TABLE IF NOT EXISTS public.clients (id integer, phone text);\n")
+    schema = repo / "drizzle/baseline/schema.sql"
+    snap_path = repo / "drizzle/meta/0003_whatsapp_active_number_unique_snapshot.json"
+    snap = json.loads(snap_path.read_text())
+    clients = _table("clients")
+    clients["checkConstraints"] = {}
+    clients["columns"]["phone"] = {"name": "phone", "type": "text", "primaryKey": False, "notNull": True}
+    snap["tables"]["public.clients"] = clients
+    _write_json(snap_path, snap)
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="on the prod schema baseline"):
+        migration_batch.prove_migration_chain(repo, "main")
+    assert schema.is_file()
+
+
+def test_inherited_index_must_enforce_what_the_snapshot_says(tmp_path):
+    """Astra r25: a non-unique index where the snapshot requires isUnique is a defect, not inherited."""
+    repo = _make_broken_base_repo(tmp_path, "CREATE INDEX social_accounts_id_unique ON social_accounts (id);\n")
+
+    with pytest.raises(migration_batch.MigrationBatchError, match="unique=False"):
+        migration_batch.prove_migration_chain(repo, "main")
+
+
+def test_index_columns_parse():
+    assert migration_batch._index_columns(
+        'CREATE UNIQUE INDEX x ON public.t USING btree (business_id, "Phone" DESC) WHERE (active)') == [
+        "business_id", "phone"]

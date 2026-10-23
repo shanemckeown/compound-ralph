@@ -695,7 +695,18 @@ On exit 0 it writes, and you use **only** these:
   (not demonstrated, or out of scope under the lock). They don't add a round, and the push goes
   ahead. But non-empty means **the branch must not land** until the orchestrator clears each one:
   report `needs input: <BEAD_ID> escalated <n> protected item(s): <path>` in Phase 7, and put the
-  same line in a `bd comment`.
+  same line in a `bd comment`. The orchestrator clears a **pre-existing** one (follow-up bead filed)
+  with a bead comment whose first line is `ORCHESTRATOR CLEARED <finding-id> (<follow-up bead>)`;
+  the checker then honours `--bead <BEAD_ID> --cleared-escalation <finding-id>` and prints
+  `CLEARED=n`. A finding the branch caused can't be cleared, only fixed.
+- **Recording the PASS (lead / orchestrator, after the independent review):** when the lead
+  reads the `Ops/reviews` file, record its digest: `md5 -q <file> >> <out-dir>/review-file.md5`
+  (the gate refuses without it, and refuses a file that changed since). Then run
+  `~/.claude/scripts/review-gate.sh <BEAD_ID> <full tip> --lead … --verdict <Ops/reviews file> …
+  --out-dir … --round N [--cleared-escalation F1]`. It runs this checker on the untouched reviewer
+  files and, only on BLOCKING=0 ESCALATE=0, writes the `Ops/reviews` gate file and the
+  `PASS @<tip>` comment the lander requires. Never hand-write either; a builder never runs it on
+  its own-gate verdicts (it refuses any verdict outside `Ops/reviews`).
 - `lead-followups-round-N.txt`: file each as a bead (`bd create … --deps discovered-from:$BEAD_ID`,
   label `qa-followup`). Don't fix them on this branch.
 - `lead-dismissals-round-N.md`: the audit trail. Copy it into the round notes. When a dismissal is

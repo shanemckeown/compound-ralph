@@ -121,6 +121,7 @@ def beads_dir_for(bead_id: str, env=None) -> str:
 def _bead_comments(bead_id: str) -> str:
     if os.environ.get("LAND_SKIP_BEAD_COMMENTS"):
         return ""
+    # Offline fixtures (tests): <dir>/<bead_id>.txt holds that bead's ``bd comments`` output.
     env = dict(os.environ)
     env["BEADS_DIR"] = beads_dir_for(bead_id)
     try:
@@ -295,3 +296,143 @@ def review_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None):
     if state == "cleared":
         return False, "review lead BLOCKING=0 but escalations not cleared (no PASS @tip after it): " + evidence
     return False, "no recorded review PASS for this tip"
+
+
+# The lander contract (LUCY-qymwm, 22 Oct): the comment's FIRST line is exactly "PASS @<sha>".
+_EXACT_PASS_LINE_RE = re.compile(r"^PASS @(?P<sha>[0-9a-f]{7,40})$")
+# What review-gate.sh (references/review-lead/review_gate.py) writes into its Ops/reviews record.
+GATE_SIGNATURE = "- Checker: review_lead_check.py via review-gate.sh:"
+_REVIEWING_RE = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
+# A veto token, deliberately broad: over-holding costs one fresh gate run, under-holding lands
+# unreviewed code. Upper-case words only, so prose like "failed" or "void" doesn't trip it.
+_VETO_RE = re.compile(r"\b(FAIL|FAILED|VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\b|\bBLOCKING=[1-9]")
+
+
+def is_gate_record(path, body: str) -> bool:
+    """review-gate.sh's own record, by structure: its file name, its REVIEWING first line, and
+    the signature as a line of its own. Quoting the signature inside a review does not make one."""
+    lines = body.splitlines()
+    return bool(re.match(r"^REVIEW_.+_gate_[0-9a-f]{10}_\d{8}T\d{6}Z\.md$", Path(path).name)
+                and lines and _REVIEWING_RE.match(lines[0])
+                and any(ln.startswith(GATE_SIGNATURE) for ln in lines))
+
+
+def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
+    """[(mtime, path)] of Ops/reviews files for this bead that name the tip with a veto token,
+    other than valid gate records and ``exclude``. Shared with review_gate.py."""
+    out = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    excluded = {str(Path(e).resolve()) for e in exclude}
+    for path in sorted(root.glob("REVIEW_*.md")):
+        if str(path.resolve()) in excluded:
+            continue
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if not mentions_bead(body, bead_id) or not _names_tip(body, tip_sha):
+            continue
+        if is_gate_record(path, body) and not _VETO_RE.search(body):
+            continue
+        if _VETO_RE.search(body):
+            out.append((mtime, str(path)))
+    return out
+
+
+def mentions_bead(body: str, bead_id: str) -> bool:
+    """The bead's full id, or its short suffix as a whole token (``goal/aestheticcnext-q41ar``,
+    ``q41ar``). One rule for the gate's input check and both lander veto scans."""
+    suffix = bead_id.split("-", 1)[-1]
+    return any(re.search(rf"(?<![A-Za-z0-9]){re.escape(t)}(?![A-Za-z0-9]|\.\d)", body, re.I)
+               for t in (bead_id, suffix))
+
+
+def comment_vetoes(comments_text, tip_sha):
+    """[(utc epoch of the comment's minute, first line, body)] of bead comments that veto this tip:
+    they name it and carry a veto token, and are not a clean exact ``PASS @<tip>`` line."""
+    tip_sha = tip_sha.lower()
+    out = []
+    for ts, body in _parse_comments(comments_text):
+        if ts is None:
+            continue
+        key = datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
+        first = (body.strip().splitlines() or [""])[0].strip()
+        if _names_tip(body, tip_sha) and _VETO_RE.search(body):
+            out.append((key, first, body))
+    return out
+
+
+def _names_tip(text: str, tip_sha: str) -> bool:
+    return any(len(sha) >= 7 and tip_sha.startswith(sha) for sha in _SHA_RE.findall(text.lower()))
+
+
+def independent_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None):
+    """Return (passed, evidence): may discovery mark this tip auto_land?
+
+    Approval comes from review-gate.sh's records only, never from prose (ul5ts @4be6c71efe,
+    22 Oct: a builder's own-gate note read as a review PASS). For this exact tip:
+      1. approval = a bead comment whose first line is exactly ``PASS @<tip>`` (full sha or a
+         7+ prefix) and with no veto token anywhere in it, AND an Ops/reviews/REVIEW_*.md that
+         carries the review-gate signature, names the bead, has ``Verdict: PASS``, and whose
+         every ``REVIEWING: <branch> @ <sha>`` echo is this tip;
+      2. veto = any other bead comment, or any non-gate Ops/reviews file naming the bead, that
+         names the tip and carries an upper-case FAIL / VOID / REVOKED / WITHDRAWN / RETRACTED
+         or BLOCKING>=1, in any format;
+      3. both halves of the approval must be later than every veto. Comment times are UTC
+         minutes: a comment beats a file only if its minute starts after the file's mtime; a
+         file beats a comment only if written after that comment's whole minute.
+    """
+    if not bead_id or not tip_sha:
+        return False, "no bead or tip to match"
+    tip_sha = tip_sha.lower()
+    vetoes, passes = [], []   # vetoes: (kind, time, seq, evidence); passes: (minute, seq, line)
+    comments = _bead_comments(bead_id) if comments_text is None else comments_text
+    for seq, (ts, body) in enumerate(_parse_comments(comments)):
+        key = (float("inf") if ts is None else
+               datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp())
+        lines = body.strip().splitlines()
+        first = lines[0].strip() if lines else ""
+        exact = _EXACT_PASS_LINE_RE.match(first)
+        if exact and tip_sha.startswith(exact.group("sha")) and not _VETO_RE.search(body):
+            passes.append((key, seq, first))
+        elif _names_tip(body, tip_sha) and _VETO_RE.search(body):
+            vetoes.append(("comment", key, seq, f"bead comment: {first[:120]}"))
+    root = Path(reviews_dir or DEFAULT_REVIEWS_DIR)
+    file_passes = []
+    if root.is_dir():
+        for path in sorted(root.glob("REVIEW_*.md")):
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if not mentions_bead(body, bead_id):
+                continue
+            echoes = [m.group(1).lower() for m in _REVIEWING_RE.finditer(body)]
+            if (is_gate_record(path, body) and echoes and all(tip_sha.startswith(e) for e in echoes)
+                    and re.search(r"(?m)^Verdict: PASS$", body) and not _VETO_RE.search(body)):
+                file_passes.append((mtime, str(path)))
+            elif _names_tip(body, tip_sha) and _VETO_RE.search(body):
+                vetoes.append(("file", mtime, 0, str(path)))
+
+    def comment_after(c, veto):
+        kind, t, seq, _ = veto
+        return (c[0], c[1]) > (t, seq) if kind == "comment" else c[0] > t
+
+    def file_after(mtime, veto):
+        kind, t, _, _ = veto
+        return mtime >= t + 60 if kind == "comment" else mtime > t
+
+    if not passes:
+        return False, "no bead comment whose first line is exactly PASS @<tip>"
+    if not file_passes:
+        return False, f"no review-gate record (Ops/reviews, Verdict: PASS) for this tip ({passes[-1][2]} alone)"
+    good_comments = [c for c in passes if all(comment_after(c, v) for v in vetoes)]
+    good_files = [f for f in file_passes if all(file_after(f[0], v) for v in vetoes)]
+    if not good_comments or not good_files:
+        last = max(vetoes, key=lambda v: (v[1], v[2]))
+        return False, "FAIL/VOID recorded after the last review-gate PASS for this tip: " + last[3]
+    return True, f"{good_comments[-1][2]} + {good_files[-1][1]}"

@@ -72,8 +72,11 @@ reversal.
    hand-merge JSON or take the incoming baseline as the regeneration input.
 6. **LAND never asks Shane whether to land (2026-10-03).** No AskUserQuestion in
    LAND: merging to main makes nothing live. A branch with a recorded independent
-   review PASS for its exact tip (Ops/reviews or a bead comment) lands automatically,
-   INCLUDING sensitive paths (money, tenancy, consent, auth); it gets a one-line
+   review PASS for its exact tip lands automatically. **Every branch needs one, sensitive
+   or not (LUCY-qymwm, 23 Oct):** a bead comment whose FIRST line is exactly
+   `PASS @<tip>` AND an `Ops/reviews/REVIEW_*.md` with `Verdict: PASS` for that tip
+   (`independent_pass_for`; `~/.claude/scripts/review-gate.sh` writes both). Own-gate
+   prose never counts; an unreviewed `auto/*` branch stays held. This includes sensitive paths (money, tenancy, consent, auth); it gets a one-line
    "auto-landed sensitive paths" entry in the landing report. Stops that remain, each
    a report entry and never a question: red gate (tsc, lint, jest, pg lane, ratchet),
    no recorded review PASS (or a FAIL) for the tip, authored conflict, dependency on a
@@ -81,8 +84,8 @@ reversal.
    traffic. The prod gate (guardrail 4) is unchanged.
 7. **Worktree finish gate preserved; branch-only completion quarantined.** A
    worktree source still requires effectively_clean, ahead >=1, non-active
-   session, premise OK, non-conflicting, sensitive only with a recorded review PASS (except the generated
-   baseline), and non-retired.
+   session, premise OK, non-conflicting, a recorded independent review PASS (except the generated
+   baseline), and non-retired (retired.txt, or the bead closed `SUPERSEDED`).
    A remote-only source is discoverable but never auto-landable in this release,
    even when exact bead CLOSED + pinned patch-unique tip proves it finished.
    Optional .claude/land-ready.json remains confidence metadata; tail vetoes

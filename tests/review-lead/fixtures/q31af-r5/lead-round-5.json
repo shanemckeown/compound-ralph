@@ -1,0 +1,37 @@
+{
+ "bead": "AestheticcNext-q31af",
+ "round": 5,
+ "scope_lock": false,
+ "premise": {
+  "premise": "Credentials work only while their holder is a live owner/admin of that clinic; removal and revoke are atomic",
+  "rounds_failed_on_it": 0,
+  "action": "none: holds; no P1/P2 in r5"
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "reviewer": "astra-xhigh",
+   "source_line": "P3 VERSION:1 \u2014 Check 8 is false historically: `d3a39e29c6` changed VERSION/CHANGELOG; `68cec8d0fc`, `ddff3f6784`, `a9438b45e6` and `5044d693d8` changed the baseline. Final bytes equal main, so there is no current content regression \u2014 amend the criterion to \u201cno net changes,\u201d or exclude those historical edits from the landing commit.",
+   "verdict": "noted",
+   "category": "style",
+   "clinic_scenario": "none: process/history note about intermediate commits; no clinic user affected",
+   "ordinary_use": "none: no runtime behaviour; final bytes of VERSION/CHANGELOG/baseline equal main",
+   "carve_out": false,
+   "pre_existing": false,
+   "reason": "P3, not user-facing. Net diff vs main touches none of VERSION, CHANGELOG or baseline; Astra itself confirms final bytes equal main. Lander regenerates those files and squashes/lands the net diff; criterion read as 'no net changes'."
+  },
+  {
+   "id": "F2",
+   "reviewer": "sonnet",
+   "source_line": "P3 pages/api/team/members/[memberId].ts:95 \u2014 an owner removing an admin leaves no activity-log line saying their API keys/app tokens were revoked (only the generic Logger.info in revokeMemberV1Credentials); not user-facing, minor audit gap \u2014 optional: include revoked counts in the team_member_removed activity text.",
+   "verdict": "noted",
+   "category": "other",
+   "clinic_scenario": "none: owner removing an admin; revocation itself works and is tested, only an extra audit-log wording is missing",
+   "ordinary_use": "none: not user-facing; revocation happens correctly, the generic Logger.info already records it",
+   "carve_out": false,
+   "pre_existing": false,
+   "reason": "P3 not user-facing audit-text nicety; revoke behaviour is verified and tested. Optional improvement only."
+  }
+ ],
+ "act_on_over_cap_reason": null
+}

@@ -66,6 +66,7 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
 
 ## Calibration
 
+- **Fixed in a later round** (orchestrator, 23 Oct). A finding from an earlier round's review (pass that file as a `--verdict` too) is graded `fixed` only when a later independent review of a later commit confirms it in its VERIFIED OK section with the exact line `- r<N> <sev> <file:line> closed: <how checked>` and does not raise it again. The checker verifies this; you never confirm a fix yourself. No clearance is needed for a confirmed fix.
 - **More than 5 blocking Act on items means you're not filtering hard enough.** Filter harder, or give `act_on_over_cap_reason`.
 - The Dismissed list isn't busywork. It's the trust mechanism that lets the orchestrator or Shane overrule you.
 - When a dismissal is a new, reusable shape, append a `candidate` pattern to DISMISSAL_PATTERNS.md (format in that file). Never add one whose "Skip when" covers a never-dismiss area.
@@ -83,7 +84,8 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
       "id": "F1",
       "reviewer": "astra-xhigh",
       "source_line": "<the reviewer's finding line, verbatim>",
-      "verdict": "act_on | consider | noted | dismissed",
+      "verdict": "act_on | consider | noted | dismissed | fixed",
+      "fixed_by": "fixed only: path of the LATER independent review (another commit) whose VERIFIED OK says '- r<N> <sev> <file:line> closed: ...'",
       "category": "one of the categories above",
       "clinic_scenario": "who, which device, what moment (act_on: required; others: the scenario or 'none: <why>')",
       "ordinary_use": "one person, normal use, one or two ordinary actions that trigger it, or 'none: <why>'",
@@ -96,8 +98,9 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
       "reason": "required for consider / noted / dismissed"
     }
   ],
+  "verified_notes": [{"line": "each reviewer VERIFIED OK note the checker names (a note discussing a listed finding)", "reason": "what you checked; the note is not a new finding"}],
   "act_on_over_cap_reason": null
 }
 ```
 
-Include **every** finding line from **every** verdict file for this round (reviewers and mutants), one entry each, with `source_line` copied verbatim. The checker refuses a missing or invented one. `premise` is required from round 2 on.
+Give every finding an `id` (F1, F2, …): the orchestrator clears a pre-existing escalation by that id plus its follow-up bead (`ORCHESTRATOR CLEARED F1 (AestheticcNext-xxxxx)`), and the checker honours it with `--cleared-escalation F1`. Include **every** finding line from **every** verdict file for this round (reviewers and mutants), one entry each, with `source_line` copied verbatim. The checker refuses a missing or invented one. `premise` is required from round 2 on.

@@ -1,0 +1,24 @@
+{
+ "bead": "AestheticcNext-q41ar",
+ "scope_lock": false,
+ "premise": {
+  "premise": "Each erasure round adds a guard and each review finds the next millisecond interleaving between erasure and inbound webhooks",
+  "rounds_failed_on_it": "r6, r9, r10",
+  "action": "Stop per-round race fixes (orchestrator, non-converging pattern); erasure-vs-inbound serialisation becomes one follow-up bead designed as a whole"
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "source_line": "P2 lib/concierge/erase-client-meta-concierge.ts:138 \u2014 the erased person sends a new Instagram DM at the same moment their own GDPR or API erasure commits; the webhook has already refreshed the window row (lib/agent-core/gateways/instagram.ts:342), the erasure transaction deletes that freshly refreshed row, then the webhook's window check (instagram.ts:367) returns false and the reply and thread creation are skipped while the webhook still returns 200; stillUsed cannot protect a thread not created yet \u2014 serialise erasure with inbound window/thread processing per business and sender (or re-check after the window read) and add a deterministic pg interleaving test (COM-02, DR-01; Astra)",
+   "verdict": "act_on",
+   "category": "timing_window",
+   "pre_existing": true,
+   "ordinary_use": "none: needs the erased person's own DM to land inside the milliseconds their own erasure transaction commits",
+   "carve_out": true,
+   "clinic_scenario": "A client asks Kelly at Omorphia to erase their data and DMs the clinic on Instagram at the exact moment Kelly's erasure commits; that one DM gets no auto-reply",
+   "demonstrated": "traced by Astra: erase-client-meta-concierge.ts:138 vs instagram.ts:342/:367; same class as the pre-existing thread-delete and admin-delete races on main",
+   "follow_up": "AestheticcNext-e1xgj: Instagram webhook vs client erasure race: an erased person's DM arriving during their own erasure gets no auto-reply",
+   "reason": "Pre-existing race class (thread delete, admin delete) not introduced as a new path; fails clinic reality; orchestrator stopped rounds as non-converging"
+  }
+ ]
+}

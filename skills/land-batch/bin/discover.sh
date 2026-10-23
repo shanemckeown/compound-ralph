@@ -31,8 +31,7 @@ sys.path.insert(0, os.environ["LAND_BATCH_LIB_DIR"])
 from land_batch_safety import (  # noqa: E402
     SENSITIVE_PREFIXES,
     sensitive_paths as configured_sensitive_paths,
-    review_pass_for,
-    REQUIRE_REVIEW_PASS_FOR_ALL,
+    independent_pass_for,
     validate_sensitive_prefixes,
 )
 from migration_batch import scan_candidate_migrations  # noqa: E402
@@ -225,6 +224,7 @@ def load_beads(repo):
                     beads[bead_id.casefold()] = {
                         "id": bead_id,
                         "status": record.get("status"),
+                        "close_reason": record.get("close_reason"),
                         "source": str(path),
                     }
         except OSError as exc:
@@ -336,12 +336,14 @@ def resolve_bead(branch, worktree_path, alias_index):
                 "bead_resolution": resolution,
                 "bead_candidates": [bead_id],
                 "bead_status": record.get("status"),
+                "bead_close_reason": record.get("close_reason"),
             }
         return {
             "bead_id": None,
             "bead_resolution": "ambiguous",
             "bead_candidates": sorted(item[0] for item in best),
             "bead_status": None,
+            "bead_close_reason": None,
         }
 
     # Preserve the existing syntactic bead_id enrichment when the bead stores
@@ -356,12 +358,14 @@ def resolve_bead(branch, worktree_path, alias_index):
                 "bead_resolution": "none",
                 "bead_candidates": [],
                 "bead_status": None,
+                "bead_close_reason": None,
             }
     return {
         "bead_id": None,
         "bead_resolution": "none",
         "bead_candidates": [],
         "bead_status": None,
+        "bead_close_reason": None,
     }
 
 
@@ -1098,8 +1102,14 @@ def main():
             pattern in branch or (bead_id is not None and pattern in bead_id)
             for pattern in retired_patterns
         )
+        # A bead closed SUPERSEDED is dead work: its branch never resurfaces (frq8j, q29ok).
+        retired_by_superseded = bool(
+            bead["bead_resolution"] in ("exact", "alias")
+            and str(bead["bead_status"] or "").casefold() == "closed"
+            and str(bead.get("bead_close_reason") or "").strip().upper().startswith("SUPERSEDED")
+        )
         stale = bool(age_days is not None and age_days > 45)
-        retired = bool(retired_by_pattern)
+        retired = bool(retired_by_pattern or retired_by_superseded)
         patch_unique_count = None
         patch_equivalent_count = None
         conflicts_with_base = False
@@ -1113,7 +1123,7 @@ def main():
         review_pass = None
         review_evidence = None
 
-        if retired_by_pattern:
+        if retired:
             recommendation = "skip-retired"
         elif ahead == 0:
             recommendation = "skip-merged"
@@ -1140,10 +1150,10 @@ def main():
                     hold_reasons.append("held-conflict")
                 if stale:
                     hold_reasons.append("held-stale")
-                review_ok = None
-                if touches_sensitive or REQUIRE_REVIEW_PASS_FOR_ALL:
-                    review_ok, review_evidence = review_pass_for(bead_id, tip_sha)
-                    review_pass = review_ok
+                # Every branch, sensitive or not, needs a real independent PASS for this
+                # exact tip (LUCY-qymwm): an unreviewed auto/* branch stays held.
+                review_ok, review_evidence = independent_pass_for(bead_id, tip_sha)
+                review_pass = review_ok
                 if review_ok is False:
                     hold_reasons.append("held-no-review-pass")
                 if stale:
@@ -1154,10 +1164,10 @@ def main():
                     recommendation = "held-no-review-pass"
                 else:
                     recommendation = "land"
-                    if touches_sensitive:
-                        report_notes.append(
-                            "auto-landed sensitive paths on recorded independent review PASS: "
-                            + review_evidence)
+                    report_notes.append(
+                        ("auto-landed sensitive paths on recorded independent review PASS: "
+                         if touches_sensitive else "recorded independent review PASS: ")
+                        + review_evidence)
 
         if worktree_path is not None:
             try:
@@ -1270,6 +1280,7 @@ def main():
                 "held_labels": held_labels,
                 "retired": retired,
                 "retired_by_pattern": retired_by_pattern,
+                "retired_by_superseded": retired_by_superseded,
                 "stale": stale,
                 "recommendation": recommendation,
                 "has_marker": has_marker,
