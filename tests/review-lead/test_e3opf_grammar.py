@@ -325,8 +325,8 @@ class OwnGateRound1(unittest.TestCase):
                 parse_text(self.file(f"- **P1** {loc} — strips the fixture so the prod build dies — fix"))
 
     def test_words_with_slashes_or_dots_are_not_paths(self):
-        for prose in ("P2 and/or P3 items are in VERIFIED OK", "No H-P0/P1 hazards apply",
-                      "P3 nit: the dev server on localhost:3000 logs a warning", "Earlier P3 grading retained."):
+        for prose in ("No P2 and/or P3 items remain", "No H-P0/P1 hazards apply",
+                      "Seen on localhost:3000 during the P3 check", "Earlier P3 grading retained."):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
 
     def test_backticked_bare_severity_is_a_claim(self):
@@ -367,7 +367,7 @@ class OwnGateRound2(unittest.TestCase):
     file, run_fixed = OwnGateRound1.file, OwnGateRound1.run_fixed
 
     def refuses(self, prose, findings=(), prior=None):
-        with self.assertRaises(ValueError, msg=prose):
+        with self.assertRaisesRegex(ValueError, "prose finding not in the review-verdict block", msg=prose):
             parse_text(self.file(prose, findings, prior))
 
     def test_line_is_captured_for_every_path_form(self):
@@ -394,7 +394,7 @@ class OwnGateRound2(unittest.TestCase):
             self.assertEqual(len(parse_text(self.file(prose, [("P1", loc, "leak — fix")]))), 1, prose)
 
     def test_slashed_words_are_still_not_paths(self):
-        for prose in ("P2 and/or P3 items are in VERIFIED OK", "P1/P2 counts: none", "P3: Opus/Astra agree"):
+        for prose in ("No P2 and/or P3 items remain", "Counts by P1/P2: none", "Both Opus/Astra agree on P3"):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
 
     def test_bare_bracketed_severity_in_a_code_span_is_a_claim(self):
@@ -431,6 +431,42 @@ class OwnGateRound2(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("ESCALATE=0", out)
         self.assertIn("FIXED=1", out)
+
+
+
+class OwnGateRound3(unittest.TestCase):
+    """Own-gate round 3 (Opus h2h on 629785e; the Astra seat timed out)."""
+    file, run_fixed = OwnGateRound1.file, OwnGateRound1.run_fixed
+    NIT = [("P3", "lib/label.ts:4", "label typo — fix")]
+
+    def test_finding_with_its_location_on_the_next_line_is_not_dropped(self):
+        for prose in ("**P1 — Retry charges the card twice**\nThe retry in lib/pay.ts:37 resends with no key.",
+                      "### P1: Retry charges the card twice\nFile: lib/pay.ts:37",
+                      "1. **P1** Retry charges twice\n   - Location: `lib/pay.ts:37`",
+                      "Finding (P1): Retry charges twice\n  lib/pay.ts:37 — no idempotency key",
+                      "- P1 — another clinic's client notes are readable via the booking endpoint"):
+            with self.assertRaisesRegex(ValueError, "start with P1 but name no file", msg=prose):
+                parse_text(self.file(prose, self.NIT))
+
+    def test_unlocated_line_is_fine_when_the_block_holds_the_finding(self):
+        found = parse_text(self.file("### P1: Retry charges the card twice\nFile: lib/pay.ts:37",
+                                     [("P1", "lib/pay.ts:37", "retry charges twice — key it")]))
+        self.assertEqual(len(found), 1)
+
+    def test_status_qualifier_ignores_the_path(self):
+        src = "P2 lib/sms/unsubscribe.ts:37 — retry sends twice — guard"
+        r1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{src}\nVERIFIED OK\n- tests\n"
+        ref = "r1 P2 lib/sms/unsubscribe.ts:37"
+        r2 = self.file(f"- {ref} closed: red test green at this tip", prior=[(ref, "closed")])
+        code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"),
+                              [("REVIEW_x_astra_a.md", r1, 1000), ("REVIEW_x_astra_r2_b.md", r2, 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
+        opus = self.file("- r1 P2 lib/pay.ts:37 not yet fully fixed: the iPad path still charges twice", prior=[])
+        code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                   ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
 
 
 if __name__ == "__main__":

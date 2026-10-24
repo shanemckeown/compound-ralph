@@ -30,7 +30,8 @@ The review-verdict grammar (LUCY-e3opf, attempt 3), each refused:
   - G3: a prior ref matching no round-N finding. One matching two distinct findings escalates;
   - G4: when anything is graded fixed or carries a prior, an input file without one REVIEWING echo;
   - G5: a prose severity + path that matches no block finding or prior ref by severity and file
-    (and line, when given). Wording is never compared.
+    (and line, when given). Wording is never compared. Lines that start like a finding but name no
+    file may not outnumber the block's findings + prior refs of that severity.
 A `fixed` grade that another review of the current tip marks "open" is escalated, never counted fixed.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
@@ -726,6 +727,7 @@ def prose_claim_errors(p, lines, meta, prior):
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
     OPEN_NOTES[str(p)] = set()
+    unlocated = {"P1": [], "P2": [], "P3": []}
     for line in lines:
         if clean(line) in verbatim:
             continue
@@ -736,11 +738,11 @@ def prose_claim_errors(p, lines, meta, prior):
             tail = note.group(5)
             claims = line_claims(tail)
             refs = []
-            # "not fixed:", "partially fixed:", "still not resolved:" keep it open: the two words before
-            # the status word are read for a qualifier.
-            before = " ".join(note.group(3).lower().split()[-2:])
+            # "not fixed:", "partially fixed:", "still not resolved:" keep it open: the words between the
+            # location and the status word (paths and parentheticals removed) are read for a qualifier.
+            between = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", PATH_TOKEN.sub(" ", note.group(3))).lower()
             closed = (note.group(4).lower() in ("closed", "fixed", "resolved")
-                      and not re.search(r"\b(?:not|never|partially|partly|half|mostly|still|un\w*)\b|n't\b", before))
+                      and not re.search(r"\b(?:not|never|partially|partly|half|mostly|still|un\w*)\b|n't\b", between))
             if ref and not closed:
                 refs.append(note.group(2))
             if ref and not claims:
@@ -753,10 +755,21 @@ def prose_claim_errors(p, lines, meta, prior):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
             claims = line_claims(line)
+            start = FINDING_START.match(line) or EXPLICIT_LABEL.match(line.lstrip(" -*•#>"))
+            if start and not claims:
+                unlocated[re.search(r"P[123]", start.group(0)).group(0)].append(line.strip()[:100])
         for sev, path, ln in claims:
             why = claim_error(sev, path, ln, targets)
             if why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
+    # A line that starts like a finding but names no file (its location wrapped to the next line, or
+    # missing): the block must hold at least as many findings and prior refs of that severity.
+    for sev, found in unlocated.items():
+        have = sum(f["sev"] == sev for f in meta) + sum(k[1] == sev for k in prior)
+        if len(found) > have:
+            raise ValueError(f"{p}: {len(found)} prose line(s) start with {sev} but name no file, and the "
+                             f"review-verdict block has {have} {sev} finding(s) or prior ref(s): put every "
+                             f"finding in the block with its file_line: {found[0]}")
 
 
 def bead_comments_text(bead):
