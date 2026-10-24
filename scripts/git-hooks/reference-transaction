@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""reference-transaction hook: only the orchestrator moves main onto a gate-path change (LUCY-wqn96).
+
+Git runs this for every ref update, whatever the route: commit (with or without
+--no-verify), merge/fast-forward, cherry-pick, reset, update-ref, from any linked
+worktree. In state "prepared" a non-zero exit aborts the whole transaction, so the
+ref is left where it was.
+
+Rule: an update of refs/heads/main whose old..new diff touches a GATE_PATHS entry is
+refused unless the caller is the fleet orchestrator. Identity comes from
+scripts/fleet-role.py (exit 0 ORCHESTRATOR, 1 SUB) run on $CLAUDE_CODE_SESSION_ID or
+$CODEX_THREAD_ID. No agent id at all = a human terminal = allowed (Shane's escape
+hatch). fleet-role failing or hanging with an agent id set = refused (fail closed).
+A FLEET_ROLE env var is never trusted.
+
+Installed by the orchestrator (symlink from .git/hooks), never by a worker.
+"""
+import os
+import subprocess
+import sys
+
+MAIN_REF = "refs/heads/main"
+ZERO = "0" * 40
+
+# Prefixes (ending "/") match a directory; anything else matches that exact path.
+GATE_PATHS = (
+    "references/review-lead/",
+    "scripts/review-gate.sh",
+    "scripts/review_gate.py",
+    "scripts/fleet-dispatch.py",
+    "scripts/fleet-land-codex.py",
+    "scripts/fleet-role.py",
+    "scripts/fleet_codex_rpc.py",
+    "scripts/gate-watch.py",
+    "scripts/gate-tier.py",
+    "scripts/build-gate.py",
+    "scripts/git-hooks/",
+    "skills/land-batch/",
+    "skills/aestheticc-review/",
+    "commands/goal.md",
+    "commands/long-goal.md",
+    "hooks/",
+    "settings.json",
+)
+
+FLEET_ROLE_BIN = os.environ.get("FLEET_ROLE_BIN") or os.path.expanduser("~/.claude/scripts/fleet-role.py")
+FLEET_ROLE_TIMEOUT_S = 5
+
+RULE = (
+    "Gate changes go on a branch: commit there, get the independent Astra fail-open "
+    "review, and the orchestrator merges to main."
+)
+
+
+def is_gate_path(path):
+    return any(path.startswith(g) if g.endswith("/") else path == g for g in GATE_PATHS)
+
+
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True)
+
+
+def changed_paths(old, new):
+    """Paths that differ between old and new. None when that can't be worked out."""
+    if old == ZERO:
+        # update-ref without an expected value sends a zero old: use main's current tip.
+        cur = git("rev-parse", "--verify", "-q", MAIN_REF + "^{commit}")
+        old = cur.stdout.strip() if cur.returncode == 0 else ZERO
+    if old == ZERO:
+        out = git("ls-tree", "-r", "--name-only", new)
+    else:
+        out = git("diff", "--name-only", "--no-renames", old, new)
+    if out.returncode != 0:
+        return None
+    return [p for p in out.stdout.splitlines() if p]
+
+
+def caller_role():
+    """'human', 'orchestrator', or 'sub' (any doubt is 'sub')."""
+    agent_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+    if not agent_id:
+        return "human"
+    try:
+        res = subprocess.run(
+            [sys.executable, FLEET_ROLE_BIN, agent_id],
+            capture_output=True, text=True, timeout=FLEET_ROLE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "sub"
+    return "orchestrator" if res.returncode == 0 else "sub"
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] != "prepared":
+        return 0
+    blocked = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) != 3 or parts[2] != MAIN_REF:
+            continue
+        old, new, _ = parts
+        if new == ZERO or old == new:
+            continue
+        paths = changed_paths(old, new)
+        if paths is None:
+            blocked.append("(could not diff %s..%s)" % (old[:12], new[:12]))
+            continue
+        blocked.extend(p for p in paths if is_gate_path(p))
+    if not blocked:
+        return 0
+    if caller_role() in ("human", "orchestrator"):
+        return 0
+    sys.stderr.write(
+        "REFUSED (LUCY-wqn96): this session is not the orchestrator, so it cannot move "
+        "main onto a change to gate paths:\n"
+        + "".join("  %s\n" % p for p in sorted(set(blocked)))
+        + RULE + "\n"
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
