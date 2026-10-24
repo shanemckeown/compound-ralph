@@ -136,9 +136,9 @@ reversal.
     land must use a resolved bead id, preserve baseline evidence, and HOLD
     unrelated growth; the ratchet helper never substitutes for `npm test`.
     It must also run the Step 2 risk-tiered push gate once on the combined
-    tree before pushing (`tier_gates.py plan`; a full tier runs the
-    Cloud Build gate, never a laptop pg lane; LUCY-w6fpi, LUCY-z3ykz.2,
-    LUCY-nd0r5) — builders only ran targeted suites.
+    tree before pushing (`tier_gates.py plan`; a full tier runs the pg lane
+    then the Cloud Build simulation, serially under the laptop-wide lock;
+    LUCY-w6fpi, LUCY-z3ykz.2) — builders only ran targeted suites.
     A manual land bypasses the mechanical content-loss check above entirely, which is exactly how the
     2026-09-09 `VERSION`/`CHANGELOG.md` drift reached main (`AestheticcNext-1uw8s`).
 
@@ -706,8 +706,10 @@ diff, never by the agent: one full candidate makes the batch full.
 - **full** (anything else, including lib/, app/api, pages/api, drizzle/, migrations,
   money/Stripe/prices, patient data/photos, consent, tenancy, comms/sending, auth,
   component logic files, scripts, test infra, package files, unknown paths): the same,
-  then `cloudbuild-full`: the unit and pg lanes of `cloudbuild-gate.yaml` on Cloud Build
-  (LUCY-vxk2v; the default since LUCY-nd0r5). No land runs the laptop pg lane.
+  then the whole Cloud Build simulation (`test:cloudbuild`: steps #0, #2 = the full pg
+  lane inside the upload tarball, and #3) as one command under the laptop-wide pg-lane
+  lock. Never beside another pg lane: run concurrently on 12 Oct they gave 9 false pg
+  failures that passed solo.
 
 It runs once after the ordinary loop (on all of `GREEN_PENDING`), and once more on the
 migration transaction's final tree before that push (always full: it touches drizzle/).
@@ -722,10 +724,12 @@ jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
 GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
 ~~~
 
-`cloudbuild-full` runs `uv run --script ~/.claude/scripts/cloudbuild-gate-remote.py` (LUCY-vxk2v, default since LUCY-nd0r5): two Cloud Build lanes of `cloudbuild-gate.yaml` as the test-only `cloudbuild-gate` service account, exit 137 = infra, exit 2 = config or account refused, and no Colima or pg-lane lock. The tier JSON records `cloudbuild_remote: true`. `LAND_GATE_REMOTE=0` in the lander's shell is the Cloud Build outage switch: `cloudbuild-full` then exits 75 and the land **holds**; it never falls back to the laptop simulation (`cloudbuild_remote: false`).
+With `LAND_GATE_REMOTE=1` in the lander's shell (LUCY-vxk2v), `cloudbuild-full` runs `uv run --script ~/.claude/scripts/cloudbuild-gate-remote.py` instead: two Cloud Build lanes of `cloudbuild-gate.yaml` as the test-only `cloudbuild-gate` service account, the same evidence files, exit 137 = infra, exit 2 = config or account refused, and no Colima or pg-lane lock. `LAND_GATE_REMOTE=0` is the Cloud Build outage fallback (note "fallback used" in evidence); the tier JSON gains `cloudbuild_remote: true` only on the remote path.
 
-Run each gate in list order, detached, waiting for its exit file before starting the
-next (never two at once):
+For a full tier run `colima start` first (step #2 needs Docker). Then run each gate in list order, detached,
+waiting for its exit file before starting the next (never two at once). Each gate's
+command already takes the pg-lane lock, so a full lane anywhere else on the laptop
+makes it wait:
 
 ~~~bash
 GATE_I="${GATE_I:-0}"   # 0..GATE_COUNT-1; start the next only after this one's exit file is 0
@@ -739,7 +743,8 @@ nohup bash -o pipefail -c '
 printf '%s\n' "$!" > "$GATE_EVIDENCE.pid"
 ~~~
 
-Poll the log and exit file; never foreground-wait. A
+Poll the log and exit file; never foreground-wait. A `waiting: full pg lane already
+running` line is normal, not red (`~/.claude/fleet/pg-lane.log` names the holder). A
 nonzero gate stops the sequence: later gates do not run. Only this is green, and only
 then push, exactly the tree that was classified and tested:
 
@@ -766,7 +771,7 @@ Then run the B-1 close and B-2 blocks below once per `GREEN_PENDING` entry, with
 entry's `BEAD_ID` and `MERGE_SHA`.
 
 Missing/malformed exit, a dead pid without an exit file, or any nonzero exit pushes
-nothing. The rest of this paragraph applies to every push-time gate, tsc included ("lane" = gate). Exit 75 from `cloudbuild-full` is `LAND_GATE_REMOTE=0` holding the gate: HOLD the whole batch as **cloudbuild-off** at once, with no rerun and no per-candidate replay (nobody's branch is red). Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
+nothing. The rest of this paragraph applies to every push-time gate, tsc included ("lane" = gate). Exit 3 is the lock refusing (sandboxed caller): rerun unsandboxed; it is never
 a pass and never a reason to run the lane without the lock. Infra-shaped red (exit
 3/134/137, Docker/Colima or container start errors, killed) reruns once with separate
 retry evidence, then HOLDs the whole batch as **pg-lane-infra**. A red assertion

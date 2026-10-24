@@ -21,7 +21,6 @@ def _no_inherited_gate_switch(monkeypatch):
 
 LIGHT = ["components/ui/button.tsx", "styles/globals.css", "CHANGELOG.md"]
 FULL = ["components/ui/button.tsx", "lib/booking/slots.ts"]
-REMOTE = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
 
 
 def names(result):
@@ -35,19 +34,21 @@ def test_light_diff_runs_tsc_once_and_skips_pg_lane_and_cloudbuild():
     assert "pg-tests" not in joined and "simulate-cloudbuild" not in joined
 
 
-def test_full_diff_runs_tsc_then_the_cloudbuild_gate():
+def test_full_diff_runs_tsc_then_the_whole_cloudbuild_simulation():
     result = tg.plan(FULL)
     assert result["tier"] == "full" and names(result) == ["tsc", "cloudbuild-full"]
-    assert result["gates"][1]["cmd"] == REMOTE
+    # The whole simulation (no --step) includes step #2, the pg lane inside the tarball.
+    assert result["gates"][1]["cmd"].endswith("simulate-cloudbuild-test.sh")
 
 
-def test_full_gates_are_sequential_and_none_takes_the_laptop_pg_lane():
-    # LUCY-nd0r5: no land runs the laptop pg lane, so no gate takes the pg-lane lock.
+def test_full_gates_are_sequential_and_pg_work_holds_the_lock():
+    # 12 Oct: pg lane + test:cloudbuild run concurrently gave 9 false pg failures.
     result = tg.plan(FULL)
     assert result["sequential"] is True
+    pg = [g for g in result["gates"] if "cloudbuild" in g["name"] or "pg" in g["cmd"]]
+    assert len(pg) == 1 and pg[0]["cmd"].startswith('python3 "$HOME/.claude/scripts/pg-lane-lock.py" --')
     for gate in result["gates"]:
         assert "&" not in gate["cmd"].replace("&&", "")
-        assert "pg-lane-lock" not in gate["cmd"] and "simulate-cloudbuild" not in gate["cmd"]
 
 
 def test_beads_export_adds_the_config_effect_suite():
@@ -112,11 +113,10 @@ def test_fresh_scratch_has_node_modules_before_commit(tmp_path):
     assert (scratch / "node_modules").resolve() == (trunk / "node_modules").resolve()
 
 
-def test_cloudbuild_gate_never_reads_skip_pg_tests():
-    # Astra round 2 (z3ykz.2): SKIP_PG_TESTS=1 dropped the laptop pg lane. The remote gate runs
-    # both lanes of cloudbuild-gate.yaml whatever the lander's shell holds.
-    for env in ({}, {"SKIP_PG_TESTS": "1"}):
-        assert "SKIP_PG_TESTS" not in tg.plan(FULL, env=env)["gates"][-1]["cmd"]
+def test_cloudbuild_gate_cannot_inherit_skip_pg_tests():
+    # Astra round 2: SKIP_PG_TESTS=1 in the lander's shell would drop step #2 and still exit 0.
+    cmd = tg.plan(FULL)["gates"][-1]["cmd"]
+    assert "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh" in cmd
 
 
 # LUCY-z3ykz.8: the push-time verdict. Independent review 13 Oct: `gates: []` with a matching
@@ -183,80 +183,51 @@ def test_check_cli_exit_codes(tmp_path):
     assert unreadable.returncode == 1 and "unreadable" in unreadable.stdout
 
 
-# LUCY-vxk2v + LUCY-nd0r5: Cloud Build is the default; LAND_GATE_REMOTE=0 holds the land and
-# never falls back to the laptop simulation. The gate name and push check stay the same.
+# LUCY-vxk2v: LAND_GATE_REMOTE swaps only the cloudbuild-full cmd; name and push check unchanged.
+
+REMOTE = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
 
 
-def test_unset_land_gate_remote_runs_on_cloud_build():
-    for env in ({}, {"LAND_GATE_REMOTE": ""}, {"LAND_GATE_REMOTE": "1"}, {"LAND_GATE_REMOTE": "maybe"}):
-        full, light = tg.plan(FULL, env=env), tg.plan(LIGHT, env=env)
-        assert full["gates"] == [tg.TSC, {"name": "cloudbuild-full", "cmd": REMOTE}]
-        assert light["gates"] == [tg.TSC]  # light tier never gains a Cloud Build gate
-        assert full["cloudbuild_remote"] is True and light["cloudbuild_remote"] is True
+def test_land_gate_remote_switches_only_the_cloudbuild_cmd():
+    local = tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})
+    remote = tg.plan(FULL, env={"LAND_GATE_REMOTE": "1"})
+    assert names(local) == names(remote) == ["tsc", "cloudbuild-full"]
+    assert local["gates"][0] == remote["gates"][0] == tg.TSC
+    assert local["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]
+    assert local["gates"][1]["cmd"].endswith("env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh")
+    assert remote["gates"][1]["cmd"] == REMOTE
+    # Remote runs nothing on the laptop: no pg-lane lock, no local simulation.
+    assert "pg-lane-lock" not in remote["gates"][1]["cmd"] and "simulate" not in remote["gates"][1]["cmd"]
+    assert "cloudbuild_remote" not in local and remote["cloudbuild_remote"] is True
 
 
-def test_land_gate_remote_zero_holds_and_runs_nothing_on_the_laptop(tmp_path):
-    for value in ("0", "off", " False "):
-        held = tg.plan(FULL, env={"LAND_GATE_REMOTE": value})
-        assert names(held) == ["tsc", "cloudbuild-full"] and held["cloudbuild_remote"] is False
-        cmd = held["gates"][1]["cmd"]
-        assert "pg-lane-lock" not in cmd and "simulate" not in cmd and "jest" not in cmd
-    # Run it the way the SKILL loop does (bash -c in the scratch): it exits 75 with a HELD reason.
-    ran = subprocess.run(["bash", "-o", "pipefail", "-c", cmd], cwd=tmp_path, capture_output=True, text=True)
-    assert ran.returncode == tg.HELD_EXIT == 75 and "HELD: LAND_GATE_REMOTE=0" in ran.stderr
-    assert list(tmp_path.iterdir()) == []
-
-
-# The SKILL Step 2 gate wrapper, verbatim: cd, eval the planned cmd, then write the exit file.
-SKILL_GATE_WRAPPER = '''
-  cd "$2" && eval "$3"
-  code=$?; printf "%s\\n" "$code" > "$1"; exit "$code"
-'''
-
-
-def test_skill_wrapper_records_the_held_exit_fresh_and_over_stale_green(tmp_path):
-    # Own-gate review round 1: a bare `exit 75` ended the wrapper before it wrote the exit file.
-    skill = (SCRIPT.parent.parent / "SKILL.md").read_text()
-    assert SKILL_GATE_WRAPPER.strip() in skill  # the wrapper below is the one the lander runs
-    cmd = tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})["gates"][1]["cmd"]
-    exit_file = tmp_path / f"cloudbuild-full-{HEAD}.exit"
-    for stale in (None, "0\n"):
-        if stale is None:
-            exit_file.unlink(missing_ok=True)
-        else:
-            exit_file.write_text(stale)
-        ran = subprocess.run(["bash", "-o", "pipefail", "-c", SKILL_GATE_WRAPPER, "bash",
-                              str(exit_file), str(tmp_path), cmd], capture_output=True, text=True)
-        assert ran.returncode == 75 and exit_file.read_text() == "75\n"
-        tier_plan = {**tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"}), "head": HEAD}
-        (tmp_path / f"tsc-{HEAD}.exit").write_text("0\n")
-        assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["cloudbuild-full:75"]
-
-
-def test_held_gate_fails_the_push_check(tmp_path):
-    tier_plan = _green(tmp_path, {**tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"}), "head": HEAD})
-    (tmp_path / f"cloudbuild-full-{HEAD}.exit").write_text("75\n")
-    assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["cloudbuild-full:75"]
+def test_land_gate_remote_unset_uses_the_one_default_constant(monkeypatch):
+    assert tg.plan(FULL, env={})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]  # default off until acceptance
+    monkeypatch.setattr(tg, "REMOTE_DEFAULT", True)
+    assert tg.plan(FULL, env={})["gates"][1]["cmd"] == REMOTE
+    assert tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]
 
 
 def test_land_gate_remote_is_read_from_the_lander_environment(monkeypatch):
-    monkeypatch.setenv("LAND_GATE_REMOTE", "0")
-    assert tg.plan(FULL)["gates"][1]["cmd"] == tg.CLOUDBUILD_HELD_CMD
     monkeypatch.setenv("LAND_GATE_REMOTE", "1")
     assert tg.plan(FULL)["gates"][1]["cmd"] == REMOTE
+    assert tg.plan(LIGHT)["gates"] == [tg.TSC]  # light tier never gains a Cloud Build gate
 
 
-def test_remote_plan_passes_and_fails_the_push_check(tmp_path):
-    tier_plan = _green(tmp_path, {**tg.plan(FULL), "head": HEAD})
+def test_remote_plan_passes_and_fails_the_push_check_like_the_local_one(tmp_path):
+    tier_plan = _green(tmp_path, {**tg.plan(FULL, env={"LAND_GATE_REMOTE": "1"}), "head": HEAD})
     assert tg.push_problems(tier_plan, HEAD, tmp_path) == []
     (tmp_path / f"cloudbuild-full-{HEAD}.exit").write_text("137\n")
     assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["cloudbuild-full:137"]
 
 
-def test_cli_plan_without_land_gate_remote_is_remote(tmp_path):
-    # The bead's acceptance check: env -u LAND_GATE_REMOTE ... plan ... | jq '.cloudbuild_remote==true'.
-    repo, base = _repo_with_branch(tmp_path, "lib/x.ts")
-    out = tmp_path / "tier.json"
-    subprocess.run([sys.executable, str(SCRIPT), "plan", "--scratch", str(repo), "--base", base,
-                    "--out", str(out)], check=True, capture_output=True)
-    assert json.loads(out.read_text())["cloudbuild_remote"] is True
+def test_unset_land_gate_remote_plan_is_exactly_the_pre_vxk2v_local_plan():
+    # Review P4-1: no stray key, same gates, same cmd strings as main before LUCY-vxk2v.
+    pre_vxk2v_cloudbuild = {"name": "cloudbuild-full",
+                            "cmd": 'python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- '
+                                   "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
+    for env in ({}, {"LAND_GATE_REMOTE": ""}, {"LAND_GATE_REMOTE": "0"}):
+        full, light = tg.plan(FULL, env=env), tg.plan(LIGHT, env=env)
+        assert set(full) == set(light) == {"tier", "reasons", "sequential", "gates"}
+        assert full["gates"] == [tg.TSC, pre_vxk2v_cloudbuild]
+        assert light["gates"] == [tg.TSC]
