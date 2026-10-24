@@ -16,15 +16,16 @@ A session asks "am I the orchestrator?" and gets ORCHESTRATOR or SUB. It is SUB
 unless it is *positively* proven otherwise, so every failure mode — missing file,
 corrupt file, stale claim, someone else's claim — lands on SUB.
 
-🔴 A claim is void if the claiming session is no longer live in
-`claude agents --json`. Without that check the marker would rot exactly the way
-everything else in this stack rotted: a dead orchestrator would keep holding the
-role, sub-Claudes would keep escalating into a void, and nothing would say so.
+Claude claims use `claude agents --json`; Codex claims use a thread-specific
+app-server/desktop socket probe. Missing evidence is UNKNOWN and reserves the
+claim. Historical transcripts and a generic app-server PID never prove LIVE.
+Only a verified owner endpoint can establish that a Codex thread is unloaded.
+Legacy markers with no provider field retain their Claude interpretation.
 
-HOW A SESSION KNOWS ITS OWN ID: it is the UUID directory in the session's
-scratchpad path (`/private/tmp/claude-*/<project>/<SESSION-UUID>/scratchpad`).
-`ListAgents` deliberately never returns the calling session, so self-identity
-cannot come from there.
+HOW A SESSION KNOWS ITS OWN ID: Claude uses the UUID directory in its scratchpad
+path (`/private/tmp/claude-*/<project>/<SESSION-UUID>/scratchpad`). Codex exposes
+CODEX_THREAD_ID. These identify a claimant; neither proves it is currently live.
+`ListAgents` omits the calling Claude session, so use the CLI registry for probes.
 
 Usage:
   fleet-role.py <session-id>            # ORCHESTRATOR | SUB  (exit 0 | 1)
@@ -33,8 +34,15 @@ Usage:
   fleet-role.py <session-id> --claim --steal   # take it anyway, recording the takeover
   fleet-role.py --release               # give it up
   fleet-role.py --who                   # who holds it, and are they still alive?
+  fleet-role.py --who --json            # {record, status, provider} for relays
+  fleet-role.py <thread-id> --claim --provider codex [--codex-socket PATH]
+
+Codex socket defaults to the managed app-server control socket when present,
+otherwise the version-checked desktop IPC adapter. Neither starts/resumes a
+thread or calls a model. An UNKNOWN claim is reserved, not asserted LIVE.
 """
-import json, os, re, subprocess, sys, time, datetime
+import json, os, re, subprocess, sys, time, datetime, fcntl
+from fleet_codex_rpc import probe_thread
 
 FLEET_DIR = os.path.expanduser("~/.claude/fleet")
 MARKER = os.path.join(FLEET_DIR, "ORCHESTRATOR")
@@ -43,13 +51,19 @@ LOCK_DIR = os.path.join(FLEET_DIR, "LOCK.d")
 
 LOCK_TIMEOUT_S = 15
 LOCK_POLL_S = 0.2
+UNSET = object()
+PROVIDERS = {"claude", "codex"}
+DEFAULT_CODEX_SOCKET = os.path.expanduser("~/.codex/app-server-control/app-server-control.sock")
+DESKTOP_CODEX_SOCKET = os.path.expanduser("~/.codex/ipc/ipc.sock")
 
 MANAGER_USAGE = """Usage:
   fleet-role.py manager <work-id> <session-id>
   fleet-role.py manager <work-id> <session-id> --claim [--steal] [--handoff-doc PATH]
   fleet-role.py manager <work-id> --release
   fleet-role.py manager <work-id> --who
-  fleet-role.py manager --list"""
+  fleet-role.py manager --list
+  Add --provider codex [--codex-socket PATH] to a Codex claim.
+  Add --json to --who for the {record, status, provider} interface."""
 
 
 def now():
@@ -61,37 +75,131 @@ def live_sessions():
         r = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             return None
-        return {a.get("sessionId"): a for a in json.loads(r.stdout or "[]")}
+        rows = json.loads(r.stdout)
+        if not isinstance(rows, list) or any(
+                not isinstance(a, dict) or not isinstance(a.get("sessionId"), str)
+                or not a["sessionId"] for a in rows):
+            return None
+        return {a["sessionId"]: a for a in rows}
     except Exception:
         return None
 
 
-def _acquire_lock():
-    os.makedirs(FLEET_DIR, exist_ok=True)
-    deadline = time.time() + LOCK_TIMEOUT_S
-    while time.time() < deadline:
+def record_provider(rec):
+    # Existing Claude markers remain compatible. Invalid/new providers are never
+    # silently sent to the Claude registry or treated as a dead Claude session.
+    return rec.get("provider", "claude") if rec else None
+
+
+def default_codex_socket():
+    return DEFAULT_CODEX_SOCKET if os.path.exists(DEFAULT_CODEX_SOCKET) else DESKTOP_CODEX_SOCKET
+
+
+def session_status(rec, sessions=UNSET):
+    if not rec or not rec.get("session_id"):
+        return "VACANT"
+    provider = record_provider(rec)
+    if provider == "claude":
+        sessions = live_sessions() if sessions is UNSET else sessions
+        if sessions is None:
+            return "UNKNOWN"
+        return "LIVE" if rec["session_id"] in sessions else "STALE"
+    if provider == "codex":
         try:
-            os.mkdir(LOCK_DIR)
-            return True
-        except FileExistsError:
-            # stale lock guard: if LOCK.d is itself old (>30s), a prior holder likely
-            # crashed mid-update — reclaim it rather than deadlock forever.
-            try:
-                age = time.time() - os.path.getmtime(LOCK_DIR)
-                if age > 30:
-                    os.rmdir(LOCK_DIR)
-                    continue
-            except OSError:
-                pass
-            time.sleep(LOCK_POLL_S)
+            result = probe_thread(rec["session_id"], rec.get("codex_socket") or default_codex_socket())
+        except Exception:
+            return "UNKNOWN"
+        if result.get("status") == "LIVE":
+            return "LIVE"
+        # A different server's empty inventory proves nothing about this thread.
+        # Only a socket verified to own the thread at claim-time can prove it
+        # unloaded. Failed/missing sockets remain UNKNOWN, never free to steal.
+        if result.get("status") == "NOT_LOADED" and rec.get("codex_socket_verified") is True:
+            return "STALE"
+    return "UNKNOWN"
+
+
+def parse_provider_options(argv):
+    rest, options = [], {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in {"--provider", "--codex-socket"}:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--") or arg in options:
+                raise ValueError(f"{arg} requires exactly one value")
+            options[arg] = argv[i + 1]
+            i += 2
+        else:
+            rest.append(arg)
+            i += 1
+    provider = options.get("--provider")
+    if provider is not None and provider not in PROVIDERS:
+        raise ValueError("--provider must be claude or codex")
+    if "--codex-socket" in options and "--claim" not in rest:
+        raise ValueError("--codex-socket is valid only with --claim")
+    return rest, options
+
+
+def claim_identity(me, rec, options):
+    previous = rec if rec and rec.get("session_id") == me else None
+    provider = options.get("--provider") or record_provider(previous) or "claude"
+    if provider not in PROVIDERS:
+        raise ValueError("Unknown marker provider; pass --provider explicitly")
+    if provider == "claude":
+        if "--codex-socket" in options:
+            raise ValueError("--codex-socket requires --provider codex")
+        sessions = live_sessions()
+        return provider, (sessions or {}).get(me, {}).get("name", "unknown"), {}
+    socket_path = os.path.abspath(os.path.expanduser(
+        options.get("--codex-socket") or (previous or {}).get("codex_socket") or default_codex_socket()))
+    try:
+        result = probe_thread(me, socket_path)
+    except Exception:
+        result = {"status": "UNKNOWN"}
+    verified = result.get("status") == "LIVE" or bool(
+        previous and previous.get("codex_socket_verified") is True
+        and previous.get("codex_socket") == socket_path)
+    return provider, result.get("name") or f"Codex {me[:8]}", {
+        "codex_socket": socket_path, "codex_socket_verified": verified}
+
+
+def print_status_json(rec, state):
+    print(json.dumps({"record": rec, "status": state, "provider": record_provider(rec)}))
+
+
+_lock_handle = None
+
+
+def _acquire_lock():
+    """Kernel lock survives slow provider probes and releases on process death.
+
+    A running pre-upgrade script may still hold the legacy LOCK.d directory;
+    wait for that owner rather than tearing its lock down by age.
+    """
+    global _lock_handle
+    os.makedirs(FLEET_DIR, exist_ok=True)
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
+    handle = open(LOCK_DIR + ".flock", "a+")
+    while time.monotonic() < deadline:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not os.path.exists(LOCK_DIR):
+                _lock_handle = handle
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except BlockingIOError:
+            pass
+        time.sleep(LOCK_POLL_S)
+    handle.close()
     return False
 
 
 def _release_lock():
-    try:
-        os.rmdir(LOCK_DIR)
-    except OSError:
-        pass
+    global _lock_handle
+    if _lock_handle is not None:
+        fcntl.flock(_lock_handle, fcntl.LOCK_UN)
+        _lock_handle.close()
+        _lock_handle = None
 
 
 def _write_json(path, rec):
@@ -103,15 +211,26 @@ def _write_json(path, rec):
 
 
 def read_marker():
+    return read_role_marker(MARKER)
+
+
+def read_role_marker(path):
     try:
-        with open(MARKER) as fh:
-            return json.load(fh)
-    except Exception:
+        with open(path) as fh:
+            rec = json.load(fh)
+        if not isinstance(rec, dict) or not isinstance(rec.get("session_id"), str) or not rec["session_id"]:
+            raise ValueError("invalid role record")
+        return rec
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError):
+        # An unreadable claim is not evidence that nobody holds the role.
+        return {"session_id": "unreadable-marker", "provider": "unknown", "name": "unreadable marker"}
 
 
-def write_marker(session_id, name, stolen_from=None):
-    rec = {"session_id": session_id, "name": name, "claimed_at": now()}
+def write_marker(session_id, name, stolen_from=None, provider="claude", runtime=None):
+    rec = {"session_id": session_id, "name": name, "claimed_at": now(), "provider": provider}
+    rec.update(runtime or {})
     if stolen_from:
         rec["stole_from"] = stolen_from
     _write_json(MARKER, rec)
@@ -123,10 +242,7 @@ def holder_status():
     rec = read_marker()
     if not rec or not rec.get("session_id"):
         return None, "VACANT"
-    sessions = live_sessions()
-    if sessions is None:
-        return rec, "UNKNOWN"
-    return rec, ("LIVE" if rec["session_id"] in sessions else "STALE")
+    return rec, session_status(rec)
 
 
 def sanitize_work_id(work_id):
@@ -138,31 +254,26 @@ def manager_marker_path(work_id):
 
 
 def read_manager_marker(work_id):
-    try:
-        with open(manager_marker_path(work_id)) as fh:
-            return json.load(fh)
-    except Exception:
-        return None
+    return read_role_marker(manager_marker_path(work_id))
 
 
-def write_manager_marker(work_id, session_id, name, handoff_doc_path=None, stolen_from=None):
+def write_manager_marker(work_id, session_id, name, handoff_doc_path=None, stolen_from=None,
+                         provider="claude", runtime=None):
     rec = {"work_id": work_id, "session_id": session_id, "name": name,
-           "claimed_at": now(), "handoff_doc_path": handoff_doc_path}
+           "claimed_at": now(), "handoff_doc_path": handoff_doc_path, "provider": provider}
+    rec.update(runtime or {})
     if stolen_from:
         rec["stole_from"] = stolen_from
     _write_json(manager_marker_path(work_id), rec)
     return rec
 
 
-def manager_holder_status(work_id, sessions=None):
+def manager_holder_status(work_id, sessions=UNSET):
     """(record, 'VACANT'|'LIVE'|'STALE'|'UNKNOWN'). STALE means work is free."""
     rec = read_manager_marker(work_id)
     if not rec or not rec.get("session_id"):
         return None, "VACANT"
-    sessions = live_sessions() if sessions is None else sessions
-    if sessions is None:
-        return rec, "UNKNOWN"
-    return rec, ("LIVE" if rec["session_id"] in sessions else "STALE")
+    return rec, session_status(rec, sessions)
 
 
 def list_manager_claims():
@@ -178,21 +289,14 @@ def list_manager_claims():
     rows = []
     for filename in marker_files:
         path = os.path.join(MANAGERS_DIR, filename)
-        try:
-            with open(path) as fh:
-                rec = json.load(fh)
-        except Exception:
-            rec = None
+        rec = read_role_marker(path)
         work_id = rec.get("work_id") if rec else None
         if not isinstance(work_id, str):
             work_id = filename[:-5]
         if not rec or not rec.get("session_id"):
             rows.append((work_id, None, "VACANT"))
-        elif sessions is None:
-            rows.append((work_id, rec, "UNKNOWN"))
         else:
-            state = "LIVE" if rec["session_id"] in sessions else "STALE"
-            rows.append((work_id, rec, state))
+            rows.append((work_id, rec, session_status(rec, sessions)))
 
     for work_id, rec, state in sorted(rows, key=lambda row: row[0]):
         if state == "VACANT":
@@ -211,7 +315,7 @@ def list_manager_claims():
 
 
 def manager_main():
-    argv = sys.argv[2:]
+    argv, provider_options = parse_provider_options(sys.argv[2:])
     flags = set()
     ids = []
     handoff_doc_path = None
@@ -234,11 +338,12 @@ def manager_main():
             ids.append(arg)
         i += 1
 
-    known_flags = {"--claim", "--steal", "--release", "--who", "--list"}
+    known_flags = {"--claim", "--steal", "--release", "--who", "--list", "--json"}
     verbs = flags & {"--claim", "--release", "--who", "--list"}
     if (flags - known_flags or len(verbs) > 1 or
             ("--steal" in flags and "--claim" not in flags) or
-            (handoff_doc_path is not None and "--claim" not in flags)):
+            (handoff_doc_path is not None and "--claim" not in flags) or
+            ("--json" in flags and "--who" not in flags)):
         print(MANAGER_USAGE)
         return 2
 
@@ -262,6 +367,9 @@ def manager_main():
             print(MANAGER_USAGE)
             return 2
         rec, state = manager_holder_status(work_id)
+        if "--json" in flags:
+            print_status_json(rec, state)
+            return 0
         if state == "VACANT":
             print(f"MANAGER for {work_id}: VACANT — no session holds this work")
             return 0
@@ -274,6 +382,7 @@ def manager_main():
         print(f"MANAGER for {work_id}: {rec.get('name')} ({rec['session_id']})")
         print(f"  claimed_at: {rec.get('claimed_at')}")
         print(f"  status:     {alive}")
+        print(f"  provider:   {record_provider(rec)}")
         return 0
 
     if "--release" in flags:
@@ -304,7 +413,8 @@ def manager_main():
             return 1
         try:
             rec, state = manager_holder_status(work_id)
-            held_by_other = rec and rec["session_id"] != me
+            held_by_other = rec and (rec["session_id"] != me or
+                provider_options.get("--provider", record_provider(rec)) != record_provider(rec))
             if state in {"LIVE", "UNKNOWN"} and held_by_other and "--steal" not in flags:
                 if state == "UNKNOWN":
                     print(f"REFUSED — {rec.get('name')} ({rec['session_id'][:8]}) holds MANAGER "
@@ -317,9 +427,8 @@ def manager_main():
                           f"if that is wrong.")
                 return 1
             stolen = rec["session_id"] if (held_by_other and state in {"LIVE", "UNKNOWN"}) else None
-            sessions = live_sessions()
-            name = (sessions or {}).get(me, {}).get("name", "unknown")
-            new = write_manager_marker(work_id, me, name, handoff_doc_path, stolen)
+            provider, name, runtime = claim_identity(me, rec, provider_options)
+            new = write_manager_marker(work_id, me, name, handoff_doc_path, stolen, provider, runtime)
             print(f"MANAGER for {work_id} — claimed by {new['name']} ({me[:8]}) at {new['claimed_at']}")
             if state == "STALE":
                 print(f"  (took over from {rec.get('name')}, whose session is gone)")
@@ -328,13 +437,16 @@ def manager_main():
                       f"recorded in the marker")
             elif stolen:
                 print(f"  ⚠ STOLE from a live session {rec.get('name')} — recorded in the marker")
+            if provider == "codex" and not runtime["codex_socket_verified"]:
+                print("  liveness: UNKNOWN — claim reserved; Codex owner socket not verified")
             return 0
         finally:
             _release_lock()
 
     # Default: the test itself.
     rec, state = manager_holder_status(work_id)
-    if state == "LIVE" and rec["session_id"] == me:
+    if (state == "LIVE" and rec["session_id"] == me and
+            provider_options.get("--provider", record_provider(rec)) == record_provider(rec)):
         print("MANAGER")
         return 0
     print("NOT-MANAGER")
@@ -353,16 +465,19 @@ def manager_main():
 
 
 def main():
-    argv = sys.argv[1:]
+    argv, provider_options = parse_provider_options(sys.argv[1:])
     flags = {a for a in argv if a.startswith("--")}
     ids = [a for a in argv if not a.startswith("--")]
-    known_flags = {"--check", "--claim", "--steal", "--release", "--who"}
-    if flags - known_flags:
+    known_flags = {"--check", "--claim", "--steal", "--release", "--who", "--json"}
+    if flags - known_flags or ("--json" in flags and "--who" not in flags):
         print(__doc__)
         return 2
 
     if "--who" in flags:
         rec, state = holder_status()
+        if "--json" in flags:
+            print_status_json(rec, state)
+            return 0
         if state == "VACANT":
             print("orchestrator: VACANT — no session holds the role")
             return 0
@@ -375,6 +490,7 @@ def main():
         print(f"orchestrator: {rec.get('name')} ({rec['session_id']})")
         print(f"  claimed_at: {rec.get('claimed_at')}")
         print(f"  status:     {alive}")
+        print(f"  provider:   {record_provider(rec)}")
         return 0
 
     if "--release" in flags:
@@ -401,7 +517,8 @@ def main():
             return 1
         try:
             rec, state = holder_status()
-            held_by_other = rec and rec["session_id"] != me
+            held_by_other = rec and (rec["session_id"] != me or
+                provider_options.get("--provider", record_provider(rec)) != record_provider(rec))
             if state in {"LIVE", "UNKNOWN"} and held_by_other and "--steal" not in flags:
                 if state == "UNKNOWN":
                     print(f"REFUSED — {rec.get('name')} ({rec['session_id'][:8]}) holds it, but "
@@ -413,9 +530,8 @@ def main():
                     print("Exactly one session is the orchestrator. Use --steal only if that is wrong.")
                 return 1
             stolen = rec["session_id"] if (held_by_other and state in {"LIVE", "UNKNOWN"}) else None
-            sessions = live_sessions()
-            name = (sessions or {}).get(me, {}).get("name", "unknown")
-            new = write_marker(me, name, stolen)
+            provider, name, runtime = claim_identity(me, rec, provider_options)
+            new = write_marker(me, name, stolen, provider, runtime)
             print(f"ORCHESTRATOR — claimed by {new['name']} ({me[:8]}) at {new['claimed_at']}")
             if state == "STALE":
                 print(f"  (took over from {rec.get('name')}, whose session is gone)")
@@ -424,13 +540,16 @@ def main():
                       f"recorded in the marker")
             elif stolen:
                 print(f"  ⚠ STOLE from a live session {rec.get('name')} — recorded in the marker")
+            if provider == "codex" and not runtime["codex_socket_verified"]:
+                print("  liveness: UNKNOWN — claim reserved; Codex owner socket not verified")
             return 0
         finally:
             _release_lock()
 
     # Default: the test itself.
     rec, state = holder_status()
-    if state == "LIVE" and rec["session_id"] == me:
+    if (state == "LIVE" and rec["session_id"] == me and
+            provider_options.get("--provider", record_provider(rec)) == record_provider(rec)):
         print("ORCHESTRATOR")
         return 0
     print("SUB")
@@ -448,6 +567,8 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "manager":
-        sys.exit(manager_main())
-    sys.exit(main())
+    try:
+        sys.exit(manager_main() if len(sys.argv) > 1 and sys.argv[1] == "manager" else main())
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(2)

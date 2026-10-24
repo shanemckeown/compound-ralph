@@ -1,0 +1,70 @@
+{
+ "bead": "AestheticcNext-3bm73",
+ "round": 7,
+ "scope_lock": false,
+ "premise": {
+  "premise": null,
+  "rounds_failed_on_it": 0,
+  "action": null
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "source_line": "P1 components/appointments/workflow-steps/consent-step.tsx:256 \u2014 A practitioner updates a returning patient\u2019s history on their phone, then opens protocol consent on the clinic iPad with older cached history. Cached answers are prefilled immediately; after fresh history arrives, the tokens update but the answers remain stale because lines 259\u2013273 preserve every nonempty value. Reproduced pregnancy \u201cYes\u201d remaining after its indication disappears, smoking \u201cNo\u201d remaining when current history says \u201cYes\u201d, and submission containing the stale pregnancy answer \u2014 defer medical prefill until the current fetch succeeds, and distinguish generated answers from patient edits so refreshed history replaces or clears untouched prefills. [TM-07, DR-05, UI-04, H-U0]",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F2",
+   "source_line": "P1 components/appointments/use-consent-client.ts:73 \u2014 Before treatment on the clinic iPad, a practitioner opens protocol consent after correcting allergies; if the fresh history fetch fails, older safety-banner allergies still prefill the allergy answer and token. A scratch reproduction submitted the stale allergy in the signed PUT payload \u2014 derive all medical answers and tokens exclusively from this opening's successful history response. [TM-07, DR-05, UI-04, H-U0]",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F3",
+   "source_line": "P1 components/appointments/workflow-steps/merge-generated-prefill.ts:36 \u2014 Before treatment on the clinic iPad, a patient types then clears Medication during a slow history load. The arriving record refills the deliberately cleared answer; a scratch reproduction submitted the restored medication in the signed PUT \u2014 explicitly track user-edited fields, including empty answers, and exclude them from subsequent generated prefill. [TM-07, DR-05, UI-04, H-U0]",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F4",
+   "source_line": "P3 pages/api/clients/import/batch.ts:418 \u2014 For a practitioner importing CSV records on a laptop before clinic, the new unknown-smoking safeguard has no regression protection: restoring smoking:false leaves all four targeted mutation suites green \u2014 assert that a newly imported history record omits smoking when the CSV never asked. [COM-02, DR-06, H-D1]",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F5",
+   "source_line": "P1 components/appointments/workflow-steps/merge-generated-prefill.ts:36 \u2014 Before treatment on the clinic iPad, a patient types then clears Medication during a slow history load. The arriving record restores the cleared answer; an independent reproduction at this tip captured Sertraline in the signed PUT. Track user-edited fields, including empty answers, and exclude them from subsequent generated prefill.",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F6",
+   "source_line": "P1 components/appointments/use-consent-client.ts:57 \u2014 On the clinic iPad, Re-sign can join a history request started for the earlier Already signed panel. If history was updated on the practitioner's phone meanwhile, the delayed old response passes isFetchedAfterMount and prefills outdated medical statements. Independently reproduced one GET and signed answers pregnant=yes, smoker=no despite newer history removing pregnancy and recording smoking=true. Bind each signature opening to its own newly started request and add an in-flight-panel-to-Re-sign regression.",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F7",
+   "source_line": "P2 pages/api/clients/[id]/medical-history.ts:164 + lib/forms/prefill.ts:251 + lib/forms/consent-variables.ts:310 \u2014 H-U0 missing becomes \"No\" (newly exposed on this screen; same defect already tracked as AestheticcNext-e5hw9): the GET fills `smoking: false` for every exists:true record, and CSV import (pages/api/clients/import/batch.ts:458) creates a record with no smoking value. A practitioner opens the protocol Consent step for an imported client, and the consent text now prints \"Smoking: No\" and the smoking radio is preselected \"no\". The client signs a clinical statement nobody recorded. This branch is what puts that value on this screen \u2014 fix: stop defaulting smoking in the GET (or have the helpers treat it as unknown unless the stored record carries it), add a test on an exists:true record with no smoking key that expects blank and unselected.",
+   "verdict": "fixed",
+   "category": "other",
+   "fixed_by": "@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md"
+  },
+  {
+   "id": "F8",
+   "source_line": "P3 tests/components/appointments/workflow-consent-medical-history.test.tsx \u2014 H-D1 the failed-fetch guard at components/appointments/use-consent-client.ts:39 (throw instead of caching an empty record, because the contraindication checker shares the key) has no test; reverting it to `return { medicalHistory: {}, exists: false }` leaves all 4 tests green \u2014 fix: add a test where the medical-history GET returns 500 and assert tokens are blank, nothing is prefilled, and the cached value is not an empty record. Not user-facing in this diff alone, so it may land on a one-line builder rejection.",
+   "verdict": "consider",
+   "category": "style",
+   "reason": "Non-user-facing test-only P3 retained as the plan permits.",
+   "follow_up": "Add the HTTP-error regression for the consent query"
+  }
+ ],
+ "act_on_over_cap_reason": "Seven earlier references reverified in r7; retained separately for audit."
+}

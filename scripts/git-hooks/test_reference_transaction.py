@@ -545,7 +545,8 @@ def test_gate_path_matching():
     for p in ("references/review-lead/review_lead_check.py", "scripts/review-gate.sh",
               "skills/land-batch/bin/land_batch_safety.py", "skills/land-batch/bin/discover.sh",
               "hooks/x.sh", "settings.json", "commands/goal.md", "scripts/git-hooks/reference-transaction",
-              "scripts/git-hooks/install.sh", "scripts/fleet-role.py"):
+              "scripts/git-hooks/install.sh", "scripts/fleet-role.py", "hooks",
+              "skills/land-batch", "references/review-lead"):
         assert hook.is_gate_path(p), p
     for p in ("commands/closeout.md", "hooks-old/x.sh", "settings.json.bak",
               "skills/land-batchx/a", "scripts/review-gate.sh.bak", "foo/settings.json"):
@@ -1382,3 +1383,102 @@ def test_f1_stop_hook_ignores_a_planted_cwd_module(repo, tmp_path):
     assert not marker.exists()
     log = (home / ".claude/hooks/gbrain-ingest/logs/hook.log").read_text()
     assert "transcript not found" in log  # the JSON was parsed by the real json module
+
+
+# ---- Layer A tests merged from main @1025d7c (S1 includeIf, E1 gitlinks, E2 newline paths) ----
+
+def test_s1_worktree_seeing_another_hooks_path_refused(repo, tmp_path):
+    """Without extensions.worktreeConfig, an includeIf scoped to one worktree's branch can still
+    give it another core.hooksPath. Only the post-install check sees that."""
+    wt = tmp_path / "wt"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    inc = tmp_path / "other-hooks.cfg"
+    inc.write_text(f"[core]\n\thooksPath = {tmp_path / 'elsewhere'}\n")
+    repo.git("config", "includeIf.onbranch:wtb.path", str(inc))
+    res = repo.install()
+    assert res.returncode == 1
+    assert f"worktree {wt} sees core.hooksPath='{tmp_path / 'elsewhere'}'" in res.stderr
+
+
+def test_e2_newline_worktree_with_own_hooks_path_refused(repo, tmp_path):
+    wt = tmp_path / "wt\nx"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    repo.git("config", "extensions.worktreeConfig", "true")
+    repo.git("config", "--worktree", "core.hooksPath", str(tmp_path / "elsewhere"), cwd=wt)
+    res = repo.install()
+    assert res.returncode == 1
+    assert f"worktree {wt} sets its own core.hooksPath" in res.stderr
+
+
+def test_e2_newline_worktree_seeing_another_hooks_path_refused(repo, tmp_path):
+    wt = tmp_path / "wt\nx"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    inc = tmp_path / "other-hooks.cfg"
+    inc.write_text(f"[core]\n\thooksPath = {tmp_path / 'elsewhere'}\n")
+    repo.git("config", "includeIf.onbranch:wtb.path", str(inc))
+    res = repo.install()
+    assert res.returncode == 1
+    assert f"worktree {wt} sees core.hooksPath=" in res.stderr
+
+
+def branch_with_gitlink(repo, path="hooks/new-module", ignore_all=True, name="sm"):
+    """A branch adding a gitlink at `path` (and a .gitmodules marking it ignore=all)."""
+    sub = repo.tmp / "sub"
+    sub.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("commit", "-q", "--allow-empty", "-m", "s")):
+        subprocess.run(["git", *args], cwd=sub, env=repo.env, check=True, capture_output=True)
+    sub_tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=sub, env=repo.env,
+                             capture_output=True, text=True, check=True).stdout.strip()
+    repo.git("checkout", "-q", "-b", name)
+    if ignore_all:
+        repo.write(".gitmodules", f'[submodule "m"]\n\tpath = {path}\n\turl = {sub}\n\tignore = all\n')
+        repo.git("add", ".gitmodules")
+    repo.git("update-index", "--add", "--cacheinfo", f"160000,{sub_tip},{path}")
+    repo.git("commit", "-q", "-m", "gitlink")
+    tip = repo.rev(name)
+    repo.git("checkout", "-q", "main")
+    return tip
+
+
+def test_e1_gitmodules_ignore_all_gitlink_ff_merge_refused(repo):
+    repo.as_agent()
+    branch_with_gitlink(repo)
+    before = repo.rev("main")
+    res = repo.git("merge", "--ff-only", "sm", check=False)
+    assert_refused(res, repo, before, what="hooks/new-module")
+
+
+def test_e1_repo_config_ignore_submodules_all_refused(repo):
+    repo.git("config", "diff.ignoreSubmodules", "all")
+    repo.as_agent()
+    branch_with_gitlink(repo, ignore_all=False)
+    before = repo.rev("main")
+    res = repo.git("merge", "--ff-only", "sm", check=False)
+    assert_refused(res, repo, before, what="hooks/new-module")
+
+
+def test_e1_gitlink_at_a_gate_dir_itself_refused(repo):
+    """A gitlink named exactly a gate directory (hooks, no trailing slash) is a gate change."""
+    repo.as_agent()
+    branch_with_gitlink(repo, path="hooks")
+    before = repo.rev("main")
+    res = repo.git("merge", "--ff-only", "sm", check=False)
+    assert_refused(res, repo, before, what="hooks")
+
+
+def test_e1_non_gate_gitlink_allowed(repo):
+    repo.as_agent()
+    tip = branch_with_gitlink(repo, path="vendor/mod")
+    res = repo.git("merge", "--ff-only", "sm", check=False)
+    assert res.returncode == 0, res.stderr
+    assert repo.rev("main") == tip
+
+
+def test_e1_diff_relative_config_cannot_hide_a_gate_path(repo):
+    """diff.relative, with git run from a subdirectory, would drop paths outside it."""
+    repo.git("config", "diff.relative", "true")
+    repo.as_agent()
+    repo.branch_with_gate_change()
+    before = repo.rev("main")
+    res = repo.git("merge", "--ff-only", "e3", check=False, cwd=repo.root / "commands")
+    assert_refused(res, repo, before)

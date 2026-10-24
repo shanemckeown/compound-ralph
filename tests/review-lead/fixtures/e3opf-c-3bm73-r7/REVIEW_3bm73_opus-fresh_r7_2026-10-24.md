@@ -1,0 +1,7 @@
+REVIEWING: goal/x @ 4f1c34f25e75593f87ca09fc2b4639c63b174e23
+PASS
+VERIFIED OK
+- tests
+```review-verdict
+{"verdict": "PASS", "findings": [], "prior": [{"ref": "r1 P1 components/appointments/workflow-steps/consent-step.tsx:256", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r1 P2 pages/api/clients/[id]/medical-history.ts:164", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r2 P1 components/appointments/use-consent-client.ts:73", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r2 P1 components/appointments/workflow-steps/merge-generated-prefill.ts:36", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r2 P3 pages/api/clients/import/batch.ts:418", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r4 P1 components/appointments/workflow-steps/merge-generated-prefill.ts:36", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}, {"ref": "r5 P1 components/appointments/use-consent-client.ts:57", "status": "closed", "evidence": "Synthetic closure for checker simulation only; no product code reviewed."}]}
+```

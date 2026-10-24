@@ -36,16 +36,22 @@ done
 (cd "$repo" && "$tmp/reference-transaction" --check-orchestrator) \
   || die "this session is not the orchestrator"
 
+# Worktree paths read NUL-delimited (-z): a newline in a path must not truncate it.
+worktrees=()
+while IFS= read -r -d '' rec; do
+  case "$rec" in "worktree "*) worktrees+=("${rec#worktree }") ;; esac
+done < <(g worktree list --porcelain -z)
+[ "${#worktrees[@]}" -gt 0 ] || die "git worktree list returned no worktrees"
+
 # A per-worktree core.hooksPath (extensions.worktreeConfig) would override the shared one.
-worktrees="$(g worktree list --porcelain | sed -n 's/^worktree //p')"
 if [ "$(g config --type=bool --get extensions.worktreeConfig || echo false)" = true ]; then
-  while IFS= read -r wt; do
+  for wt in "${worktrees[@]}"; do
     [ -d "$wt" ] || continue
     own="$(git -C "$wt" config --worktree --get core.hooksPath || true)"
     if [ -n "$own" ] && [ "$own" != "$hooks" ]; then
       die "worktree $wt sets its own core.hooksPath=$own (unset it with: git -C '$wt' config --worktree --unset core.hooksPath)"
     fi
-  done <<< "$worktrees"
+  done
 fi
 
 mkdir -p "$hooks" "$live"
@@ -55,11 +61,11 @@ cp "$tmp/run-gate" "$live/run-gate.tmp"
 mv -f "$live/run-gate.tmp" "$live/run-gate"
 g config core.hooksPath "$hooks"
 
-while IFS= read -r wt; do
+for wt in "${worktrees[@]}"; do
   [ -d "$wt" ] || continue
   seen="$(git -C "$wt" config --get core.hooksPath || true)"
   [ "$seen" = "$hooks" ] || die "worktree $wt sees core.hooksPath='$seen', not $hooks"
-done <<< "$worktrees"
+done
 
 (cd "$repo" && "$hooks/reference-transaction" --export "$head") || die "export of $head failed"
 

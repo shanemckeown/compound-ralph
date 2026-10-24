@@ -534,7 +534,8 @@ set +e
   echo "on which device, at what moment in the clinic day. If you cannot name one, say so on the finding line."
   echo "and the review line in /Users/shane/Documents/Obsidian/Aestheticc/CLAUDE.md."
   echo "Answer every applicable hazard ID. Trace real code paths from each entry point to the write."
-  echo "Output: line 1 PASS or FAIL; then one finding per line:"
+  echo "Output: line 1 is the echo 'REVIEWING: $(git branch --show-current) @ $(git rev-parse HEAD)', exactly once"
+  echo "(review_lead_check refuses a file without one, LUCY-e3opf); line 2 PASS or FAIL; then one finding per line:"
   echo "  P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix"
   echo "then VERIFIED OK and UNVERIFIED lists. Unverified is never called verified."
   echo "---"
@@ -630,7 +631,8 @@ scratch worktree at the tip, revert each new guard and confirm a test fails; con
 control case passes both ways. Record each mutant and its result in
 `$EVIDENCE_DIR/mutants-round-N.txt`, then remove the scratch worktree. A surviving mutant on
 a promised behaviour is a P2 (H-D1). The file is a verdict the lead must classify: line 1 is
-`PASS` (all killed) or `FAIL`, and each survivor is a finding line
+`PASS` (all killed) or `FAIL`, with **no** `REVIEWING:` line anywhere (builder evidence carries no
+echo; review_lead_check refuses a mutants file or QA log that has one, LUCY-e3opf D1), and each survivor is a finding line
 `P2 <file:line> — mutant survived: <what was reverted> — <test to add>`.
 
 **Severity is the CLAUDE.md review line (decision #4):** P1 = money / patient data / tenancy /
