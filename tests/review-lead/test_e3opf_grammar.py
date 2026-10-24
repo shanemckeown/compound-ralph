@@ -534,7 +534,8 @@ class A1CommonMarkTopLevel(unittest.TestCase):
     def test_three_space_indent_and_a_closed_comment_before_it_still_count(self):
         blk = strict_block("PASS", prior=[(REF, "closed")])
         for r2 in (closing_r2("".join("   " + ln + "\n" for ln in blk.splitlines())),
-                   closing_r2(head="<!-- reviewer scratch -->\n")):
+                   closing_r2(head="<!-- reviewer scratch -->\n"),
+                   closing_r2(tail="<!--\nscratch notes\n-->\n")):
             code, out = run_one_r2(r2)
             self.assertEqual(code, 0, out)
             self.assertIn("FIXED=1", out)
@@ -674,3 +675,7 @@ class B2WholeResponseSweep(unittest.TestCase):
         for prose in ("Findings: none at P1/P2. No new P3.", "Suites 14/14 green, no P2.",
                       "H-U1/H-U3 answered; no P3."):
             self.assertEqual(parse_text(closing_r2(tail=prose + "\n")), [], prose)
+        # A real path that merely contains a tally-like run is still a path.
+        for prose in ("P2 in lib/2024/10/report.ts — totals drift", "P2 in reports/P1/P2/summary — wrong"):
+            with self.assertRaises(ValueError, msg=prose):
+                parse_text(closing_r2(tail=prose + "\n"))
