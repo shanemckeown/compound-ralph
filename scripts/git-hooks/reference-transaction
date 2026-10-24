@@ -21,14 +21,17 @@ are read from the transaction's old value of the LOCAL refs/heads/main (never a
 remote-tracking ref or FETCH_HEAD) into a fresh temp dir, and run there with python3 -E -s
 (not -I: that drops the script dir from sys.path and the sibling import fails). Every git
 inspection uses --no-replace-objects. Recreating a deleted main takes the checker from
-main's reflog, else from the live export (git deletes the reflog with the ref), else denies.
+main's reflog; with no reflog (git deletes it with the ref) only a human may recreate main.
+While main is symbolic, every ref in its chain (main -> ... -> leaf) is watched.
 
 Live export (LUCY-p122j): ~/.claude's main checkout is the running harness, so an
 uncommitted edit there would run before any ref moved. Gates therefore run from
 <git-common-dir>/live/current, a read-only copy of GATE_PATHS at committed main, through
 <git-common-dir>/live/run-gate, which checks the copy against main's blobs before every
 run. In state "committed" this hook refreshes the copy for main's new value, so it moves
-only when main does.
+only when main does. The export is written blob by blob from main's tree (never git archive,
+which .gitattributes can change), refuses a symlink, and only ever holds main's current tip:
+the --export CLI (install.sh, live-export.sh) also needs the orchestrator or a human.
 
 This file runs with python3 -I -S (no PYTHON* env, no cwd or user site on sys.path, no
 site import) and re-execs itself that way if started otherwise.
@@ -126,6 +129,23 @@ def symbolic_main():
     return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
 
 
+def symref_chain():
+    """Every ref main's symbolic chain passes through, lowercased: main -> middle -> leaf.
+
+    Empty when main is a direct ref. A loop or a chain deeper than 10 ends the walk; the
+    refs seen so far are still all watched.
+    """
+    chain, ref = [], MAIN_REF
+    for _ in range(10):
+        out = git("symbolic-ref", "--no-recurse", "-q", ref)
+        target = out.stdout.strip() if out.returncode == 0 else ""
+        if not target or target.lower() in chain or target.lower() == MAIN_REF:
+            break
+        chain.append(target.lower())
+        ref = target
+    return chain
+
+
 def common_dir():
     out = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     if out.returncode != 0 or not out.stdout.strip():
@@ -141,21 +161,28 @@ def is_commit(oid):
 def live_current():
     """The commit the live export holds, or None."""
     try:
-        target = os.readlink(os.path.join(common_dir(), LIVE, "current"))
+        live = os.path.join(common_dir(), LIVE)
+        oid = os.readlink(os.path.join(live, "current"))
     except (OSError, RuntimeError):
         return None
-    oid = os.path.basename(target.rstrip("/"))
+    # A bare oid naming a real directory beside the link: never a path, never dangling.
+    if OID_RE.fullmatch(oid) is None:
+        return None
+    target = os.path.join(live, oid)
+    if os.path.islink(target) or not os.path.isdir(target):
+        return None
     return oid if is_commit(oid) else None
 
 
 def recreate_anchor():
-    """Main's last value before it was deleted: the reflog if git kept one, else the export."""
+    """Main's last value before it was deleted, from the reflog, else None (only a human may
+    then recreate it). Never the live export: its link is not proof of main's history."""
     log = git("reflog", "show", "--format=%H", MAIN_REF)
     if log.returncode == 0:
         for oid in log.stdout.split():
             if oid != ZERO and is_commit(oid):
                 return oid
-    return live_current()
+    return None
 
 
 def changed_paths(old, new):
@@ -273,12 +300,14 @@ def export_drift(root, oid):
                 problems.append("extra file %s" % rel)
                 continue
             mode, blob = tree[rel]
-            st = os.lstat(full)
-            if mode == "120000":
-                ok = stat.S_ISLNK(st.st_mode) and blob_id(os.fsencode(os.readlink(full)), algo) == blob
-            else:
-                with open(full, "rb") as fh:
-                    ok = stat.S_ISREG(st.st_mode) and blob_id(fh.read(), algo) == blob
+            if mode == "120000" or stat.S_ISLNK(os.lstat(full).st_mode):
+                problems.append("symlink %s" % rel)
+                continue
+            if not stat.S_ISREG(os.lstat(full).st_mode):
+                problems.append("not a file %s" % rel)
+                continue
+            with open(full, "rb") as fh:
+                ok = blob_id(fh.read(), algo) == blob
             if not ok:
                 problems.append("changed %s" % rel)
     problems.extend("missing %s" % rel for rel in sorted(set(tree) - seen))
@@ -309,6 +338,41 @@ def make_read_only(path):
         os.chmod(dirpath, 0o555)
 
 
+def write_blobs(root, tree):
+    """Write each {relpath: (mode, blob)} under root from the object store, exactly.
+
+    Not git archive: export-ignore / export-subst in .gitattributes would change what it
+    writes. A symlink is refused (it could point back into the checkout).
+    """
+    links = sorted(rel for rel, (mode, _) in tree.items() if mode == "120000")
+    if links:
+        raise RuntimeError("gate path is a symlink: %s" % ", ".join(links[:5]))
+    rels = sorted(tree)
+    if not rels:
+        return
+    batch = subprocess.run(["git", "--no-replace-objects", "cat-file", "--batch"],
+                           input=b"".join(tree[r][1].encode() + b"\n" for r in rels),
+                           capture_output=True)
+    if batch.returncode != 0:
+        raise RuntimeError("git cat-file --batch failed: %s" % batch.stderr.decode(errors="replace"))
+    out, pos = batch.stdout, 0
+    for rel in rels:
+        mode, blob = tree[rel]
+        end = out.index(b"\n", pos)
+        header = out[pos:end].decode().split()
+        if len(header) != 3 or header[0] != blob or header[1] != "blob":
+            raise RuntimeError("cat-file gave %r for %s" % (header, rel))
+        size = int(header[2])
+        data = out[end + 1:end + 1 + size]
+        pos = end + 1 + size + 1
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        fd = os.open(full, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o755 if mode == "100755" else 0o644)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+
+
 def export(oid):
     """Write main@oid's gate paths to <common>/live/<oid>, read-only, and point current at it.
 
@@ -317,6 +381,11 @@ def export(oid):
     """
     if not is_commit(oid):
         sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s is not a commit\n" % oid)
+        return 1
+    if oid != main_tip():
+        # Whatever the route (CLI, live-export.sh, a hand-fed "committed" line), live/ only
+        # ever holds main's current tip.
+        sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s is not main's tip\n" % oid)
         return 1
     live = os.path.join(common_dir(), LIVE)
     os.makedirs(live, exist_ok=True)
@@ -329,15 +398,7 @@ def export(oid):
             tree = gate_tree(oid)
             if tree is None:
                 raise RuntimeError("cannot list %s" % oid)
-            if tree:
-                archive = subprocess.Popen(
-                    ["git", "--no-replace-objects", "archive", "--format=tar", oid, "--", *sorted(tree)],
-                    stdout=subprocess.PIPE)
-                untar = subprocess.run(["tar", "-x", "-f", "-", "-C", tmp], stdin=archive.stdout,
-                                       capture_output=True)
-                archive.stdout.close()
-                if archive.wait() != 0 or untar.returncode != 0:
-                    raise RuntimeError("git archive | tar failed: %s" % untar.stderr.decode(errors="replace"))
+            write_blobs(tmp, tree)
             problems = export_drift(tmp, oid)
             if problems:
                 raise RuntimeError("export does not match %s: %s" % (oid, "; ".join(problems[:5])))
@@ -364,7 +425,8 @@ def prepared(lines):
     blocked = []
     tip = main_tip()
     sym = symbolic_main()
-    watched = {MAIN_REF} | ({sym.lower()} if sym else set())
+    # Every link: with main -> middle -> leaf, moving middle moves main too.
+    watched = {MAIN_REF} | set(symref_chain())
     trusted = None  # the checker comes from main's value before this transaction
     for line in lines:
         parts = line.split(" ", 2)
@@ -431,7 +493,12 @@ def main(argv):
         sys.stdout.write("".join(p + "\n" for p in GATE_PATHS))
         return 0
     if argv[:1] == ["--export"] and len(argv) == 2:
-        oid = git("rev-parse", "--verify", "-q", argv[1] + "^{commit}").stdout.strip()
+        # install.sh / live-export.sh: only the orchestrator or a human; export() itself
+        # refuses anything but main's tip.
+        if caller_role(main_tip()) not in ("human", "orchestrator"):
+            sys.stderr.write("LIVE EXPORT REFUSED (LUCY-wqn96): only the orchestrator refreshes the export\n")
+            return 1
+        oid = git("rev-parse", "--verify", "-q", "--end-of-options", argv[1] + "^{commit}").stdout.strip()
         return export(oid) if oid else 1
     if argv == ["--check-orchestrator"]:
         # install.sh: may this caller install? Same identity rule as a gate move.

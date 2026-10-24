@@ -203,7 +203,10 @@ if pct > CONTEXT_LIMIT:
          "if it continues that tab's current job.")
 
 # 2. Shane's own conversations need his go. Exempt: orchestrator, claimed Managers, collaborators.
-who = subprocess.run(["python3", os.path.expanduser("~/.claude/scripts/fleet-role.py"), "--who", "--json"],
+# The fleet-role.py beside this file: run through run-gate that is main's committed copy in the
+# live export, never the checkout's (LUCY-wqn96).
+ROLE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "fleet-role.py")
+who = subprocess.run([sys.executable, ROLE_SCRIPT, "--who", "--json"],
                      capture_output=True, text=True, timeout=10).stdout
 try:
     orch = ((json.loads(who) or {}).get("record") or {}).get("session_id", "") if who.strip() else ""

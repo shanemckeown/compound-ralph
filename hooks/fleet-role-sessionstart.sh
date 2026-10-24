@@ -14,7 +14,9 @@ set -euo pipefail
 
 INPUT="$(cat)"
 SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
-ROLE_SCRIPT="/Users/shane/.claude/scripts/fleet-role.py"
+# The fleet-role.py beside this hook: run through run-gate that is main's committed copy in
+# the live export, never the checkout's (LUCY-wqn96).
+ROLE_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/scripts/fleet-role.py"
 
 if [ -z "$SESSION_ID" ] || [ ! -x "$ROLE_SCRIPT" ]; then
   # Can't determine identity — default-deny, say nothing rather than guess.

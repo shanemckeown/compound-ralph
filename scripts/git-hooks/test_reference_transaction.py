@@ -683,14 +683,17 @@ def test_s4_orchestrator_may_make_main_symbolic(repo):
     assert repo.git("symbolic-ref", "refs/heads/main", "refs/heads/e3", check=False).returncode == 0
 
 
-# S5: recreating main takes the checker from main's last value
-def test_s5_orchestrator_deletes_and_recreates_main(repo):
+# S5 / T2: recreating main takes the checker from main's reflog only. git drops the reflog with
+# the ref and cannot read a deleted ref's log, so after a delete only a human recreates main.
+def test_s5_orchestrator_deletes_main_and_a_human_recreates_it(repo):
     repo.set_role("orchestrator")
     tip = repo.rev("main")
     repo.git("checkout", "-q", "-b", "other")
     repo.as_agent()
     assert repo.git("update-ref", "-d", "refs/heads/main", check=False).returncode == 0
     res = repo.git("update-ref", "refs/heads/main", tip, check=False)
+    assert res.returncode != 0 and "(creates main)" in res.stderr
+    res = repo.git("update-ref", "refs/heads/main", tip, check=False, env=repo.human_env())
     assert res.returncode == 0, res.stderr
     assert repo.rev("main") == tip
 
@@ -901,10 +904,16 @@ CALLERS = ["scripts/review-gate.sh", "references/review-lead/review_gate.py",
 CHECKOUT_GATE_RE = r"\.claude/((?:scripts|references|skills|hooks)/[\w./-]+?\.(?:py|sh)|skills/land-batch/bin/[\w.-]+)"
 
 
+# install.sh is the one gate script run from the checkout: the orchestrator runs it once, and it
+# installs only main's committed blobs. Callers name it when run-gate is missing (T6).
+CHECKOUT_OK = ("scripts/git-hooks/install.sh",)
+
+
 def checkout_gate_refs(text):
     import re
     hook = load_hook()
-    return [m.group(1) for m in re.finditer(CHECKOUT_GATE_RE, text) if hook.is_gate_path(m.group(1))]
+    return [m.group(1) for m in re.finditer(CHECKOUT_GATE_RE, text)
+            if hook.is_gate_path(m.group(1)) and m.group(1) not in CHECKOUT_OK]
 
 
 def test_l5_callers_use_run_gate():
@@ -991,3 +1000,327 @@ def test_l5_patched_live_settings_route_every_committed_gate_hook(tmp_path):
     assert [c for rel, c in unrouted if rel in committed] == []
     for rel, cmd in unrouted:
         assert cmd in patch.split("--- a/settings.json")[0], cmd
+
+
+# ---- Round 4 (T1-T7) ----
+
+def hook_cli(repo, *args, stdin=None, env=None):
+    hook = os.path.join(repo.common, "hooks", "reference-transaction")
+    return subprocess.run([hook, *args], cwd=repo.root, env=env or repo.env, input=stdin,
+                          capture_output=True, text=True)
+
+
+def export_path(repo, rel):
+    return os.path.join(repo.live, repo.current(), rel)
+
+
+def writable(path):
+    os.chmod(os.path.dirname(path), 0o755)
+
+
+# T1: every refusal, exceptions included, uses the caller's --fail-exit code
+def test_t1_unreadable_export_file_uses_fail_exit(repo):
+    target = export_path(repo, PROBE_SIBLING)
+    os.chmod(target, 0)
+    try:
+        res = repo.gate("--fail-exit", "2", PROBE)
+        assert res.returncode == 2 and "live export drift; refuse" in res.stderr, res.stderr
+        assert repo.gate(PROBE).returncode == 3
+    finally:
+        os.chmod(target, 0o444)
+
+
+def test_t1_broken_file_symlink_uses_fail_exit(repo):
+    target = export_path(repo, PROBE_SIBLING)
+    writable(target)
+    os.unlink(target)
+    os.symlink(str(repo.tmp / "nowhere.py"), target)
+    res = repo.gate("--fail-exit", "2", PROBE)
+    assert res.returncode == 2 and "symlink " + PROBE_SIBLING in res.stderr, res.stderr
+
+
+def test_t1_directory_in_place_of_a_file_uses_fail_exit(repo):
+    target = export_path(repo, PROBE_SIBLING)
+    writable(target)
+    os.unlink(target)
+    os.mkdir(target)
+    assert repo.gate("--fail-exit", "2", PROBE).returncode == 2
+
+
+def test_t1_unloadable_hook_uses_fail_exit(repo):
+    hook = os.path.join(repo.common, "hooks", "reference-transaction")
+    saved = open(hook).read()
+    try:
+        with open(hook, "w") as fh:
+            fh.write("raise SystemExit(0)\n")
+        assert repo.gate("--fail-exit", "2", PROBE).returncode == 2
+    finally:
+        with open(hook, "w") as fh:
+            fh.write(saved)
+
+
+# T2: only main's tip, by the orchestrator / a human or a main move, is ever exported
+def test_t2_sub_export_of_a_feature_sha_refused(repo):
+    before = repo.current()
+    tip = repo.branch_with_gate_change()
+    repo.as_agent()
+    res = hook_cli(repo, "--export", tip)
+    assert res.returncode == 1 and "REFUSED" in res.stderr
+    assert repo.current() == before
+    assert not os.path.exists(os.path.join(repo.live, tip))
+
+
+def test_t2_sub_export_of_main_refused(repo):
+    repo.as_agent()
+    res = hook_cli(repo, "--export", "main")
+    assert res.returncode == 1 and "only the orchestrator" in res.stderr
+
+
+def test_t2_orchestrator_exports_main_only(repo):
+    repo.set_role("orchestrator")
+    tip = repo.branch_with_gate_change()
+    repo.as_agent()
+    res = hook_cli(repo, "--export", tip)
+    assert res.returncode == 1 and "is not main's tip" in res.stderr
+    res = hook_cli(repo, "--export", "main")
+    assert res.returncode == 0, res.stderr
+    assert repo.current() == repo.rev("main")
+
+
+def test_t2_hand_fed_committed_line_cannot_move_the_export(repo):
+    before = repo.current()
+    tip = repo.branch_with_gate_change()
+    repo.as_agent()
+    res = hook_cli(repo, "committed", stdin="%s %s refs/heads/main\n" % (before, tip))
+    assert res.returncode == 0
+    assert repo.current() == before
+
+
+def test_t2_live_export_sh_refused_for_a_sub(repo):
+    tip = repo.branch_with_gate_change()
+    repo.as_agent()
+    script = os.path.join(os.path.dirname(HOOKS_DIR), "live-export.sh")
+    for sha in (tip, "main"):
+        res = subprocess.run(["bash", script, str(repo.root), sha], env=repo.env,
+                             capture_output=True, text=True)
+        assert res.returncode != 0 and "REFUSED" in res.stderr
+
+
+def test_t2_poisoned_link_is_not_a_recreate_anchor(repo):
+    """Main is deleted; the current link now names a commit with a yes-checker; a SUB recreates."""
+    repo.git("checkout", "-q", "-b", "permissive")
+    repo.write(CHECKER, stub_source("orchestrator", repo.seen))
+    repo.git("add", CHECKER)
+    repo.git("commit", "-q", "-m", "permissive")
+    permissive = repo.rev("permissive")
+    repo.git("update-ref", "-d", "refs/heads/main")  # human
+    link = os.path.join(repo.live, "current")
+    os.unlink(link)
+    os.symlink(permissive, link)
+    repo.as_agent()
+    res = repo.git("update-ref", "refs/heads/main", permissive, check=False)
+    assert res.returncode != 0 and "(creates main)" in res.stderr
+
+
+# T3: every link of main's symbolic chain is watched
+def make_chain(repo):
+    """main -> middle -> leaf, made by a human; HEAD on another branch."""
+    repo.git("checkout", "-q", "-b", "other")
+    repo.git("branch", "leaf", "main")
+    env = repo.human_env()
+    repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/leaf", env=env)
+    repo.git("symbolic-ref", "refs/heads/main", "refs/heads/middle", env=env)
+    assert repo.rev("main") == repo.rev("leaf")
+
+
+def test_t3_sub_redirecting_an_intermediate_link_refused(repo):
+    tip = repo.branch_with_gate_change()
+    repo.git("checkout", "-q", "main")
+    make_chain(repo)
+    before = repo.rev("main")
+    repo.as_agent()
+    res = repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/e3", check=False)
+    assert res.returncode != 0 and "REFUSED (LUCY-wqn96)" in res.stderr
+    assert repo.rev("main") == before != tip
+
+
+def test_t3_orchestrator_may_redirect_an_intermediate_link(repo):
+    repo.set_role("orchestrator")
+    tip = repo.branch_with_gate_change()
+    repo.git("checkout", "-q", "main")
+    make_chain(repo)
+    repo.as_agent()
+    assert repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/e3", check=False).returncode == 0
+    assert repo.rev("main") == tip
+
+
+def test_t3_symref_chain_walks_every_link(repo):
+    make_chain(repo)
+    hook = load_hook()
+    env = dict(os.environ, GIT_DIR=repo.common)
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        assert hook.symref_chain() == ["refs/heads/middle", "refs/heads/leaf"]
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+# T4: exported gates resolve their siblings inside the export, never in the checkout
+LIVE_HOOKS = os.path.join(os.path.dirname(os.path.dirname(HOOKS_DIR)), "hooks")
+DIRTY_CHECKER = textwrap.dedent("""\
+    import sys
+    open({marker!r}, 'w').write('dirty checkout fleet-role ran')
+    print('ORCHESTRATOR'); sys.exit(0)
+""")
+
+
+def commit_real_hook(repo, name):
+    dest = repo.root / "hooks" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(os.path.join(LIVE_HOOKS, name), dest)
+    os.chmod(repo.root / CHECKER, 0o755)  # as on the real main
+    repo.git("add", "hooks/" + name, CHECKER, env=repo.human_env())
+    repo.git("commit", "-q", "-m", "hook " + name, env=repo.human_env())
+    marker = repo.tmp / "dirty-ran"
+    repo.write(CHECKER, DIRTY_CHECKER.format(marker=str(marker)))
+    return marker
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+def test_t4_sessionstart_hook_runs_the_committed_checker(repo):
+    marker = commit_real_hook(repo, "fleet-role-sessionstart.sh")
+    res = subprocess.run([repo.run_gate, "hooks/fleet-role-sessionstart.sh"], cwd=repo.root,
+                         env=repo.env, input=json.dumps({"session_id": AGENT_ID}),
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert "this session is SUB" in res.stdout
+    assert not marker.exists()
+    assert AGENT_ID in repo.seen.read_text()
+
+
+def test_t4_sendmessage_guard_runs_the_committed_checker(repo, tmp_path):
+    marker = commit_real_hook(repo, "sendmessage-guard.py")
+    home = tmp_path / "home"
+    (home / ".local/bin").mkdir(parents=True)
+    claude = home / ".local/bin/claude"
+    claude.write_text("#!/bin/sh\necho '[{\"name\": \"worker1\", \"kind\": \"interactive\", "
+                      "\"sessionId\": \"sid-1\", \"startedAt\": 0}]'\n")
+    claude.chmod(0o755)
+    proj = home / ".claude/projects/p"
+    proj.mkdir(parents=True)
+    (proj / "sid-1.jsonl").write_text(json.dumps(
+        {"type": "assistant", "message": {"model": "claude-x", "usage": {"input_tokens": 1000}}}) + "\n")
+    env = dict(repo.env, HOME=str(home))
+    payload = {"tool_name": "SendMessage", "session_id": AGENT_ID,
+               "tool_input": {"to": "worker1", "message": "NEW WORK: do a thing"}}
+    res = subprocess.run([repo.run_gate, "--fail-exit", "2", "hooks/sendmessage-guard.py"],
+                         cwd=repo.root, env=env, input=json.dumps(payload), capture_output=True, text=True)
+    assert "live export drift" not in res.stderr, res.stderr
+    assert "--who --json" in repo.seen.read_text()  # the committed checker answered
+    assert not marker.exists()
+
+
+def test_t4_exported_hooks_name_no_checkout_checker():
+    for name in ("sendmessage-guard.py", "fleet-role-sessionstart.sh"):
+        with open(os.path.join(LIVE_HOOKS, name), encoding="utf-8") as fh:
+            code = [l for l in fh if not l.lstrip().startswith("#") and "CTX=" not in l]
+        assert not [l for l in code if ".claude/scripts/fleet-role.py" in l], name
+
+
+# T5: the export is built from blobs, so .gitattributes cannot change it
+def test_t5_export_ignore_attribute_does_not_drop_a_gate_file(repo):
+    repo.as_agent()
+    res = repo.commit(".gitattributes", PROBE + " export-ignore\n" + PROBE_SIBLING + " export-subst\n")
+    assert res.returncode == 0, res.stderr
+    assert repo.current() == repo.rev("main")
+    assert export_files(repo) == gate_files(repo)
+    res = repo.gate(PROBE)
+    assert res.returncode == 0 and res.stdout.startswith("committed "), res.stderr
+
+
+def test_t5_export_keeps_the_exec_bit(repo):
+    mode = os.stat(export_path(repo, "scripts/git-hooks/run-gate")).st_mode
+    assert mode & 0o111 and not mode & 0o222
+    assert not os.stat(export_path(repo, GATE_FILE)).st_mode & 0o111
+
+
+def test_t5_gate_symlink_is_never_exported(repo):
+    before = repo.current()
+    os.symlink(str(repo.tmp / "outside.sh"), repo.root / "hooks-link.sh")
+    os.makedirs(repo.root / "hooks", exist_ok=True)
+    os.rename(repo.root / "hooks-link.sh", repo.root / "hooks" / "link.sh")
+    repo.git("add", "hooks/link.sh")
+    res = repo.git("commit", "-q", "-m", "gate symlink", check=False)  # human
+    assert res.returncode == 0 and "gate path is a symlink" in res.stderr
+    assert repo.current() == before
+    assert repo.gate(PROBE).returncode == 3
+
+
+# T6: before install, the review gate refuses with the install command
+def test_t6_review_gate_without_run_gate_says_install(tmp_path):
+    script = os.path.join(os.path.dirname(HOOKS_DIR), "review-gate.sh")
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    res = subprocess.run(["bash", script, "LUCY-x", "0" * 40], env=env, capture_output=True, text=True)
+    assert res.returncode == 3
+    assert "run-gate not installed" in res.stderr and "install.sh" in res.stderr
+
+
+# T7: the gate runs with a scrubbed environment and a fixed PATH; the link must be exact
+ENV_PROBE = "references/review-lead/envprobe.py"
+
+
+def test_t7_caller_environment_is_scrubbed(repo, tmp_path):
+    repo.write(ENV_PROBE, textwrap.dedent("""\
+        import json, os, shutil
+        keys = ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP",
+                "PATH", "CLAUDE_LIVE_ROOT")
+        print(json.dumps({k: os.environ.get(k) for k in keys} | {"node": shutil.which("node")}))
+    """))
+    repo.git("add", ENV_PROBE)
+    repo.git("commit", "-q", "-m", "env probe")  # human
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "node").write_text("#!/bin/sh\necho fake\n")
+    (fake / "node").chmod(0o755)
+    env = dict(repo.env, BASH_ENV="/x", ENV="/x", NODE_OPTIONS="--require /x", NODE_PATH="/x",
+               PYTHONPATH="/x", PYTHONSTARTUP="/x", PATH=str(fake) + ":" + repo.env["PATH"],
+               HOME=str(tmp_path))
+    res = repo.gate(ENV_PROBE, env=env)
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(res.stdout)
+    assert all(seen[k] is None for k in ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH",
+                                         "PYTHONPATH", "PYTHONSTARTUP"))
+    path = seen["PATH"].split(":")
+    assert path[:5] == ["/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    assert str(fake) not in path and path[5:] == [str(tmp_path / d) for d in
+                                                  (".local/bin", ".claude/bin", ".npm-global/bin")]
+    assert seen["node"] != str(fake / "node")
+    assert seen["CLAUDE_LIVE_ROOT"] == os.path.join(repo.live, repo.rev("main"))
+
+
+def test_t7_current_naming_a_missing_dir_refused(repo):
+    sha = repo.current()
+    os.rename(os.path.join(repo.live, sha), os.path.join(repo.live, "moved"))
+    res = repo.gate("--fail-exit", "2", PROBE)
+    assert res.returncode == 2 and "no live/current export" in res.stderr
+
+
+@pytest.mark.parametrize("form", ["./{sha}", "{live}/{sha}", "{sha}/"])
+def test_t7_current_must_be_a_bare_oid(repo, form):
+    sha = repo.current()
+    link = os.path.join(repo.live, "current")
+    os.unlink(link)
+    os.symlink(form.format(sha=sha, live=repo.live), link)
+    assert repo.gate(PROBE).returncode == 3
+
+
+def test_t7_symlink_inside_the_export_refused(repo):
+    target = export_path(repo, PROBE_SIBLING)
+    writable(target)
+    os.unlink(target)
+    os.symlink(os.path.join(repo.root, PROBE_SIBLING), target)  # same content, but a link
+    res = repo.gate(PROBE)
+    assert res.returncode == 3 and "symlink " + PROBE_SIBLING in res.stderr
