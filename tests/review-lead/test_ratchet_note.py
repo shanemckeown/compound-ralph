@@ -109,6 +109,28 @@ class RatchetNote(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("never-dismiss area", out)
 
+    def test_4b_behaviour_claim_without_path_or_keyword_escalates(self):
+        # Round-1 own-gate reviewers' reproductions (Astra P1, Opus P1 x4, Opus P3): residue outside the
+        # ratchet vocabulary keeps the backstop, keyword or not.
+        for src in (
+            f"P3 {T} — credit-service.ts 588/578; retrying deducts twice — add an idempotency guard",
+            f"P3 {T} — credit-service.ts 588/578; its retry path also skips the deduction so the client gets "
+            "a free session — regen",
+            f"P3 {T} — credit-service.ts 588/578; double-deducts every session on a retried visit — regen",
+            f"P3 {T} — credit-service.ts 588/578 — regen; P1 lib/services/visit.ts deducts twice — guard",
+            f"P3 {T} — credit-service.ts 588/578; staff at other clinics can open this client's notes — regen",
+            f"P3 {T} — credit-service.ts 2/1 deductions per retry — regen",
+            f"P3 {T} — credit-service.ts 3/5 retries deduct twice — regen",
+        ):
+            self.assertFalse(chk.ratchet_only(src), src)
+            code, out, files = self.run_one(lead_for(consider(src)), src)
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1", out, src)
+
+    def test_4c_only_a_p3_is_exempt(self):
+        src = f"P2 {T} — lib/services/credit-service.ts 588/578 — regenerate the baseline during landing"
+        self.assertFalse(chk.ratchet_only(src))
+
     def test_5_ratchet_text_at_credit_service_file_line_escalates(self):
         src = "P3 lib/services/credit-service.ts:12 — file-length ratchet: credit-service.ts 588/578 — regen"
         code, out, _ = self.run_one(lead_for(noted(src)), src)

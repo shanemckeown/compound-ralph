@@ -118,22 +118,29 @@ PROTECTED = re.compile(
     re.I,
 )
 # The file-length ratchet names the files it counts, and the lander regenerates its baseline, so a credit or
-# cron file name must not make it protected (LUCY-mz6fk). Exempt from the keyword backstop by SHAPE only:
-# declared at the ratchet test, every other path in "<path> [is] N/M [lines]" count form, and nothing else
-# path-like or protected left once those are removed. A protected category still wins.
+# cron file name must not make it protected (LUCY-mz6fk). Exempt from the keyword backstop by SHAPE only: a P3
+# declared at the ratchet test, every other path in "<path> [is] N/M [lines]" count form, and every word left
+# once those are removed from the ratchet vocabulary below. Anything else (a behaviour claim, another path)
+# keeps the backstop. A protected category still wins.
 RATCHET_TEST = "tests/meta/file-length-ratchet.test.ts"
 RATCHET_COUNT = re.compile(r"(?<![\w./\[\]-])[\w./\[\]-]*[A-Za-z_][\w./\[\]-]*\.[A-Za-z]{1,5}"
                            r"\s+(?:is\s+)?\d+\s*/\s*\d+(?:\s+lines?)?(?![\w/])")
-PATH_LIKE = re.compile(r"[\w\[\]-]\.(?:tsx?|jsx?|mjs|cjs|py|sql|json|md|sh|ya?ml)\b"
-                       r"|\b[A-Za-z_][\w.-]*/[A-Za-z_\[]|:\d")
+RATCHET_WORDS = frozenset("""
+    a an the and or of for to by as at on in is are this these its it no not only still
+    file files length file-length ratchet baseline regenerate regenerates regenerated regen lander lander's
+    lander-owned landing land during after line lines count counts over above exceeds exceeded grows grew limit
+    limits cap build build-gate gate failure fails fail failing test meta real clinic scenario hygiene
+    explicitly assigned bead bead's comments comment per owned branch branches touch leave left runtime effect
+""".split())
 
 
 def ratchet_only(src):
     loc = leading_loc(src)
-    if not loc or loc.rsplit(":", 1)[0] != RATCHET_TEST:
+    if not src.startswith("P3") or not loc or loc.rsplit(":", 1)[0] != RATCHET_TEST:
         return False
     rest = RATCHET_COUNT.sub(" ", src[3:].replace(loc, " ", 1))
-    return not PATH_LIKE.search(rest) and not PROTECTED.search(rest)
+    words = re.findall(r"[a-z]+(?:[-'][a-z]+)*", rest.lower().replace("\u2019", "'"))
+    return all(w in RATCHET_WORDS for w in words)
 
 
 FINDING = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(P[123])(?:\*\*)?[\s:]+\S+.*$")
