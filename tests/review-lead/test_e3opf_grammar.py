@@ -84,7 +84,9 @@ class G1OneTopLevelBlock(unittest.TestCase):
 
     def test_tilde_fence_nests_too(self):
         nested = "~~~~\n```review-verdict\n{\"verdict\": \"FAIL\"}\n```\n~~~~\n"
-        self.assertEqual(chk.verdict_blocks("v", nested), [])
+        with self.assertRaisesRegex(ValueError, "only review-verdict block sits inside another fence"):
+            chk.verdict_blocks("v", nested)
+        self.assertEqual(len(chk.verdict_blocks("v", nested + prior_block("PASS"))), 1)
 
     def test_appended_same_tip_response_refused(self):
         first = r2_file(prior=[(REF, "closed")])
@@ -532,7 +534,9 @@ class A1CommonMarkTopLevel(unittest.TestCase):
         indent = lambda pre: "".join(pre + ln + "\n" for ln in blk.splitlines())
         for wrapped in ("<!--\n" + blk + "-->\n", "<!-- " + blk + "-->\n", indent("    "), indent("\t"),
                         indent("   "), "<div><!--\n" + blk + "-->\n</div>\n", "<div>\n" + blk + "</div>\n",
-                        "notes <!-- scratch\n" + blk + "-->\n",
+                        "<pre>\n\n" + blk + "</pre>\n", "<script>\n\n" + blk + "</script>\n",
+                        "<textarea x>\n\n" + blk + "</textarea>\n", "<!-- a --> <!-- b\n" + blk + "-->\n",
+                        "<!--\na -->  <!-- b\n\n" + blk + "-->\n",
                         "- " + "`" * 4 + "markdown\n" + indent("  ") + "  " + "`" * 4 + "\n",
                         "- item\n" + indent("    "), "> " + blk.replace("\n", "\n> ")):
             self.assert_refused(closing_r2(wrapped))
@@ -548,9 +552,24 @@ class A1CommonMarkTopLevel(unittest.TestCase):
             self.assertEqual(code, 1, out)
             self.assertNotIn("FIXED=", out)
 
+    def test_raising_block_only_inside_another_fence_is_refused(self):
+        """Opus own-gate r2 :160: a reviewer wraps its whole answer in a fence, so the block holding the P1 is
+        nested and the file has no top-level block. Refused, never dropped to the prose parser."""
+        blk = strict_block("FAIL", [("P2", "lib/pay.ts:37", "retry charges twice — guard"),
+                                    ("P1", "lib/refund.ts:9", "refund goes to another clinic — scope it")])
+        for wrap in ("`" * 4 + "markdown\n" + blk + "`" * 4 + "\n", "```text\nanswer follows\n" + blk + "```\n"):
+            r1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{R1_SRC}\nVERIFIED OK\n- tests\n{wrap}"
+            code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                                  [("REVIEW_x_astra_a.md", r1, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000)])
+            self.assertEqual(code, 1, out)
+            self.assertIn("inside another fence", out)
+            self.assertNotIn("FIXED=", out)
+
     def test_column_zero_block_after_closed_html_still_counts(self):
         for r2 in (closing_r2(head="<!-- reviewer scratch -->\n"), closing_r2(tail="<!--\nscratch notes\n-->\n"),
-                   closing_r2(tail="<details>\nraw\n</details>\n\n"), closing_r2(tail="quoted `<!--` in prose\n")):
+                   closing_r2(tail="<details>\nraw\n</details>\n\n"), closing_r2(tail="quoted `<!--` in prose\n"),
+                   closing_r2(head="notes <!-- scratch\n"), closing_r2(head="<pre>\nraw\n</pre>\n"),
+                   closing_r2(head="<!-- a --> <!-- b --> c\n")):
             code, out = run_one_r2(r2)
             self.assertEqual(code, 0, out)
             self.assertIn("FIXED=1", out)
@@ -671,7 +690,21 @@ class B1EverySeatPrior(unittest.TestCase):
         self.assertIn("BLOCKING=0 ESCALATE=0", out)
         self.assertIn("FIXED=1", out)
 
-    def test_blockless_tip_input_is_not_a_seat(self):
+    def test_blockless_tip_review_is_a_silent_seat(self):
+        """Opus own-gate r2 :1087: a tip review that forgot its block (and keeps the finding open in prose) is
+        still a seat: it closes nothing, so another seat's closed prior cannot grade the finding fixed."""
+        blockless = (f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- tests\nUNVERIFIED\n"
+                     "- r1 pay.ts:37 open: retry still charges twice at this tip\n")
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("REVIEW_x_opus_r2_b.md", blockless, 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
+        self.assertIn("BLOCKING=1", out)
+        self.assertIn("FIXED=0", out)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
+        self.assertIn("FIXED=1", out)
+
+    def test_mutants_file_is_not_a_seat(self):
         """Own-gate r1 Opus :1071: the builder's mutants file echoes the tip but has no block; it is not a seat,
         so it cannot deadlock every fixed grade. A seat WITH a block and no entry still blocks."""
         mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"

@@ -136,9 +136,19 @@ SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 # review-verdict block that is content, not the reviewer's answer.
 # Indented 4+ spaces or a tab, it is an indented code block, not a fence (LUCY-e3opf A1).
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-# HTML (A1): a `<!--` anywhere outside a fence and a code span hides every line up to the one holding `-->`;
-# a line starting with a tag (`<div>`) opens an HTML block up to the next blank line.
-HTML_START = re.compile(r"^ {0,3}<[A-Za-z/!?]")
+# HTML (A1), CommonMark 0.31 HTML blocks, recognised at line start only: types 1-5 run to their own end
+# marker (`</pre>`, `-->`, `?>`, `>`, `]]>`), which may sit on the start line; any other line starting with a
+# tag (types 6-7, `<div>`) runs to the next blank line. A `<!--` mid-line is inline text, not a block.
+HTML_ENDS = ((re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)", re.I),
+              re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
+             (re.compile(r" {0,3}<!--"), re.compile(r"-->")),
+             (re.compile(r" {0,3}<\?"), re.compile(r"\?>")),
+             (re.compile(r" {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+             (re.compile(r" {0,3}<![A-Za-z]"), re.compile(r">")))
+HTML_START = re.compile(r"^ {0,3}<[A-Za-z/]")
+BLANK_ENDS = re.compile(r"^[ \t]*$")
+# The builder's mutants file (/goal Phase 4 Step 3): not a review seat under B1.
+MUTANTS_FILE = re.compile(r"mutants-round-\d+\.txt")
 # A review-verdict opener behind any indent or container marker (list item, blockquote). Only one at column 0,
 # outside HTML, is the reviewer's answer; any other is refused, never silently dropped (A1).
 VERDICT_OPENER = re.compile(r"^[ \t>*+\-.)\d]*(?:<(?:!--|[A-Za-z][^>]*>)[ \t]*)*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
@@ -157,44 +167,62 @@ class Block:
         self.start, self.end, self.body = start, end, body
 
 
+def html_left_open(ends, s, at):
+    """The HTML block's end pattern if line s (from index at) leaves it open, else None. A comment stays open
+    when a `<!--` follows its last `-->` on the line: the raw HTML passes through and the browser hides
+    everything up to the next `-->` (Opus own-gate r2 :174)."""
+    if ends is BLANK_ENDS:
+        return None if ends.match(s) else ends
+    if not ends.search(s, at):
+        return ends
+    if ends.pattern == "-->":
+        return ends if s.rfind("<!--") > s.rfind("-->") else None
+    return None
+
+
 def verdict_blocks(p, text):
-    """The review-verdict blocks at top level, outside any other fence or HTML comment (LUCY-e3opf G1,
-    A1). An unclosed review-verdict fence, or an unclosed fence that swallows one, refuses the file."""
-    out, fence, pos, comment, html = [], None, 0, False, False
+    """The review-verdict blocks at top level, outside any other fence or HTML block (LUCY-e3opf G1,
+    A1). An unclosed review-verdict fence, an unclosed fence that swallows one, or a file whose only
+    review-verdict blocks sit inside another fence, refuses the file."""
+    out, fence, pos, html, nested = [], None, 0, None, False
     for line in text.splitlines(keepends=True):
         start, pos = pos, pos + len(line)
         s = line.rstrip("\r\n")
-        if fence is None and VERDICT_OPENER.match(s) and (comment or html or not re.match(r"`{3,}|~{3,}", s)):
+        if fence is None and VERDICT_OPENER.match(s) and (html or not re.match(r"`{3,}|~{3,}", s)):
             raise ValueError(f"{p}: a review-verdict block is not top-level (indented, in a list or quote, or "
                              f"inside HTML): put it at column 0: {s.strip()[:80]}")
-        if comment:
-            comment = "-->" not in s
-            continue
         if html:
-            html = bool(s.strip())
+            html = html_left_open(html, s, 0)
             continue
         if fence is None:
-            bare = re.sub(r"`[^`\n]*`", "", s)
-            if "<!--" in bare and "-->" not in bare[bare.index("<!--") + 4:]:
-                comment = True
-                continue
-            if HTML_START.match(s):
-                html = not ("<!--" in bare and "-->" in bare)
-                continue
-            m = FENCE.match(s)
-            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                info = m.group(2).split()
-                fence = (m.group(1)[0], len(m.group(1)), bool(info) and info[0].lower() == "review-verdict",
-                         start, pos)
+            for opens, ends in HTML_ENDS:
+                m = opens.match(s)
+                if m:
+                    html = html_left_open(ends, s, m.end())
+                    break
+            else:
+                if HTML_START.match(s):
+                    html = BLANK_ENDS
+                    continue
+                m = FENCE.match(s)
+                if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                    info = m.group(2).split()
+                    fence = (m.group(1)[0], len(m.group(1)), bool(info) and info[0].lower() == "review-verdict",
+                             start, pos)
             continue
         ch, n, is_verdict, ostart, bstart = fence
         if re.fullmatch(rf" {{0,3}}{re.escape(ch)}{{{n},}}[ \t]*", s):
             if is_verdict:
                 out.append(Block(ostart, pos, text[bstart:start]))
             fence = None
+        elif VERDICT_OPENER.match(s):
+            nested = True
     if fence is not None and (fence[2] or re.search(r"(?m)^ {0,3}(?:`{3,}|~{3,})[ \t]*review-verdict\b",
                                                      text[fence[4]:])):
         raise ValueError(f"{p}: a review-verdict block is not closed (no closing fence after it)")
+    if nested and not out:
+        raise ValueError(f"{p}: the only review-verdict block sits inside another fence: put the answer's block "
+                         "at column 0, outside any fence")
     return out
 
 
@@ -1082,9 +1110,9 @@ def fixed_errors(tag, f, src, files):
     # Every seat (LUCY-e3opf B1): each review of the tip must itself close every raising round. One that
     # says nothing about it leaves it not fixed (blocking), without refusing the run; one that keeps it
     # open is a dispute (above). A seat's block is authoritative over its own prose.
-    # A seat is a tip input with a review-verdict block; a block-less one (the builder's mutants file) has
-    # no prior array to carry and is not a seat.
-    silent = [Path(x[0]).name for x in at_tip if one_block(x[0], x[2])
+    # Every tip review is a seat, a block-less one included (it closes nothing). Only the builder's mutants
+    # file (mutants-round-N.txt) is not: it lists mutants, not findings, and has no prior array to carry.
+    silent = [Path(x[0]).name for x in at_tip if not MUTANTS_FILE.fullmatch(Path(x[0]).name)
               and any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
     if silent and not f["_disputed"]:
         refs = " and ".join(f"r{r} {sev} {loc}" for r in rounds)
