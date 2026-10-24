@@ -1324,3 +1324,61 @@ def test_t7_symlink_inside_the_export_refused(repo):
     os.symlink(os.path.join(repo.root, PROBE_SIBLING), target)  # same content, but a link
     res = repo.gate(PROBE)
     assert res.returncode == 3 and "symlink " + PROBE_SIBLING in res.stderr
+
+
+
+# Round 4 own-gate (F1): a gate's child python never imports from the caller's cwd
+import re as _re
+CWD_PYTHON_RE = _re.compile(r"\bpython3?\s+(?!-I\b)(?:-[A-Za-z]+\s+)*(?:-c\b|-\s|<<)")
+
+
+def routed_shell_gates():
+    """Exported .sh entries run through run-gate: land-batch bin/ and the patch's hook commands."""
+    root = os.path.dirname(os.path.dirname(HOOKS_DIR))
+    bin_dir = os.path.join(root, "skills/land-batch/bin")
+    rels = ["skills/land-batch/bin/" + f for f in sorted(os.listdir(bin_dir)) if f.endswith(".sh")]
+    with open(os.path.join(HOOKS_DIR, "settings-live.patch"), encoding="utf-8") as fh:
+        rels += sorted(set(_re.findall(r"run-gate (?:--fail-exit \d+ )?(hooks/\S+\.sh)", fh.read())))
+    return root, rels
+
+
+def test_f1_routed_shell_gates_isolate_child_python():
+    root, rels = routed_shell_gates()
+    assert "skills/land-batch/bin/discover.sh" in rels and "hooks/gbrain-ingest/stop-hook.sh" in rels
+    offenders = {}
+    for rel in rels:
+        with open(os.path.join(root, rel), encoding="utf-8") as fh:
+            hits = [l.strip() for l in fh if not l.lstrip().startswith("#") and CWD_PYTHON_RE.search(l)]
+        if hits:
+            offenders[rel] = hits
+    assert offenders == {}
+
+
+def test_f1_detector():
+    assert CWD_PYTHON_RE.search("python3 <<'PY'") and CWD_PYTHON_RE.search('x=$(python3 -c "')
+    assert CWD_PYTHON_RE.search("python3 - \"$A\" <<'PY'")
+    assert not CWD_PYTHON_RE.search("python3 -I <<'PY'") and not CWD_PYTHON_RE.search('python3 -I -c "')
+    assert not CWD_PYTHON_RE.search('exec python3 "$SCRIPT_DIR/land-state.py" status')
+
+
+def test_f1_stop_hook_ignores_a_planted_cwd_module(repo, tmp_path):
+    dest = repo.root / "hooks/gbrain-ingest/stop-hook.sh"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(os.path.join(LIVE_HOOKS, "gbrain-ingest/stop-hook.sh"), dest)
+    repo.git("add", "hooks/gbrain-ingest/stop-hook.sh")
+    repo.git("commit", "-q", "-m", "stop hook")  # human
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    marker = tmp_path / "planted-ran"
+    (cwd / "json.py").write_text("open(%r, 'w').write('x')\n" % str(marker))
+    home = tmp_path / "home"
+    (home / ".claude/hooks/gbrain-ingest/logs").mkdir(parents=True)
+    (home / ".claude/hooks/gbrain-ingest/markers").mkdir(parents=True)
+    res = subprocess.run([repo.run_gate, "hooks/gbrain-ingest/stop-hook.sh"], cwd=cwd,
+                         env=dict(repo.env, HOME=str(home)),
+                         input=json.dumps({"session_id": "s1", "transcript_path": "/nonexistent"}),
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert not marker.exists()
+    log = (home / ".claude/hooks/gbrain-ingest/logs/hook.log").read_text()
+    assert "transcript not found" in log  # the JSON was parsed by the real json module

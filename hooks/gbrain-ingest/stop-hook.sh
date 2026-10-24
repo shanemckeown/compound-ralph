@@ -24,7 +24,8 @@ if [[ -z "$input" ]]; then
 fi
 
 # Extract fields with python3 — don't fail the hook on malformed JSON
-read -r session_id transcript_path <<<"$(python3 -c "
+# -I: python3 -c would otherwise put the cwd first on sys.path (LUCY-wqn96).
+read -r session_id transcript_path <<<"$(python3 -I -c "
 import sys, json
 try:
     d = json.loads(sys.stdin.read())

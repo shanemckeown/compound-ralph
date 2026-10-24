@@ -18,7 +18,8 @@ export LAND_STATE_SCRIPT="$SCRIPT_DIR/land-state.py"
 export LAND_BATCH_LIB_DIR="$SCRIPT_DIR"
 export GIT_OPTIONAL_LOCKS=0
 
-python3 <<'PY'
+# -I: stdin code would otherwise put the caller's cwd first on sys.path (LUCY-wqn96).
+python3 -I <<'PY'
 import json
 import os
 import re
