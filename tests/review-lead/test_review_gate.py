@@ -70,7 +70,7 @@ class _GateCase(unittest.TestCase):
         """The r10 review plus its structured block (a post-cutoff review must carry one)."""
         finding = json.loads((FIX_Q41 / "lead-round-10.json").read_text())["findings"][0]["source_line"]
         self.verdict.write_text(self.verdict.read_text() + "\n```review-verdict\n" + json.dumps(
-            {"verdict": "FAIL", "findings": [{"severity": "P2", "text": finding[3:]}]}) + "\n```\n")
+            {"verdict": "FAIL", "findings": [{"severity": "P2", "file_line": finding.split()[1], "text": finding[3:]}]}) + "\n```\n")
         (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
 
     def run_gate(self, *extra, verdicts=None, tip=TIP, cleared=("F1",)):
@@ -365,7 +365,7 @@ class ReviewGateAstraR10(_GateCase):
         finding = json.loads((FIX_Q41 / "lead-round-10.json").read_text())["findings"][0]["source_line"]
         self.verdict.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {TIP}\nAestheticcNext-q41ar\n"
                                 '```review-verdict\n' + json.dumps({"verdict": "FAIL", "findings": [
-                                    {"severity": "P2", "text": finding[3:]}]}) + "\n```\n")
+                                    {"severity": "P2", "file_line": finding.split()[1], "text": finding[3:]}]}) + "\n```\n")
         os.utime(self.verdict, (R10_MTIME, R10_MTIME))
         (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
         lead = json.loads(self.lead.read_text())
@@ -453,6 +453,14 @@ class ReviewGateFixedLater(_GateCase):
         body = self.verdict.read_text().replace(
             "VERIFIED OK\n\n", "VERIFIED OK\n\n- r9 P3 lib/concierge/erase-client-meta-concierge.ts:37 closed: "
             "the IG cell deletes the state rows (10/10)\n", 1)
+        # LUCY-e3opf: only the block's prior array grades the r9 finding fixed; the prose line above doesn't.
+        # The tip review is read strictly (G2): its finding carries file_line.
+        p2 = next(ln for ln in body.splitlines() if ln.startswith("P2 "))
+        body += "```review-verdict\n" + json.dumps({
+            "verdict": "FAIL",
+            "findings": [{"severity": "P2", "file_line": gate.chk.LEADING_LOC.match(p2[3:]).group(1), "text": p2[3:]}],
+            "prior": [{"ref": "r9 P3 lib/concierge/erase-client-meta-concierge.ts:37", "status": "closed",
+                       "evidence": "the IG cell deletes the state rows (10/10)"}]}) + "\n```\n"
         self.verdict.write_text(body)
         os.utime(self.verdict, (R10_MTIME, R10_MTIME))
         (self.out / "review-file.md5").write_text("".join(
