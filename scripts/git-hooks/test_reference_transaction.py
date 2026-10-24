@@ -53,7 +53,7 @@ class Repo:
     def set_role(self, role):
         body = {
             "orchestrator": "print('ORCHESTRATOR'); sys.exit(0)",
-            "claude-orchestrator": "sys.exit(0 if sys.argv[-1] == 'claude' else 1)",
+            "claude-orchestrator": f"sys.exit(0 if sys.argv[1:] == [{AGENT_ID!r}] else 1)",
             "sub": "print('SUB'); sys.exit(1)",
             "error": "sys.exit(2)",
             "hang": "time.sleep(30)",
@@ -234,10 +234,20 @@ def test_codex_thread_id_is_an_agent(repo):
     assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
 
 
-def test_identity_passes_provider(repo):
+def test_identity_is_bare_session_id(repo):
+    """main's committed fleet-role.py takes only the id (an extra flag exits 2)."""
     repo.as_agent()
     repo.commit(GATE_FILE, "bad\n")
-    assert repo.seen.read_text().split() == [AGENT_ID, "--provider", "claude"]
+    assert repo.seen.read_text().split() == [AGENT_ID]
+
+
+def test_update_ref_case_variant_of_main_refused(repo):
+    repo.as_agent()
+    tip = repo.branch_with_gate_change()
+    before = repo.rev("main")
+    res = repo.git("update-ref", "refs/heads/MAIN", tip, check=False)
+    assert res.returncode != 0 and "REFUSED (LUCY-wqn96)" in res.stderr
+    assert repo.rev("main") == before
 
 
 def test_codex_worker_inheriting_orchestrator_claude_id_refused(repo):

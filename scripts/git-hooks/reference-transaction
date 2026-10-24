@@ -79,10 +79,11 @@ def changed_paths(old, new):
     return [p for p in out.stdout.split("\0") if p]
 
 
-def is_orchestrator(agent_id, provider):
+def is_orchestrator(agent_id):
+    # No --provider: the committed fleet-role.py does not accept it (exit 2).
     try:
         res = subprocess.run(
-            [sys.executable, FLEET_ROLE_BIN, agent_id, "--provider", provider],
+            [sys.executable, FLEET_ROLE_BIN, agent_id],
             capture_output=True, text=True, timeout=FLEET_ROLE_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
@@ -97,12 +98,11 @@ def caller_role():
     from the Claude orchestrator inherits its CLAUDE_CODE_SESSION_ID, and must not pass
     as it. Only one session holds the role, so carrying both ids means 'sub'.
     """
-    ids = [(os.environ.get(var), provider) for var, provider in
-           (("CLAUDE_CODE_SESSION_ID", "claude"), ("CODEX_THREAD_ID", "codex"))]
-    ids = [(agent_id, provider) for agent_id, provider in ids if agent_id]
+    ids = [os.environ.get(v) for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")]
+    ids = [agent_id for agent_id in ids if agent_id]
     if not ids:
         return "human"
-    if all(is_orchestrator(agent_id, provider) for agent_id, provider in ids):
+    if all(is_orchestrator(agent_id) for agent_id in ids):
         return "orchestrator"
     return "sub"
 
@@ -113,7 +113,8 @@ def main():
     blocked = []
     for line in sys.stdin.read().splitlines():
         parts = line.split(" ", 2)
-        if len(parts) != 3 or parts[2] != MAIN_REF:
+        # Case-folded: on macOS refs/heads/MAIN is the same loose ref file as main.
+        if len(parts) != 3 or parts[2].lower() != MAIN_REF:
             continue
         old, new, _ = parts
         if new == ZERO or old == new:
