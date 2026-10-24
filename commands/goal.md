@@ -631,8 +631,8 @@ scratch worktree at the tip, revert each new guard and confirm a test fails; con
 control case passes both ways. Record each mutant and its result in
 `$EVIDENCE_DIR/mutants-round-N.txt`, then remove the scratch worktree. A surviving mutant on
 a promised behaviour is a P2 (H-D1). The file is a verdict the lead must classify: line 1 is
-`REVIEWING: <branch> @ <full tip sha>` (every checker input echoes its commit, LUCY-e3opf), line 2
-is `PASS` (all killed) or `FAIL`, and each survivor is a finding line
+`PASS` (all killed) or `FAIL`, with **no** `REVIEWING:` line anywhere (builder evidence carries no
+echo; review_lead_check refuses a mutants file or QA log that has one, LUCY-e3opf D1), and each survivor is a finding line
 `P2 <file:line> — mutant survived: <what was reverted> — <test to add>`.
 
 **Severity is the CLAUDE.md review line (decision #4):** P1 = money / patient data / tenancy /

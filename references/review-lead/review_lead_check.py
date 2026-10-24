@@ -30,7 +30,8 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
   - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
     distinct one escalates, whatever it is graded;
-  - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally;
+  - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally (builder
+    evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
     Lines that start like a finding but name no file may not outnumber the block's findings + prior
@@ -45,6 +46,10 @@ fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
     commits. The mtime never orders reviews.
   - C4: an ambiguous ref escalates whatever the grade, act_on included. C6: an earlier (non-tip) review's
     unmatched prose note is printed as NOTE, not refused.
+Names never decide identity (attempt 6), each refused:
+  - D1: a builder-evidence name carrying a REVIEWING echo or a review-verdict block. Builder evidence is
+    echo-free, so it is exempt from G4;
+  - D2: a name stating its round more than once (_r<N>_ and round-<N>, or two of one).
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
     whatever severity the reviewer wrote, so it can never be Noted;
@@ -166,11 +171,21 @@ def is_builder_evidence(name):
     return bool(BUILDER_EVIDENCE.fullmatch(Path(str(name)).name))
 
 
+def has_review_content(p, text):
+    """A REVIEWING line or a review-verdict opener anywhere, or a block: what makes a file a review, whatever
+    its name (LUCY-e3opf D1). Builder evidence has neither."""
+    return (any(re.match(r"[ \t]*REVIEWING:", ln) or VERDICT_OPENER.match(ln) for ln in lines_of(text))
+            or bool(one_block(p, text)))
+
+
 def builder_evidence_errors(files):
-    """A file named like builder evidence that carries a review-verdict block is a review in disguise: refused."""
-    return [f"{Path(x[0]).name}: review content in a builder-evidence file (a review-verdict block in a file named "
-            "like the mutants file or a QA log): pass the review under its own review name"
-            for x in files if is_builder_evidence(x[0]) and one_block(x[0], x[2])]
+    """A file named like builder evidence that carries a REVIEWING echo or a review-verdict block is a review in
+    disguise: refused, so a name can't take a seat (a blockless one included) out of the roster or the tip
+    (LUCY-e3opf C2, D1)."""
+    return [f"{Path(x[0]).name}: review content in a builder-evidence file (a REVIEWING echo or a review-verdict "
+            "block in a file named like the mutants file or a QA log): pass the review under its own review name; "
+            "builder evidence carries neither"
+            for x in files if is_builder_evidence(x[0]) and has_review_content(x[0], x[2])]
 # A review-verdict opener behind any indent or container marker (list item, blockquote). Only one at column 0,
 # outside HTML, is the reviewer's answer; any other is refused, never silently dropped (A1).
 VERDICT_OPENER = re.compile(r"^[ \t>*+\-.)\d]*(?:<(?:!--|[A-Za-z][^>]*>)[ \t]*)*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
@@ -365,10 +380,11 @@ def round_of(name):
     None when it states neither (LUCY-e3opf C3, folds LUCY-888ru). Never a default, never the mtime: a copy
     resets the mtime, and every unnamed file used to be round 1. Two different rounds in one name refuse."""
     base = Path(str(name)).name
-    got = {int(m.group(1)) for rx in (ROUND_IN_NAME, ROUND_NATIVE) for m in rx.finditer(base)}
-    if len(got) > 1:
-        raise ValueError(f"{base}: the name states rounds {sorted(got)}; one round per file")
-    return got.pop() if got else None
+    got = [int(m.group(1)) for rx in (ROUND_IN_NAME, ROUND_NATIVE) for m in rx.finditer(base)]
+    if len(got) > 1:  # every match counts, not distinct rounds: _r1_ + round-1 hides a namespace (D2)
+        raise ValueError(f"{base}: the name states a round {len(got)} times ({', '.join(map(str, got))}); one "
+                         "round token per file, _r<N>_ or round-<N>, never both")
+    return got[0] if got else None
 
 
 def review_seats(files):
@@ -378,9 +394,16 @@ def review_seats(files):
 
 def check_rounds(files):
     """Refusals for a run whose inputs can't be ordered (LUCY-e3opf C3). With more than one input, every file
-    names its round, and the newest round reviewed one commit: no mtime tie-break picks between two tips."""
-    if len(files) < 2:
-        return []
+    names its round, and the newest round reviewed one commit: no mtime tie-break picks between two tips.
+    Every name, even a lone input's, states its round at most once (D2)."""
+    twice = []
+    for x in files:
+        try:
+            round_of(x[0])
+        except ValueError as e:
+            twice.append(str(e))
+    if twice or len(files) < 2:
+        return twice
     unnamed = [Path(x[0]).name for x in files if round_of(x[0]) is None]
     if unnamed:
         return [f"{n}: the file name states no round (_r<N>_ or round-<N>): pass it under a name with its round "
@@ -1068,7 +1091,9 @@ def orphan_open_priors(files, items=()):
     priors = {x[0]: file_prior(x[0], x[2]) for x in files}
     tip = current_tip(files)[0] if files else ""
     for x in files:
-        if not echo_of(x[2]):
+        if is_builder_evidence(x[0]):
+            pass  # echo-free by D1 (builder_evidence_errors): never a seat, never fixed_by, never the tip
+        elif not echo_of(x[2]):
             errs.append(f"{Path(x[0]).name}: no single well-formed REVIEWING echo ('REVIEWING: <branch> @ <sha>' "
                         "naming one commit): every review must echo the commit it reviewed")
         elif same_commit(echo_of(x[2]), tip):

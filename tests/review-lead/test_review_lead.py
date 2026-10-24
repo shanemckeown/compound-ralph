@@ -1304,7 +1304,7 @@ class L1s6gB_RoundOneWithoutSuffix(unittest.TestCase):
         self.assertEqual(chk.round_of("REVIEW_x_astra_r10.md"), 10)
         self.assertEqual(chk.round_of("astra-verdict-round-2.log"), 2)
         self.assertEqual(chk.round_of("opus-h2h-round-3.md"), 3)
-        with self.assertRaisesRegex(ValueError, "one round per file"):
+        with self.assertRaisesRegex(ValueError, "one round token per file"):
             chk.round_of("REVIEW_x_r2_round-3.md")
 
     def test_unsuffixed_round_one_graded_fixed(self):

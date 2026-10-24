@@ -705,9 +705,9 @@ class B1EverySeatPrior(unittest.TestCase):
         self.assertIn("FIXED=1", out)
 
     def test_mutants_file_is_not_a_seat(self):
-        """Own-gate r1 Opus :1071: the builder's mutants file echoes the tip but has no block; it is not a seat,
+        """Own-gate r1 Opus :1071: the builder's mutants file (echo-free since D1) has no block; it is not a seat,
         so it cannot deadlock every fixed grade. A seat WITH a block and no entry still blocks."""
-        mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"
+        mutants = "PASS\n- KILLED retry guard reverted — pay suite red\n"  # echo-free (D1)
         code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
             ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("mutants-round-2.txt", mutants, 2000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
@@ -787,7 +787,7 @@ class C2BuilderEvidence(unittest.TestCase):
         self.assertIn("FIXED=0", out)
 
     def test_mutants_file_as_fixed_by_refused(self):
-        mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"
+        mutants = "PASS\n- KILLED retry guard reverted — pay suite red\n"  # echo-free (D1)
         code, out = run_named(fixed_lead(R1_SRC, "@D@/mutants-round-2.txt"), [
             ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("mutants-round-2.txt", mutants, 2000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
@@ -954,7 +954,7 @@ class OwnGateR1Attempt5(unittest.TestCase):
     two naming schemes are never mixed."""
 
     def test_higher_round_mutants_file_does_not_empty_the_roster(self):
-        mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"
+        mutants = "PASS\n- KILLED retry guard reverted — pay suite red\n"  # echo-free (D1)
         base_files = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                       ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000),
                       ("REVIEW_x_opus_r2_b.md", closing_r2(strict_block("PASS", prior=[])), 2100)]
@@ -973,7 +973,7 @@ class OwnGateR1Attempt5(unittest.TestCase):
         self.assertNotIn("FIXED=", out)
 
     def test_builder_evidence_on_another_commit_never_sets_the_tip(self):
-        mut = lambda sha, n: (n, f"REVIEWING: goal/x @ {sha}\nPASS\n- KILLED retry guard reverted — pay suite red\n", 3000)
+        mut = lambda sha, n: (n, "PASS\n- KILLED retry guard reverted — pay suite red\n", 3000)  # echo-free (D1)
         seats = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                  ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000),
                  ("REVIEW_x_opus_r2_b.md", closing_r2(), 2100)]
@@ -985,7 +985,7 @@ class OwnGateR1Attempt5(unittest.TestCase):
             self.assertIn("FIXED=1", out)
 
     def test_builder_evidence_in_a_higher_round_does_not_hide_a_two_commit_round(self):
-        mutants = ("mutants-round-3.txt", f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED guard — red\n", 3000)
+        mutants = ("mutants-round-3.txt", "PASS\n- KILLED guard — red\n", 3000)  # echo-free (D1)
         code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
             ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000),
             ("REVIEW_x_opus_r2_b.md", closing_r2(strict_block("PASS", prior=[(REF, "open")])).replace(SHA_B, SHA_C), 2100),
@@ -1014,3 +1014,111 @@ class OwnGateR1Attempt5(unittest.TestCase):
         self.assertEqual(code, 1, out.getvalue() + err.getvalue())
         self.assertIn("round-<N> files from 2 directories", err.getvalue())
         self.assertNotIn("FIXED=", out.getvalue())
+
+
+# ---------------------------------------------------------------------------------------------
+# LUCY-e3opf attempt 6: the two naming P2s of the independent Astra review of 4435274
+# (Ops/reviews/REVIEW_e3opf_structured_astra-high_r5_2026-10-24.md). Names never decide identity.
+BLOCKLESS_TIP = f"REVIEWING: test @ {SHA_B}\nPASS\n"  # Astra's :173 repro: echo + PASS, no block
+
+
+class D1ReviewContentNeverHidesBehindAName(unittest.TestCase):
+    """:173 — a blockless review renamed like builder evidence left the roster and the tip: FIXED=1."""
+
+    def test_blockless_seat_renamed_to_builder_evidence_refused(self):
+        lead = fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md")
+        closer = ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)
+        # Control: under a review name it is a seat with no prior entry, so the finding stays blocking.
+        code, out = run_named(lead, [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
+                                     ("REVIEW_x_opus_r2_b.md", BLOCKLESS_TIP, 2000), closer])
+        self.assertIn("BLOCKING=1", out)
+        self.assertIn("FIXED=0", out)
+        for name in ("mutants-round-2.txt", "qa-output-round-2.log"):
+            code, out = run_named(lead, [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), (name, BLOCKLESS_TIP, 2000),
+                                         closer])
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"{name}: review content in a builder-evidence file", out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_newer_blockless_review_renamed_cannot_leave_tip_selection(self):
+        """Without D1 the r3 review on SHA_C dropped out and r2's closure at SHA_B was the tip."""
+        newer = BLOCKLESS_TIP.replace(SHA_B, SHA_C)
+        files = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
+                 ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000)]
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                              files + [("REVIEW_x_opus_r3_c.md", newer, 3000)])  # control: r3 is the tip
+        self.assertNotIn("FIXED=1", out)
+        for name in ("mutants-round-3.txt", "qa-tsc-round-3.log"):
+            code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), files + [(name, newer, 3000)])
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"{name}: review content in a builder-evidence file", out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_any_echo_or_opener_line_is_review_content(self):
+        for text in (BLOCKLESS_TIP, "PASS\nREVIEWING: half-written\n", "  REVIEWING: x @ abc\nREVIEWING: x @ abc\n",
+                     "PASS\n```review-verdict\n", "PASS\n- ```review-verdict\n{}\n```\n", r2_file(prior=[(REF, "closed")])):
+            with self.subTest(text=text[:40]):
+                try:
+                    hit = chk.has_review_content("mutants-round-2.txt", text)
+                except ValueError:
+                    hit = True  # a malformed block refuses the run anyway
+                self.assertTrue(hit)
+        self.assertFalse(chk.has_review_content("mutants-round-2.txt", "PASS\n- KILLED guard — red\n"))
+        self.assertFalse(chk.has_review_content("qa-output-round-2.log", "$ npm test\nreviewing: lower case is text\n"))
+
+    def test_echo_free_builder_evidence_needs_no_echo_and_other_inputs_still_do(self):
+        mutants = ("mutants-round-2.txt", "PASS\n- KILLED retry guard reverted — pay suite red\n", 2050)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), mutants,
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("REVIEW_x_opus_r2_b.md", "PASS\nVERIFIED OK\n- tests\n", 2050),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("REVIEW_x_opus_r2_b.md: no single well-formed REVIEWING echo", out)
+
+
+class D2OneRoundTokenPerName(unittest.TestCase):
+    """:391 — opus_r1_h2h-round-1.md matched both schemes; only _r1_ was seen, hiding the native namespace."""
+
+    def reraise(self, tail=""):
+        return closing_r2(strict_block("FAIL", [("P2", "lib/pay.ts:37", "retry charges twice — guard")],
+                                       prior=[(REF, "open")]), tail=tail).replace(SHA_B, SHA_C).replace(
+            "\nPASS\n", "\nFAIL\n")
+
+    def run_abc(self, c_name, c_text):
+        return run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000),
+            (c_name, c_text, 3000)])
+
+    def test_dual_scheme_name_refused(self):
+        code, out = self.run_abc("opus-h2h-round-1.md", self.reraise())  # control: mixed schemes, refused
+        self.assertEqual(code, 1, out)
+        for name in ("opus_r1_h2h-round-1.md", "REVIEW_x_r1_opus_r1_c.md", "astra-round-1-verdict-round-1.log"):
+            code, out = self.run_abc(name, self.reraise())
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"{name}: the name states a round 2 times", out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_c6_bypass_through_a_dual_scheme_name_refused(self):
+        note = "- r1 P3 components/appointments/use-consent-client.ts:39 closed: tests cover it\n"
+        code, out = self.run_abc("opus_r1_h2h-round-1.md", self.reraise(tail=note))
+        self.assertEqual(code, 1, out)
+        self.assertIn("opus_r1_h2h-round-1.md: the name states a round 2 times", out)
+        self.assertNotIn("FIXED=", out)
+        self.assertNotIn("NOTE ", out)
+
+    def test_lone_dual_scheme_input_refused_cleanly(self):
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/x"), [("REVIEW_x_r1_round-1.md", R1_RAISE, 1000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("REVIEW_x_r1_round-1.md: the name states a round 2 times", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_round_of_counts_every_match(self):
+        self.assertEqual(chk.round_of("opus-h2h-round-3.md"), 3)
+        self.assertEqual(chk.round_of("REVIEW_x_astra-xhigh_r12_2026-10-24.md"), 12)
+        for name in ("opus_r1_h2h-round-1.md", "REVIEW_x_r2_y_r2_.md", "a-round-2-b-round-2.md"):
+            with self.assertRaisesRegex(ValueError, "one round token per file"):
+                chk.round_of(name)
