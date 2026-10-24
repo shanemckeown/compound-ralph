@@ -371,6 +371,11 @@ def round_of(name):
     return got.pop() if got else None
 
 
+def review_seats(files):
+    """The inputs that are reviews: every one except builder evidence (C2), which never sets the round or tip."""
+    return [x for x in files if not is_builder_evidence(x[0])]
+
+
 def check_rounds(files):
     """Refusals for a run whose inputs can't be ordered (LUCY-e3opf C3). With more than one input, every file
     names its round, and the newest round reviewed one commit: no mtime tie-break picks between two tips."""
@@ -380,8 +385,18 @@ def check_rounds(files):
     if unnamed:
         return [f"{n}: the file name states no round (_r<N>_ or round-<N>): pass it under a name with its round "
                 "(a copy is fine, e.g. REVIEW_<bead>_<seat>_r1_<date>.md); the round is never guessed" for n in unnamed]
-    top = max(round_of(x[0]) for x in files)
-    shas = {echo_of(x[2]) for x in files if round_of(x[0]) == top} - {""}
+    seats = review_seats(files)
+    # Ops/reviews names count rounds across the bead (_r<N>_); /goal's own names restart each attempt
+    # (round-<N>). Mixed, an older commit's file can outrank a newer one (LUCY-e3opf C3, own-gate r1 Opus :374).
+    styles = {"_r<N>_" if ROUND_IN_NAME.search(Path(x[0]).name) else "round-<N>" for x in seats}
+    if len(styles) > 1:
+        return ["the review files mix _r<N>_ (rounds across the bead) and round-<N> (rounds within one /goal "
+                "attempt) names, so their rounds can't be compared: pass every review under one scheme (copies "
+                "renamed to _r<N>_ in bead order)"]
+    if not seats:
+        return ["no review among the inputs: builder evidence alone can't be graded"]
+    top = max(round_of(x[0]) for x in seats)
+    shas = {echo_of(x[2]) for x in seats if round_of(x[0]) == top} - {""}
     if any(not same_commit(a, b) for a in shas for b in shas):
         return [f"the newest round {top} echoes different commits ({', '.join(sorted(s[:10] for s in shas))}): the "
                 "current tip is ambiguous; give each re-review of a new commit its own round"]
@@ -998,7 +1013,7 @@ def echo_of(text):
 def current_tip(files):
     """(sha, file) of the newest review, by the round in its name only (LUCY-e3opf C3: never the mtime;
     check_rounds refuses a run whose newest round echoes two commits)."""
-    newest = max(files, key=lambda x: round_of(x[0]) or 0)
+    newest = max(review_seats(files) or files, key=lambda x: round_of(x[0]) or 0)
     return echo_of(newest[2]), newest
 
 
@@ -1186,6 +1201,10 @@ def fixed_errors(tag, f, src, files):
     top = round_of(newest[0])
     silent = [Path(x[0]).name for x in at_tip if round_of(x[0]) == top and not is_builder_evidence(x[0])
               and any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
+    # Backstop: the newest seat is always in its own roster, so this never fires unless the tip rules change.
+    roster = [x for x in at_tip if round_of(x[0]) == top and not is_builder_evidence(x[0])]
+    if not roster and not f["_disputed"]:
+        silent = ["(none: no review of the newest round at the tip)"]
     if silent and not f["_disputed"]:
         refs = " and ".join(f"r{r} {sev} {loc}" for r in rounds)
         f["_not_fixed"] = (f"seat {', '.join(silent)} has no closed prior for {refs}: every review of the current "

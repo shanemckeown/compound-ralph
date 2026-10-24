@@ -904,7 +904,7 @@ class C6NonTipProseRef(unittest.TestCase):
     """3bm73 (b) — r3's line 8 cites 'r1 P3 ...use-consent-client.ts:39', which names no r1 finding's location."""
     NOTE = "- r1 P3 components/appointments/use-consent-client.ts:39 closed: Three tests protect the HTTP error throw\n"
 
-    def run(self, note_in_tip):
+    def run_notes(self, note_in_tip):
         r2 = closing_r2(strict_block("PASS", prior=[]), tail="" if note_in_tip else self.NOTE).replace(SHA_B, SHA_C)
         r3 = closing_r2(tail=self.NOTE if note_in_tip else "")
         return run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r3_c.md"), [
@@ -912,13 +912,13 @@ class C6NonTipProseRef(unittest.TestCase):
             ("REVIEW_x_astra_r3_c.md", r3, 3000)])
 
     def test_non_tip_unmatched_note_is_printed_not_refused(self):
-        code, out = self.run(note_in_tip=False)
+        code, out = self.run_notes(note_in_tip=False)
         self.assertEqual(code, 0, out)
         self.assertIn("FIXED=1", out)
         self.assertIn("NOTE REVIEW_x_astra_r2_b.md: note on r1 P3 components/appointments/use-consent-client.ts:39", out)
 
     def test_tip_unmatched_note_still_refuses(self):
-        code, out = self.run(note_in_tip=True)
+        code, out = self.run_notes(note_in_tip=True)
         self.assertEqual(code, 1, out)
         self.assertIn("REVIEW_x_astra_r3_c.md: note on r1 P3 components/appointments/use-consent-client.ts:39", out)
         self.assertNotIn("FIXED=", out)
@@ -947,3 +947,48 @@ class C3SameRoundNeverConfirms(unittest.TestCase):
         lead = fixed_lead(R1_SRC, "/x/REVIEW_x_opus_r1_b.md")
         errs, _ = chk.check(lead, [R1_SRC], 2, False, [raise_f, conf])
         self.assertTrue(any("is not newer than" in e for e in errs), errs)
+
+
+class OwnGateR1Attempt5(unittest.TestCase):
+    """Own-gate r1 (Astra + Opus :1186, Opus :374): builder evidence never picks the newest round or tip; the
+    two naming schemes are never mixed."""
+
+    def test_higher_round_mutants_file_does_not_empty_the_roster(self):
+        mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"
+        base_files = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
+                      ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000),
+                      ("REVIEW_x_opus_r2_b.md", closing_r2(strict_block("PASS", prior=[])), 2100)]
+        for extra in ([], [("mutants-round-3.txt", mutants, 3000)]):
+            code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), base_files + extra)
+            self.assertIn("BLOCKING=1", out, extra)
+            self.assertIn("FIXED=0", out, extra)
+
+    def test_mixed_naming_schemes_refused(self):
+        reraise = r1_seat(R1_SRC).replace(SHA_A, SHA_C)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000),
+            ("opus-h2h-round-1.md", reraise, 3000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("mix _r<N>_", out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_builder_evidence_on_another_commit_never_sets_the_tip(self):
+        mut = lambda sha, n: (n, f"REVIEWING: goal/x @ {sha}\nPASS\n- KILLED retry guard reverted — pay suite red\n", 3000)
+        seats = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
+                 ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000),
+                 ("REVIEW_x_opus_r2_b.md", closing_r2(), 2100)]
+        for extra in ([mut(SHA_C, "mutants-round-3.txt")],
+                      [mut(SHA_C, "mutants-round-3.txt"), mut(SHA_A, "qa-output-round-3.log")]):
+            code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), seats + extra)
+            self.assertEqual(code, 0, out)
+            self.assertIn("BLOCKING=0 ESCALATE=0", out)
+            self.assertIn("FIXED=1", out)
+
+    def test_builder_evidence_in_a_higher_round_does_not_hide_a_two_commit_round(self):
+        mutants = ("mutants-round-3.txt", f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED guard — red\n", 3000)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000),
+            ("REVIEW_x_opus_r2_b.md", closing_r2(strict_block("PASS", prior=[(REF, "open")])).replace(SHA_B, SHA_C), 2100),
+            mutants])
+        self.assertEqual(code, 1, out)
+        self.assertIn("the newest round 2 echoes different commits", out)
