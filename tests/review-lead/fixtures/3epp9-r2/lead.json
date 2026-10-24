@@ -1,0 +1,28 @@
+{
+  "bead": "AestheticcNext-3epp9",
+  "round": 2,
+  "scope_lock": true,
+  "premise": {
+    "premise": null,
+    "rounds_failed_on_it": 0,
+    "action": null
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "reviewer": "astra-xhigh",
+      "source_line": "P2 components/clients/overview-tab.tsx:348 — Between appointments, a practitioner on an iPad stops A’s memo, opens cached B while transcription runs, then returns to A within a minute: A’s successfully saved memo remains absent because unmount suppresses onComplete and its cache invalidation (DR-05, UI-07, H-U0) — invalidate the captured client’s memo cache through the existing teardown-safe onUploadSucceeded callback and add a regression using production cache settings.",
+      "verdict": "fixed",
+      "fixed_by": "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_3epp9_astra-xhigh_r2_2026-10-23.md",
+      "category": "user_facing",
+      "clinic_scenario": "Practitioner on the clinic iPad between appointments stops A's memo, opens cached B while transcription runs, returns to A within a minute; A's saved memo was missing from the list.",
+      "ordinary_use": "Stop a memo, open another client, come back: two ordinary navigations.",
+      "carve_out": true,
+      "pre_existing": false,
+      "in_scope": true,
+      "reason": "Fixed at ce84cb1f29: Overview VoiceInput passes onUploadSucceeded invalidating ['client-voice-memos', start-time client.id]; hook fires it before the mountedRef gate. Both r2 independent reviews (Astra xhigh, Sonnet fresh) confirm closure in VERIFIED OK with mutant evidence at production staleTime, and neither raises it again."
+    }
+  ],
+  "verified_notes": [],
+  "act_on_over_cap_reason": null
+}

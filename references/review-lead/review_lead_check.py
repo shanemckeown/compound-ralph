@@ -101,7 +101,10 @@ SEVERITY_TOKEN = re.compile(r"(?<![\w-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 EXPLICIT_LABEL = re.compile(r"\b(?:finding|issue|bug|defect|blocker)s?\b\W{0,4}[\[(]?P[123]\b"
                             r"|[\[(]P[123][\])]|(?<![\w-])P[123]\s*:\s", re.I)
 FILE_LINE = re.compile(r"(?<![\w./\[\]-])(?=[\w./\[\]-]*[A-Za-z_/])[\w./\[\]-]+:\d+")
-SUMMARY_COUNT = re.compile(r"\b(\d+)\s*(?:x\s*)?(P[123])\b")
+# A finding's location as written, keeping a line range ("lib/t.ts:78-83"); compared exactly (LUCY-l1s6g c).
+LOC = re.compile(FILE_LINE.pattern + r"(?:-\d+)?(?![\w-])")
+# A count is a number standing alone: "1 P1", "(0 P1", never the 1 in "Round-1 P1" (LUCY-l1s6g e).
+SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 # Structured verdict (LUCY-p4pjf): a fenced ```review-verdict block holding JSON
 #   {"verdict": "PASS"|"FAIL", "findings": [{"severity": "P2", "text": "file:line — ..."}]}
 # When a file has one, the last block is the whole input from that file; prose is not parsed.
@@ -132,12 +135,40 @@ VERDICT_DECL = re.compile(r"\bverdict\b[^\n]*?\b(PASS|FAIL)\b", re.I)
 SECTION = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?(HAZARDS|VERIFIED OK|UNVERIFIED)\b")
 # A later round's reviewer confirming an earlier finding fixed (LUCY-p4pjf, orchestrator 23 Oct), in its
 # VERIFIED OK section, exactly: "- r9 P3 lib/x.ts:37 closed: <how it was checked>".
-CONFIRM_FIXED = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+)(?:\*\*)?\s+(?:closed|fixed|resolved):\s+"
+CONFIRM_FIXED = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+(?:-\d+)?)(?:\*\*)?\s+(?:closed|fixed|resolved):\s+"
                            r"(?=\S)[^?]{8,}$", re.I)
-CONFIRM_NEGATION = re.compile(r"\b(not|no|never|still|but|however|yet|partial|partially|unable|cannot|"
-                              r"unconfirmed|unverified|untested|fails?|failed|broken|regressed|reopen\w*|open|remains?|"
-                              r"remaining|unresolved|outstanding|pending|intermittent\w*|flaky|sometimes)\b"
+CONFIRM_NEGATION = re.compile(r"\b(not|no|never|but|however|yet|partial|partially|unable|cannot|"
+                              r"unconfirmed|unverified|untested|fails?|failed|broken|regressed|reopen\w*|"
+                              r"unresolved|outstanding|pending|intermittent\w*|flaky|sometimes)\b"
                               r"|n't\b", re.I)
+# "still" / "remains" are adverse unless the state that follows is a passing one ("the control remains
+# green"); "removing the fix makes it fail" is mutant evidence, not a failing fix (LUCY-l1s6g d).
+CONFIRM_STATE = re.compile(r"\b(still|remains?|remaining)\b(?!\s+(?:green|passing|passes|pass|correct|clean|"
+                           r"intact|unchanged|closed|fixed|resolved)\b)", re.I)
+MUTANT_FAIL = re.compile(r"\bmakes?\s+(?:it|them)\s+fail\b", re.I)
+# "open" is adverse unless a named thing other than the finding is what stays open ("the held thread
+# now stays open", the fix's own behaviour). "stays open", "left open", "the bug is open" stay adverse.
+OPEN_SUBJECT = re.compile(r"\b([A-Za-z_]\w*)\s+(?:\([^)]*\)\s+)?(?:now\s+)?(?:is\s+|are\s+)?"
+                          r"(?:stays?|stayed|left|kept|remains?)?\s*open\b", re.I)
+FINDING_REFERENTS = {"it", "this", "that", "which", "finding", "findings", "issue", "issues", "bug", "bugs",
+                     "problem", "defect", "gap", "bead", "ticket", "one", "is", "are", "now", "still",
+                     "closed", "fixed", "resolved", "stays", "stay", "stayed", "left", "kept", "remains", "remain"}
+# A quoted test-cell name ("... is still herself on her next WhatsApp" is green) is evidence naming,
+# not adverse wording (LUCY-l1s6g h). Severity, location and question checks still read the quotes.
+QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”|`[^`]*`")
+
+
+def adverse(tail):
+    """True when the evidence tail of a 'closed:' line says the finding is not (fully) fixed."""
+    t = MUTANT_FAIL.sub(" ", QUOTED.sub(" ", tail))
+    if CONFIRM_NEGATION.search(t) or CONFIRM_STATE.search(t):
+        return True
+    for m in re.finditer(r"\bopen\b", t, re.I):
+        clause = re.split(r"[;:,.]", t[:m.end()])[-1]
+        subj = OPEN_SUBJECT.search(clause)
+        if not subj or subj.end() != len(clause) or subj.group(1).lower() in FINDING_REFERENTS:
+            return True
+    return False
 
 
 def is_confirmation(line):
@@ -148,8 +179,39 @@ def is_confirmation(line):
     # The evidence tail is evidence only: no question, no adverse wording, and no severity or
     # location (that would be a new finding). Paths before it may contain any word.
     tail = line[line.index(":", m.end(3)) + 1:]
-    return not ("?" in tail or CONFIRM_NEGATION.search(tail) or SEVERITY_TOKEN.search(tail)
+    return not ("?" in tail or adverse(tail) or SEVERITY_TOKEN.search(tail)
                 or FILE_LINE.search(tail) or EXPLICIT_LABEL.search(tail))
+
+
+ROUND_IN_NAME = re.compile(r"_r(\d+)(?=[_.])")
+
+
+def round_of(name):
+    """The review round a file's name states (`_r<N>_`); a name without one is round 1 (LUCY-l1s6g b)."""
+    m = ROUND_IN_NAME.search(Path(str(name)).name)
+    return int(m.group(1)) if m else 1
+
+
+# A later round's line about an earlier round's finding: "- r1 P2 <file:line>[ and ...] closed: ...".
+EARLIER_REF = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+.*?)(?:\*\*)?\s+"
+                         r"(?:closed|fixed|resolved):\s*(.*)$", re.I)
+# A severity named only as a parenthetical back-reference, e.g. "... fails for the marked case (P1)."
+BACK_REF = re.compile(r"\((P[123])\)")
+HAZARDS_HEAD = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?hazards?\b", re.I)
+
+
+def hazard_lines(lines):
+    """Indexes of the lines inside a Hazards section, any case (until the next section or verdict)."""
+    cur, out = False, set()
+    for i, line in enumerate(lines):
+        if HAZARDS_HEAD.match(line):
+            cur = True
+            continue
+        if SECTION.match(line) or VERDICT_HEAD.match(line) or re.match(r"^\s*(?:#+\s*)?REVIEWING:", line):
+            cur = False
+        if cur:
+            out.add(i)
+    return out
 
 
 def verified_lines(lines):
@@ -182,6 +244,19 @@ def tolerated_note(line, mine):
         return True
     if not re.match(r"^\s*[-*\u2022]\s", line):
         return False
+    ref = EARLIER_REF.match(line)
+    if ref and finding_shaped(line):
+        # About an earlier round's finding, but not a strict fix confirmation (e.g. "closed:
+        # ORCHESTRATOR CLEARED ... the open P2 bead exists"). Never silently dropped: the lead
+        # adjudicates it in verified_notes, and it never grades the finding fixed. Refused when the
+        # tail carries a location, a labelled finding, another severity or a never-dismiss area
+        # (LUCY-l1s6g f).
+        tail = ref.group(4)
+        if (FILE_LINE.search(tail) or EXPLICIT_LABEL.search(tail) or PROTECTED.search(line)
+                or any(t.group(0) != ref.group(2).upper() for t in SEVERITY_TOKEN.finditer(tail))):
+            return False
+        UNBOUND_NOTES[clean(line)] = line.strip()
+        return True
     if FINDING.match(line) or FINDING_START.match(line) or EXPLICIT_LABEL.search(line) or PROTECTED.search(line):
         return False
     sev = {m.group(0) for m in SEVERITY_TOKEN.finditer(line)}
@@ -193,6 +268,41 @@ def tolerated_note(line, mine):
             return False
     UNBOUND_NOTES[clean(line)] = line.strip()
     return True
+
+
+def back_reference_note(line, mine):
+    """A Hazards bullet whose only severity is a parenthetical back-reference to a severity the file
+    lists ("- H-U0: ... fails for the marked-thread case (P1).") points at that finding. It goes to
+    the lead (verified_notes), never silently dropped; one with a location, a never-dismiss area, a
+    bare severity, or a severity the file does not list is refused (LUCY-l1s6g j)."""
+    if not re.match(r"^\s*[-*\u2022]\s", line) or FINDING.match(line) or FINDING_START.match(line):
+        return False
+    refs = BACK_REF.findall(line)
+    rest = BACK_REF.sub(" ", line)
+    if (not refs or FILE_LINE.search(line) or PROTECTED.search(line) or SEVERITY_TOKEN.search(rest)
+            or EXPLICIT_LABEL.search(rest) or any(not any(m.startswith(r) for m in mine) for r in refs)):
+        return False
+    UNBOUND_NOTES[clean(line)] = line.strip()
+    return True
+
+
+def prose_match(line, mine, used):
+    """Index of the block finding a prose finding line stands for, or None. Verbatim first; else a
+    paraphrase: same severity, the same set of file:line locations, nearly all the same words, and a
+    block finding not already claimed by another prose line (LUCY-l1s6g i)."""
+    c = clean(line)
+    for i, m in enumerate(mine):
+        if i not in used and m == c:
+            return i
+    locs = {x.group(0) for x in FILE_LINE.finditer(c)}
+    words = set(re.findall(r"[a-z0-9_]{3,}", c.lower()))
+    for i, m in enumerate(mine):
+        if i in used or m[:2] != c[:2] or {x.group(0) for x in FILE_LINE.finditer(m)} != locs or not locs:
+            continue
+        mw = set(re.findall(r"[a-z0-9_]{3,}", m.lower()))
+        if words and mw and len(words & mw) / min(len(words), len(mw)) >= 0.8:
+            return i
+    return None
 
 
 def decl_words(lines):
@@ -231,6 +341,9 @@ def structured_findings(p, block):
         text = norm(f.get("text", "")) if isinstance(f, dict) else ""
         if sev not in ("P1", "P2", "P3") or not text:
             raise ValueError(f"{p}: review-verdict finding #{i + 1} needs severity P1/P2/P3 and text")
+        # The text may repeat the severity ("P2 lib/x.ts:3 ..." with severity P2): one prefix, not
+        # "P2 P2 ..." (LUCY-l1s6g a). A different leading severity is kept, so it never matches.
+        text = re.sub(rf"^(?:\*\*)?{sev}(?:\*\*)?[\s:]+", "", text)
         mine.append(clean(f"{sev} {text}"))
     if data["verdict"] == "FAIL" and not mine:
         raise ValueError(f"{p}: review-verdict is FAIL but lists no findings")
@@ -286,11 +399,17 @@ def reviewer_findings(paths):
                                  f"({verdict})")
             flines = final.splitlines()
             ver = verified_lines(flines)
+            haz = hazard_lines(flines)
+            used = set()
             for i, line in enumerate(flines):
                 if i in ver and tolerated_note(line, mine):
                     continue
+                if i in haz and back_reference_note(line, mine):
+                    continue
                 if FINDING.match(line):
-                    if clean(line) not in mine:
+                    j = prose_match(line, mine, used)
+                    used.add(j)
+                    if j is None:
                         raise ValueError(f"{p}: finding missing from the review-verdict block: "
                                          f"{line.strip()[:100]}")
                 elif finding_shaped(line):
@@ -356,13 +475,21 @@ def sweep_whole_response(p, text, mine, verdict):
     prose = STRUCTURED.sub("", region)
     plines = prose.splitlines()
     ver = verified_lines(plines)
-    kept = []
+    haz = hazard_lines(plines)
+    kept, used = [], set()
+    # Without a block, prose lines are the findings themselves: verbatim only.
+    paraphrase_ok = bool(blocks)
     for i, line in enumerate(plines):
         if i in ver and tolerated_note(line, mine):
             continue
+        if blocks and i in haz and back_reference_note(line, mine):
+            continue
         kept.append(line)
         if FINDING.match(line):
-            if clean(line) not in mine:
+            j = prose_match(line, mine, used) if paraphrase_ok else (
+                next((k for k, m in enumerate(mine) if k not in used and m == clean(line)), None))
+            used.add(j)
+            if j is None:
                 raise ValueError(f"{p}: finding outside the parsed response: {line.strip()[:100]}")
         elif finding_shaped(line):
             raise ValueError(f"{p}: finding-shaped line outside the parsed response: {line.strip()[:100]}")
@@ -520,24 +647,28 @@ def fixed_errors(tag, f, src, files):
         a_ = x_sha.group(1).lower() if x_sha else ""
         if x is later or not a_ or a_.startswith(b_) or b_.startswith(a_):
             return [f"{tag}: {Path(x[0]).name} raises it at the commit fixed_by reviewed (REVIEWING echoes): not fixed"]
-        if Path(later[0]).stat().st_mtime <= Path(x[0]).stat().st_mtime:
-            return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name}"]
-    rnd = re.search(r"_r(\d+)(?=[_.])", Path(source[0]).name)
-    loc = FILE_LINE.search(src)
-    if not rnd or not loc:
-        return [f"{tag}: fixed needs a round in {Path(source[0]).name} (_r<N>_) and a file:line in the finding"]
+        # Order by the round each name states (no _rN_ = round 1); mtime only breaks a tie, because
+        # a copy or checkout resets it (LUCY-l1s6g g). An earlier round never confirms a later one.
+        r_later, r_x = round_of(later[0]), round_of(x[0])
+        if r_later < r_x or (r_later == r_x and Path(later[0]).stat().st_mtime <= Path(x[0]).stat().st_mtime):
+            return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
+                    f"(round {r_later} vs {r_x})"]
+    rnd = str(round_of(source[0]))
+    loc = LOC.search(src)
+    if not loc:
+        return [f"{tag}: fixed needs a file:line in the finding"]
     sev = src[:2]
     for other in later[1]:
-        o = FILE_LINE.search(other)
+        o = LOC.search(other)
         if other[:2] == sev and o and o.group(0) == loc.group(0):
             return [f"{tag}: {Path(later[0]).name} raises {sev} at {loc.group(0)} again: not fixed"]
     lines = later[2].splitlines()
     for i in verified_lines(lines):
         m = CONFIRM_FIXED.match(lines[i])
-        if (m and is_confirmation(lines[i]) and m.group(1) == rnd.group(1) and m.group(2).upper() == sev
+        if (m and is_confirmation(lines[i]) and m.group(1) == rnd and m.group(2).upper() == sev
                 and m.group(3) == loc.group(0)):
             return []
-    return [f"{tag}: {Path(later[0]).name} has no VERIFIED OK line '- r{rnd.group(1)} {sev} {loc.group(0)} "
+    return [f"{tag}: {Path(later[0]).name} has no VERIFIED OK line '- r{rnd} {sev} {loc.group(0)} "
             "closed: ...' confirming the fix"]
 
 

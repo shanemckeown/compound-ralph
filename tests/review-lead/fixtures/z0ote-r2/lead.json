@@ -1,0 +1,183 @@
+{
+ "bead": "AestheticcNext-z0ote",
+ "round": 2,
+ "scope_lock": false,
+ "premise": {
+  "premise": null,
+  "rounds_failed_on_it": 0,
+  "action": null
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "reviewer": "sonnet-fresh",
+   "source_line": "P1 lib/agent-core/thread-find-or-create.ts:78-83 (threadNamesSomeoneElse), set by thread-store.ts linkThreadClient and handle-turn.ts:560/:867 — a thread carrying the clientLinkedInConversation marker is never split when the number later becomes shared, so on SMS and WhatsApp the shared-number texter's message is filed on client A's thread (client_id stays A, status stays active) AND listThreadMessages (handle-turn.ts:555) feeds A's earlier AI replies (name, booked treatment) to the model. Real scenario: a new patient texts from an unlisted mobile, the AI books her (marker set), later her daughter is booked on the same mobile (two live clients, lookup ambiguous); the daughter's next text is answered with the mother's thread history in the prompt and lands on the mother's record. Reproduced on pg with a scratch test (history row 'Hi Philippa Quartermaine, you are booked for Zygomatic Lift Deluxe'): SMS shared, SMS deleted twin and WhatsApp shared all leave the one thread on client-a, 4 messages, active, and the model input contains the surname and the booking text; the unmarked control splits correctly. The branch's own marker test uses a history row with no client data so it cannot see this — fix: keep the marker exception only when the number names nobody (numberUnknown) and always split a marked thread when lookup is ambiguous or deleted, plus a pg test with realistic AI-reply history asserting the model input is free of A's name",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "Round-1 P1 (marked thread on a now-shared number). Sonnet r2 VERIFIED OK confirms closed at 544dab4 (marker only when numberUnknown; S1/S3/S4/S5 + 3 branch cells green; M1 kills them); no r2 seat re-raises it."
+  },
+  {
+   "id": "F2",
+   "reviewer": "sonnet-fresh",
+   "source_line": "P2 lib/agent-core/thread-find-or-create.ts:78 — a thread in escalated or human_handling status is never closed, so on a number now shared the new patient's text is filed on client A's staff-handled thread; reception sees B's message under A's name in Front Desk and may reply as A's matter, so the promise 'the message is not filed on the earlier client's thread' is not met for staff-held threads — fix: keep the pending item but file the shared-number message on a new client-less thread and raise a Front Desk item there, or show an explicit number-now-shared flag on the held thread",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "Round-1 P2 held thread absorbing the new person's text. Sonnet r2 confirms closed: held thread left open, text on a new escalated thread; 8 pg cells; M2 kills all 8."
+  },
+  {
+   "id": "F3",
+   "reviewer": "sonnet-fresh",
+   "source_line": "P2 lib/agent-core/gateways/whatsapp.ts:242 and lib/whatsapp/inbound.ts:226 (pre-existing, not introduced here; file as a bead) — the WhatsApp AI reply to a shared or deleted-twin number is sent with clientId: clientId || threadClientId, where threadClientId is the unordered limit-1 match, so the reply text is logged on an arbitrary one of the sharing clients' WhatsApp history; same family as vastm/mubpo — fix: pass null when identityUnknown",
+   "verdict": "consider",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "family shares a mobile; AI WhatsApp reply logged on an arbitrary sharer's history",
+   "ordinary_use": "a family member WhatsApps the clinic from a shared number and the AI replies",
+   "carve_out": true,
+   "pre_existing": true,
+   "follow_up": "AestheticcNext-0gtkk WhatsApp AI reply clientId limit-1 fallback",
+   "reason": "Pre-existing on main (reviewer: not introduced here); filed as AestheticcNext-0gtkk; orchestrator cleared F3 after the r2 files (24 Oct 00:38 UTC). Not re-raised by any r2 seat."
+  },
+  {
+   "id": "F4",
+   "reviewer": "opus-fresh",
+   "source_line": "P2 lib/agent-core/thread-find-or-create.ts:78 — threadNamesSomeoneElse returns false for any thread whose status is not `active`, so an `escalated` or `human_handling` thread is never left behind when the number now belongs to someone else (bead promise: \"the message is no longer filed on the earlier client's thread\"). Reproduced on Postgres (scratch cells OPUS-1 SMS/escalated, OPUS-2 WhatsApp/human_handling): A's number moved to new sole client C, C texts \"Hi it's Cara\" → stored as message 2 on A's thread `conv-a-sms-1` (client_id client-a, still escalated); same on WhatsApp/human_handling. Prod read (prod-sql.sh, 23 Oct): all 4 open escalated/human_handling SMS threads are client-linked, 3 have had no message for over 14 days, and staff have resolved 1 of 22 concierge threads ever. So these threads stay open indefinitely. Clinic scenario: a client's AI conversation ended in \"let me get the team to call you\" weeks ago, and nobody clicked resolve in Front Desk. The clinic later gives her old mobile to a new client, or adds a daughter on the family phone. On a weekday morning the new person texts the clinic. Reception sees the text in Front Desk under the old client's name and history and replies from that thread. The new person's message is now part of the old client's record (erased with her, kept on her history), which is the r8 recycled-number complaint this bead was filed for. Carve-out: patient data, and the wrong name is shown to staff. Fix: when a non-active thread names someone else (a different sole client, or identityUnknown without the in-conversation marker), keep it open so the Front Desk item is not cleared. Insert a new thread for this turn (client_id = the turn's sole client or null) instead of returning the old one; findOrCreateThread already picks the newest open thread by lastMessageAt. Add pg cells for recycled and shared numbers × escalated and human_handling. The current cell \"a thread waiting for staff is never closed\" should assert the text lands on the new thread and the old one stays open.",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "Same held-thread finding as F2 (opus r1). Sonnet r2 '- r1 P2 ...:78 closed:' line confirms; opus-h2h and opus-fresh r2 give the same evidence; not re-raised."
+  },
+  {
+   "id": "F5",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 lib/voice/texter-identity.ts:32 — the `deleted` lookup status (only a soft-deleted record holds the number) has no test. Mutant \"deleted counted as known\" (the turn then runs as the deleted client via findClientByPhone limit(1), which has no deletedAt filter) survives the whole branch suite, because the \"deleted twin\" cell has a live A plus a deleted twin, which is `ambiguous`. The real code is right: scratch cell OPUS-6 (A soft-deleted, her thread active, text arrives) passes on the tip and goes red under that mutant. Fix: add that cell to concierge-shared-number-thread.test.ts.",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "Deleted-only cell gap. Sonnet r2 confirms: SMS and WhatsApp 'only a deleted record holds the number' cells exist; M4 turns SMS red."
+  },
+  {
+   "id": "F6",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 lib/concierge/tools.ts:217-247 — pre-existing, not introduced here; list for a follow-up bead. When the turn's clientId is null, resolveConciergeEmailRecipient falls back to `eq(clients.phone, from)` with no deletedAt filter (limit 2). On a number held only by a soft-deleted record, the AI's send_email resolves to the deleted client's email address. Scenario: a mum texts from her daughter's old mobile after the daughter's record was deleted and asks for the aftercare by email, and it goes to the daughter's address. Main reached the same address via the deleted id, so this is no worse. Code trace only, not run. Fix: filter `deleted_at IS NULL` in the fallback, or route it through findClientsByExactPhone + soleLiveClient.",
+   "verdict": "consider",
+   "category": "patient_data_exposure",
+   "clinic_scenario": "texter on a number held only by a deleted record asks for aftercare by email",
+   "ordinary_use": "one text asking the AI to email aftercare from a recycled number",
+   "carve_out": true,
+   "pre_existing": true,
+   "follow_up": "AestheticcNext-snvez send_email deleted_at fallback",
+   "reason": "Pre-existing (main reached the same address); filed as AestheticcNext-snvez; orchestrator cleared F6 after the r2 files (24 Oct 00:38 UTC)."
+  },
+  {
+   "id": "F7",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 lib/agent-core/gateways/whatsapp.ts:168-180 — WhatsApp still computes the texter's identity inline (`identityUnknown: !clientId`) instead of through the new texterIdentity, so it never sets numberUnknown. A client the AI booked by name from a number that is on nobody's record stays herself on her next SMS (turnClientId honours the marker) but becomes nobody on her next WhatsApp. That matches main for WhatsApp, and no data is exposed, but the two channels now answer the same person differently. Not graded H-D0: both paths reduce to lookupCaller/soleLiveClient, so there is no second ownership rule. Fix: call texterIdentity(undefined, phone, businessId) in runWhatsAppConcierge.",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md",
+   "category": "user_facing",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "WhatsApp identity via texterIdentity. Sonnet r2 confirms runWhatsAppConcierge calls texterIdentity and passes numberUnknown; named cell green (opus-fresh r2: M8 kills it)."
+  },
+  {
+   "id": "F8",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 lib/agent-core/thread-find-or-create.ts:76 — cross-branch, for whichever of z0ote/hgyyd lands second. hgyyd's softDeleteClient → keepSharedNumberWhatsApp (lib/clients/soft-delete-client.ts on origin/goal/aestheticcnext-hgyyd) sets client_id to null on a WhatsApp thread that a remaining family member's number still holds. threadNamesSomeoneElse never splits a client_id-null thread, and the deleted record still makes the number `ambiguous`. So the remaining family member's next WhatsApp continues on the deleted client's thread, with her last 24 messages in the AI's history (listThreadMessages). It is the same family handset, so the messages are already on the device, and no other data reaches the model. Fix: add a pg cell on the combined tree, or have hgyyd resolve the kept thread instead of nulling it. Separately, for hgyyd's reviewer (not this branch): anotherLiveClientHoldsNumber in lib/concierge/live-number-holder.ts re-implements findClientsByExactPhone's prefilter + isExactPhone with a live-only filter. It could be `findClientsByExactPhone(...).some(c => !c.isDeleted && c.id !== clientId)` (it would need a tx parameter). That is a possible H-D0 on hgyyd.",
+   "verdict": "fixed",
+   "fixed_by": "@D@/REVIEW_z0ote_opus-fresh_r2_2026-10-24.md",
+   "category": "other",
+   "clinic_scenario": "see round-1 lead",
+   "ordinary_use": "see round-1 lead",
+   "carve_out": true,
+   "pre_existing": false,
+   "reason": "z0ote x hgyyd kept WhatsApp thread. Opus-fresh r2 confirms F8 delivered: clientUnlinkedOnDelete written and read; real softDeleteClient cell; M3/M3b kill it."
+  },
+  {
+   "id": "F9",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 lib/agent-core/thread-find-or-create.ts:160 — Scenario: a mum (client A) and her daughter (client B) share a family mobile. Mum's SMS thread is in human_handling. On a weekday afternoon, reception at the desktop Front Desk replies to mum inside her own client item, which writes to A's held thread and bumps its last_message_at. Mum texts back \"Tuesday is great thanks\". Because the number is shared, the turn has no identity. The newest open thread is again A's held thread, so findOrCreateThread inserts another client-less escalated thread instead of reusing the one the family's first text already opened. Every round trip of \"staff reply on A's item, then a family text\" adds one more held conversation row. On pg (scratch cell OPUSR2-1, staff reply stamped +1s), two family texts gave A's thread plus three client-less escalated rows, one of them empty. The empty row comes from runAgentLoop's second findOrCreateTurnThread call (handle-turn.ts:483) seeing A's thread still newest. Without the +1s skew the trace gives one extra row per exchange. No client data is exposed and the AI stays quiet, as intended. Each row is one more held conversation for staff to resolve (adjacent to nvt2y/iiqyh). Whether Front Desk shows the rows as one phone-keyed item or several is not verified. — Fix: in the held branch, before inserting, reuse the newest open thread on the number that does not name someone else (e.g. an open HELD_NUMBER_NEW_THREAD_REASON thread). Have runAgentLoop take the conversation handleTurn already resolved instead of calling findOrCreateTurnThread a second time.",
+   "verdict": "consider",
+   "category": "other",
+   "clinic_scenario": "reception replies on A's held Front Desk item, then the family texts again from the shared mobile; an extra client-less held thread is opened",
+   "ordinary_use": "staff reply on the held item, then one more text from the same family phone",
+   "carve_out": false,
+   "pre_existing": false,
+   "follow_up": "AestheticcNext-hzbaf (r2 P3s: held-thread row churn, M7 voice-link test gap)",
+   "reason": "P3 held-thread row churn: no client data reaches the model or the texter; extra Front Desk rows only. Orchestrator decision 24 Oct: follow-up AestheticcNext-hzbaf, does not block. Keyword 'SMS' makes it protected, so it escalates; it is the branch's own (not pre-existing), so the checker cannot honour a clearance."
+  },
+  {
+   "id": "F10",
+   "reviewer": "opus-fresh",
+   "source_line": "P3 tests/pg-integration/concierge-shared-number-thread.test.ts:595 — Surviving mutant: forcing `inConversation = true` in lib/voice/call-log-client.ts:228 passes all 33 cells. The only voice-link cell then shares the number (ambiguous), and an ambiguous number ignores the marker anyway. Under the mutant, take a client the voice call linked by her number alone. She changes mobile, and her old number goes to a stranger who is on no record. The stranger's next text keeps her thread, her name and her appointments in the model input. The real code is correct (no marker when lookupCaller says this sole client). — Fix: add a cell where linkEarlierContactsToClient links A by her own number, A's phone is then changed, and the next SMS must resolve conv-voice and run on a new client-less thread with no A data.",
+   "verdict": "consider",
+   "category": "other",
+   "clinic_scenario": "none: real code behaves correctly; test gap only",
+   "ordinary_use": "none: the real code is correct, only a mutant survives",
+   "carve_out": false,
+   "pre_existing": false,
+   "follow_up": "AestheticcNext-hzbaf (r2 P3s: held-thread row churn, M7 voice-link test gap)",
+   "reason": "P3 test gap (surviving mutant M7); real code correct per all seats. Follow-up AestheticcNext-hzbaf. Protected by keyword 'SMS', branch's own, so escalates."
+  },
+  {
+   "id": "F11",
+   "reviewer": "opus-h2h",
+   "source_line": "P3 lib/voice/call-log-client.ts:228 — mutant \"inConversation always true\" (every voice-linked earlier text thread marked as linked in conversation) survives the whole branch suite, because since r2 change 1 the marker only matters when the number names nobody, and no cell covers that case for a voice link. Scenario: a voice caller is recognised by her number (sole client A), her earlier SMS thread is linked to her, and later the clinic edits her record to a new mobile, so the old number is on nobody's record. Real code: the link was made by the number alone, it is not marked, and the next text from the old number splits off as nobody. Under the mutant the thread keeps A and her history. Not user-facing, because the real code behaves correctly (test gap only) — fix: add a pg cell to concierge-shared-number-thread.test.ts. It drives linkEarlierContactsToClient while A holds the number, then `UPDATE clients SET phone` to another number, then sends an SMS. Assert A's thread is resolved and the model input has no A_UPCOMING.",
+   "verdict": "consider",
+   "category": "other",
+   "clinic_scenario": "none: real code behaves correctly; test gap only",
+   "ordinary_use": "none: the real code is correct, only a mutant survives",
+   "carve_out": false,
+   "pre_existing": false,
+   "follow_up": "AestheticcNext-hzbaf (r2 P3s: held-thread row churn, M7 voice-link test gap)",
+   "reason": "Same M7 test gap as F10 (opus-h2h). Follow-up AestheticcNext-hzbaf. Protected by keyword 'SMS', branch's own, so escalates."
+  },
+  {
+   "id": "F12",
+   "reviewer": "sonnet-fresh",
+   "source_line": "P3 lib/agent-core/thread-find-or-create.ts:149 — reproduced on pg (scratch S2): A's SMS thread is escalated, B is given A's number, and the new person texts, so a new escalated Front Desk thread opens. Reception then replies on A's held thread, which moves its last_message_at ahead of the new thread. The new person texts again and findOrCreateThread picks A's held thread as newest, splits again, and opens a third escalated thread. Result: reception sees two Front Desk items for one person on weekday mornings. No A data reaches the model or the new person, so this is a nuisance only — fix: when the newest open thread is held and names someone else, look for an open client-less or same-client thread for this number before inserting, or order the pick by newest non-held thread.",
+   "verdict": "consider",
+   "category": "other",
+   "clinic_scenario": "reception replies on A's held Front Desk item, then the family texts again from the shared mobile; an extra client-less held thread is opened",
+   "ordinary_use": "staff reply on the held item, then one more text from the same family phone",
+   "carve_out": false,
+   "pre_existing": false,
+   "follow_up": "AestheticcNext-hzbaf (r2 P3s: held-thread row churn, M7 voice-link test gap)",
+   "reason": "Same held-thread churn as F9 (sonnet, :149). Follow-up AestheticcNext-hzbaf. Protected by keyword 'SMS', branch's own, so escalates."
+  }
+ ],
+ "verified_notes": [
+  {
+   "line": "- H-U0: the promise \"no single client's name, appointments or history\" holds for the unmarked, deleted-twin, shared, and recycled cases, and fails for the marked-thread case (P1).",
+   "reason": "Sonnet r1 Hazards back-reference to its own listed P1 (F1, marked thread); not a new finding; F1 is graded fixed above."
+  },
+  {
+   "line": "- r1 P2 lib/agent-core/gateways/whatsapp.ts:242 and lib/whatsapp/inbound.ts:226 closed: ORCHESTRATOR CLEARED 20:29 as pre-existing; `bd show AestheticcNext-0gtkk` confirms the open P2 bead exists. Not re-raised.",
+   "reason": "Opus-h2h r2 note on round-1 F3: cleared as pre-existing (AestheticcNext-0gtkk), not a fix; F3 is graded consider + orchestrator clearance, not fixed."
+  },
+  {
+   "line": "- r1 P3 lib/concierge/tools.ts:217-247 closed: ORCHESTRATOR CLEARED 20:29 (F6); bead AestheticcNext-snvez exists (P3, open).",
+   "reason": "Opus-h2h r2 note on round-1 F6: cleared as pre-existing (AestheticcNext-snvez), not a fix; F6 graded consider + clearance."
+  }
+ ],
+ "act_on_over_cap_reason": null
+}

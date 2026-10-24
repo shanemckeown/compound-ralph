@@ -1014,7 +1014,11 @@ class OrchestratorGapFixedLater(unittest.TestCase):
         self.assertEqual(code, 1, out)
 
     def test_fixed_by_an_older_review_refused(self):
-        code, out = self.run_pair(self.r10(), r10_mtime=500)
+        # LUCY-l1s6g (g): the round in the names orders reviews; mtime breaks a tie only. An older
+        # review of the same round, or any review of an earlier round, still never confirms.
+        code, out = run_named(self.lead(by="@D@/REVIEW_x_sonnet_r9_b.md"),
+                              [("REVIEW_x_astra_r9_a.md", self.R9, 1000),
+                               ("REVIEW_x_sonnet_r9_b.md", self.r10(), 500)])
         self.assertEqual(code, 1, out)
         self.assertIn("not newer", out)
 
@@ -1162,3 +1166,308 @@ class AstraR21Checker(unittest.TestCase):
     def test_alphabetic_dot_continuation_is_not_the_id(self):
         self.assertFalse(chk.token_in("F1", "ORCHESTRATOR CLEARED F1.r9 (AestheticcNext-e1xgj)"))
         self.assertTrue(chk.token_in("F1", "ORCHESTRATOR CLEARED F1 (AestheticcNext-e1xgj)."))
+
+
+# ---------------------------------------------------------------------------------------------
+# LUCY-l1s6g (24 Oct): real reviewer files the checker refused. Fixtures are byte copies of
+# Ops/reviews files (md5 unchanged); their real mtimes are in mtimes.json.
+FIX_Z0 = HERE / "fixtures" / "z0ote-r2"
+FIX_3E = HERE / "fixtures" / "3epp9-r2"
+Z0_R1_SONNET = "REVIEW_z0ote_sonnet-fresh_2026-10-23.md"
+Z0_R1_OPUS = "REVIEW_z0ote_opus-fresh_2026-10-23.md"
+Z0_R2 = ["REVIEW_z0ote_opus-fresh_r2_2026-10-24.md", "REVIEW_z0ote_opus-h2h_r2_2026-10-24.md",
+         "REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md"]
+
+
+def fixture_named(fix, names, mtimes=None):
+    m = json.loads((fix / "mtimes.json").read_text())
+    m.update(mtimes or {})
+    return [(n, (fix / n).read_text(), m[n]) for n in names]
+
+
+def parse_text(text, name="v.md"):
+    p = Path(tempfile.mkdtemp(dir="/private/tmp")) / name
+    p.write_text(text)
+    chk.UNBOUND_NOTES.clear()
+    return chk.reviewer_findings([str(p)])
+
+
+def block(verdict, *findings):
+    return ("```review-verdict\n" + json.dumps({"verdict": verdict, "findings": [
+        {"severity": s, "text": t} for s, t in findings]}) + "\n```\n")
+
+
+def fixed_lead(src, by, extra=()):
+    return {"bead": "AestheticcNext-x", "round": 2, "scope_lock": False,
+            "premise": {"premise": None, "rounds_failed_on_it": 0, "action": None},
+            "findings": [{"id": "F1", "source_line": src, "verdict": "fixed", "fixed_by": by,
+                          "category": "other"}] + list(extra)}
+
+
+class L1s6gA_DoubleSeverityPrefix(unittest.TestCase):
+    """(a) block severity P2 + text starting 'P2 ...' must not become 'P2 P2 ...'."""
+
+    def test_real_3epp9_astra_r1_parses_once_prefixed(self):
+        found = chk.reviewer_findings([str(FIX_3E / "REVIEW_3epp9_astra-xhigh_2026-10-23.md")])
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0].startswith("P2 components/clients/overview-tab.tsx:348"), found[0])
+        self.assertFalse(found[0].startswith("P2 P2"), found[0])
+
+    def test_matching_prefix_is_stripped(self):
+        text = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\nP2 lib/a.ts:3 — label wrong — fix\n"
+                + block("FAIL", ("P2", "P2 lib/a.ts:3 — label wrong — fix")))
+        self.assertEqual(parse_text(text), ["P2 lib/a.ts:3 — label wrong — fix"])
+
+    def test_conflicting_prefix_still_refused(self):
+        text = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\nP1 lib/a.ts:3 — label wrong — fix\n"
+                + block("FAIL", ("P2", "P1 lib/a.ts:3 — label wrong — fix")))
+        with self.assertRaises(ValueError):
+            parse_text(text)
+
+
+R1_RAISE = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\nP2 lib/pay.ts:37 — retry charges twice — guard\nVERIFIED OK\n- tests\n"
+R1_SRC = "P2 lib/pay.ts:37 — retry charges twice — guard"
+
+
+def r2_confirm(confirm):
+    return f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n{confirm}\nUNVERIFIED\n- live\n"
+
+
+class L1s6gB_RoundOneWithoutSuffix(unittest.TestCase):
+    """(b) a review file with no _rN_ in its name is round 1."""
+
+    def test_round_of(self):
+        self.assertEqual(chk.round_of("REVIEW_z0ote_sonnet-fresh_2026-10-23.md"), 1)
+        self.assertEqual(chk.round_of("REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md"), 2)
+        self.assertEqual(chk.round_of("REVIEW_x_astra_r10.md"), 10)
+
+    def test_unsuffixed_round_one_graded_fixed(self):
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                              [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                               ("REVIEW_x_astra_r2_b.md", r2_confirm("- r1 P2 lib/pay.ts:37 closed: red test now green"), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
+
+    def test_wrong_round_in_the_confirmation_still_refused(self):
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                              [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                               ("REVIEW_x_astra_r2_b.md", r2_confirm("- r2 P2 lib/pay.ts:37 closed: red test now green"), 2000)])
+        self.assertEqual(code, 1, out)
+
+
+class L1s6gC_LineRanges(unittest.TestCase):
+    """(c) CONFIRM_FIXED accepts file:line ranges such as :78-83, matched exactly."""
+    SRC = "P1 lib/t.ts:78-83 — marked thread never split — fix"
+    RAISE = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\nP1 lib/t.ts:78-83 — marked thread never split — fix\n"
+
+    def run_confirm(self, confirm):
+        return run_named(fixed_lead(self.SRC, "@D@/REVIEW_x_r2_b.md"),
+                         [("REVIEW_x_a.md", self.RAISE, 1000), ("REVIEW_x_r2_b.md", r2_confirm(confirm), 2000)])
+
+    def test_range_confirmation(self):
+        self.assertTrue(chk.is_confirmation("- r1 P1 lib/t.ts:78-83 closed: red test now green"))
+        code, out = self.run_confirm("- r1 P1 lib/t.ts:78-83 closed: red test now green")
+        self.assertEqual(code, 0, out)
+
+    def test_a_different_range_or_line_still_refused(self):
+        for bad in ("- r1 P1 lib/t.ts:78 closed: red test now green",
+                    "- r1 P1 lib/t.ts:78-90 closed: red test now green"):
+            code, out = self.run_confirm(bad)
+            self.assertEqual(code, 1, bad + out)
+
+
+class L1s6gD_NegationGuard(unittest.TestCase):
+    """(d) 'stays open' / 'remains green' describing the fix is not 'the finding is unfixed'."""
+
+    def test_real_fix_descriptions_accepted(self):
+        sonnet = (FIX_Z0 / Z0_R2[2]).read_text().splitlines()
+        line = next(ln for ln in sonnet if ln.startswith("- r1 P2 lib/agent-core/thread-find-or-create.ts:78 closed:"))
+        self.assertTrue(chk.is_confirmation(line), line)
+        for ok in ("- r9 P2 lib/pay.ts:37 closed: a held thread now stays open and the turn goes on a new thread",
+                   "- r9 P2 lib/pay.ts:37 closed: regression passes; the same-client control remains green"):
+            self.assertTrue(chk.is_confirmation(ok), ok)
+
+    def test_finding_left_open_still_refused(self):
+        for bad in ("- r9 P2 lib/pay.ts:37 closed: stays open",
+                    "- r9 P2 lib/pay.ts:37 closed: left open for now",
+                    "- r9 P2 lib/pay.ts:37 closed: the finding stays open",
+                    "- r9 P2 lib/pay.ts:37 closed: the bug is open on retry",
+                    "- r9 P2 lib/pay.ts:37 closed: issue remains open on retry",
+                    "- r9 P2 lib/pay.ts:37 closed: remains broken after the change",
+                    "- r9 P2 lib/pay.ts:37 closed: still charges on retry"):
+            self.assertFalse(chk.is_confirmation(bad), bad)
+
+
+class L1s6gE_RoundCountHeading(unittest.TestCase):
+    """(e) 'Round-1 P1 ...' is a heading, not a tally of one P1."""
+
+    def test_real_sonnet_r2_parses(self):
+        found = chk.reviewer_findings([str(FIX_Z0 / Z0_R2[2])])
+        self.assertEqual([f[:2] for f in found], ["P3"])
+
+    def test_round_label_is_not_a_count_but_a_tally_still_is(self):
+        chk.check_summary_counts("x", ["- Round-1 P1 independently re-driven on pg"], [])
+        with self.assertRaises(ValueError):
+            chk.check_summary_counts("x", ["Summary: 1 P1 on payments"], [])
+        with self.assertRaises(ValueError):
+            chk.check_summary_counts("x", ["FAIL — 1 P1, 0 P2"], [])
+
+
+class L1s6gF_EarlierRoundReferenceInVerifiedOk(unittest.TestCase):
+    """(f) a VERIFIED OK '- rN SEV loc closed: <cleared, not fixed>' line goes to the lead, not refused."""
+
+    def test_real_opus_h2h_r2_parses_and_needs_the_lead(self):
+        found = chk.reviewer_findings([str(FIX_Z0 / Z0_R2[1])])
+        self.assertEqual([f[:2] for f in found], ["P3"])
+        self.assertTrue(any("whatsapp.ts:242" in k and "ORCHESTRATOR CLEARED" in k for k in chk.UNBOUND_NOTES),
+                        chk.UNBOUND_NOTES)
+
+    def reference(self, line):
+        return parse_text(f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n{line}\nUNVERIFIED\n- live\n"
+                          + block("PASS"))
+
+    def test_reference_line_is_an_unbound_note(self):
+        self.reference("- r1 P2 lib/a.ts:5 closed: cleared as pre-existing; the open P2 bead exists")
+        self.assertEqual(len(chk.UNBOUND_NOTES), 1)
+
+    def test_reference_carrying_a_new_finding_still_refused(self):
+        for bad in ("- r1 P2 lib/a.ts:5 closed: cleared; lib/b.ts:9 drops rows at P2",
+                    "- r1 P2 lib/a.ts:5 closed: cleared; a new P1 on the same path",
+                    "- r1 P2 lib/a.ts:5 closed: cleared; Finding (P2): drops rows",
+                    "- r1 P2 lib/pay.ts:5 closed: cleared; the open P2 still double charges"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.reference(bad)
+
+
+class L1s6gG_Freshness(unittest.TestCase):
+    """(g) 'not newer': the round in the file names orders reviews; mtime only breaks a tie."""
+
+    def test_real_3epp9_r2_with_a_copied_r1_accepted(self):
+        lead = json.loads((FIX_3E / "lead.json").read_text())
+        lead["findings"][0]["fixed_by"] = "@D@/REVIEW_3epp9_astra-xhigh_r2_2026-10-23.md"
+        # A copied round-1 file carries a fresh mtime, newer than the round-2 review.
+        named = fixture_named(FIX_3E, ["REVIEW_3epp9_astra-xhigh_2026-10-23.md",
+                                       "REVIEW_3epp9_astra-xhigh_r2_2026-10-23.md"],
+                              {"REVIEW_3epp9_astra-xhigh_2026-10-23.md": 1792799999})
+        code, out = run_named(lead, named, extra=["--scope-lock"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
+
+    def test_fixed_by_an_earlier_round_refused_even_if_newer_on_disk(self):
+        raise_r10 = R1_RAISE.replace(SHA_A, SHA_B)
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_r9_b.md"),
+                              [("REVIEW_x_r10_a.md", raise_r10, 1000),
+                               ("REVIEW_x_r9_b.md", r2_confirm("- r10 P2 lib/pay.ts:37 closed: red test now green")
+                                .replace(SHA_B, SHA_A), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("not newer", out)
+
+    def test_same_round_older_on_disk_refused(self):
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_sonnet_b.md"),
+                              [("REVIEW_x_astra_a.md", R1_RAISE, 2000),
+                               ("REVIEW_x_sonnet_b.md", r2_confirm("- r1 P2 lib/pay.ts:37 closed: red test now green"), 1000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("not newer", out)
+
+
+class L1s6gH_QuotedCellNames(unittest.TestCase):
+    """(h) a quoted test-cell name is evidence, not adverse wording; adverse words outside it still count."""
+
+    def test_quoted_cell_name_accepted(self):
+        sonnet = (FIX_Z0 / Z0_R2[2]).read_text().splitlines()
+        line = next(ln for ln in sonnet if ln.startswith("- r1 P3 lib/agent-core/gateways/whatsapp.ts:168-180 closed:"))
+        self.assertTrue(chk.is_confirmation(line), line)
+        self.assertTrue(chk.is_confirmation(
+            '- r9 P2 lib/pay.ts:37 closed: removing the guard makes it fail; the cell "never charges twice" is green'))
+
+    def test_adverse_words_outside_quotes_still_refused(self):
+        for bad in ('- r9 P2 lib/pay.ts:37 closed: "retry guard" added but still charges twice',
+                    '- r9 P2 lib/pay.ts:37 closed: the cell "retry" fails on CI',
+                    '- r9 P2 lib/pay.ts:37 closed: "green" is not what I saw'):
+            self.assertFalse(chk.is_confirmation(bad), bad)
+
+
+class L1s6gI_ProseParaphraseOfTheBlock(unittest.TestCase):
+    """(i) a prose finding that paraphrases a block finding (same severity, same file:line set, same
+    words) is that finding; a different finding is still missing from the block."""
+
+    def test_real_sonnet_r1_parses_to_the_block(self):
+        found = chk.reviewer_findings([str(FIX_Z0 / Z0_R1_SONNET)])
+        self.assertEqual([f[:2] for f in found], ["P1", "P2", "P2"])
+        self.assertTrue(any("(H-U0" in k or "H-U0:" in k for k in chk.UNBOUND_NOTES), chk.UNBOUND_NOTES)
+
+    def file(self, prose, *findings):
+        return f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{prose}\n" + block("FAIL", *findings)
+
+    def test_paraphrase_accepted(self):
+        found = parse_text(self.file(
+            "- P2 lib/a.ts:3 — the held thread keeps the new person's text (builder test) — fix: new thread",
+            ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix: open a new thread")))
+        self.assertEqual(len(found), 1)
+
+    def test_different_finding_at_the_same_line_refused(self):
+        with self.assertRaises(ValueError):
+            parse_text(self.file("- P2 lib/a.ts:3 — refunds go to the wrong card when a deposit is split",
+                                 ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
+
+    def test_other_location_or_severity_refused(self):
+        for prose in ("- P2 lib/a.ts:4 — the held thread keeps the new person's text — fix",
+                      "- P1 lib/a.ts:3 — the held thread keeps the new person's text — fix"):
+            with self.assertRaises(ValueError, msg=prose):
+                parse_text(self.file(prose, ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
+
+    def test_two_prose_findings_for_one_block_finding_refused(self):
+        prose = ("- P2 lib/a.ts:3 — the held thread keeps the new person's text — fix\n"
+                 "- P2 lib/a.ts:3 — the held thread keeps the new person's text, again — fix")
+        with self.assertRaises(ValueError):
+            parse_text(self.file(prose, ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
+
+
+class L1s6gJ_HazardSeverityBackReference(unittest.TestCase):
+    """(j) a Hazards line ending '(P1)' that points at a listed P1 goes to the lead; an unlisted one is refused."""
+
+    def file(self, hazard, sev="P1"):
+        return (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n- {sev} lib/a.ts:3 — thread keeps old history — fix\n"
+                f"## Hazards\n{hazard}\n" + block("FAIL", (sev, "lib/a.ts:3 — thread keeps old history — fix")))
+
+    def test_back_reference_needs_the_lead(self):
+        parse_text(self.file("- H-U0: the promise holds except the marked-thread case (P1)."))
+        self.assertEqual(len(chk.UNBOUND_NOTES), 1)
+
+    def test_unlisted_or_protected_back_reference_refused(self):
+        for bad, sev in (("- H-U0: the promise fails for the marked-thread case (P1).", "P2"),
+                         ("- H-M1: deposits are charged twice (P1).", "P1"),
+                         ("- H-U0: fails at lib/b.ts:9 (P1).", "P1")):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_text(self.file(bad, sev))
+
+
+class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
+    """The z0ote r2 lead over the five real reviewer files (two r1 without _r1_, three r2), with the
+    orchestrator's re-posted F3/F6 clearances: the checker validates it. The r2 P3s are protected by
+    keyword ("SMS") and the branch's own, so they escalate and can't be cleared."""
+
+    def run_lead(self, lead, extra=("--cleared-escalation", "F3", "--cleared-escalation", "F6")):
+        named = fixture_named(FIX_Z0, [Z0_R1_SONNET, Z0_R1_OPUS] + Z0_R2)
+        return run_named(lead, named, extra=["--bead", "AestheticcNext-z0ote", "--comments-file",
+                                             str(FIX_Z0 / "comments.txt"), *extra])
+
+    def lead(self):
+        return json.loads((FIX_Z0 / "lead.json").read_text())
+
+    def test_validated(self):
+        code, out = self.run_lead(self.lead())
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=4 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=6", out)
+
+    def test_round_two_p3s_cannot_be_cleared(self):
+        code, out = self.run_lead(self.lead(), extra=("--cleared-escalation", "F9"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("only a pre_existing finding can be cleared", out)
+
+    def test_cleared_notes_need_the_lead(self):
+        lead = self.lead()
+        lead["verified_notes"] = []
+        code, out = self.run_lead(lead)
+        self.assertEqual(code, 1, out)
+        self.assertIn("verified_notes", out)

@@ -66,7 +66,7 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
 
 ## Calibration
 
-- **Fixed in a later round** (orchestrator, 23 Oct). A finding from an earlier round's review (pass that file as a `--verdict` too) is graded `fixed` only when a later independent review of a later commit confirms it in its VERIFIED OK section with the exact line `- r<N> <sev> <file:line> closed: <how checked>` and does not raise it again. The checker verifies this; you never confirm a fix yourself. No clearance is needed for a confirmed fix.
+- **Fixed in a later round** (orchestrator, 23 Oct). A finding from an earlier round's review (pass that file as a `--verdict` too) is graded `fixed` only when a later independent review of a later commit confirms it in its VERIFIED OK section with the exact line `- r<N> <sev> <file:line> closed: <how checked>` (a range such as `:78-83` is matched exactly; a review file with no `_r<N>_` in its name is round 1) and does not raise it again. The checker verifies this; you never confirm a fix yourself. No clearance is needed for a confirmed fix.
 - **More than 5 blocking Act on items means you're not filtering hard enough.** Filter harder, or give `act_on_over_cap_reason`.
 - The Dismissed list isn't busywork. It's the trust mechanism that lets the orchestrator or Shane overrule you.
 - When a dismissal is a new, reusable shape, append a `candidate` pattern to DISMISSAL_PATTERNS.md (format in that file). Never add one whose "Skip when" covers a never-dismiss area.
