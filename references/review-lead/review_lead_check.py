@@ -21,18 +21,22 @@ Refuses (exit 1, reasons on stderr) when:
   - round >= 2 and no premise block;
   - a pre_existing act_on / consider item lacks a follow_up bead title;
   - a `fixed` grade has no "closed" prior entry in a review of the current tip (LUCY-e3opf).
-The review-verdict grammar (LUCY-e3opf, attempt 3), each refused:
+The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
   - G1: more than one top-level review-verdict block in a file (fences nest CommonMark-style, so a
-    block quoted inside a longer fence is content), or an unclosed one;
+    block quoted inside a longer fence is content; one indented 4+ spaces or a tab, or inside an HTML
+    comment, is not a block), or an unclosed one;
   - G2: a key missing, extra, null or empty: top level {verdict, findings[, prior]}, a finding
     {severity, file_line, text}, a prior entry {ref, status, evidence}. A raising review may use the
-    legacy {severity, text}; a review of the current tip may not;
-  - G3: a prior ref matching no round-N finding. One matching two distinct findings escalates;
-  - G4: when anything is graded fixed or carries a prior, an input file without one REVIEWING echo;
-  - G5: a prose severity + path that matches no block finding or prior ref by severity and file
-    (and line, when given). Wording is never compared. Lines that start like a finding but name no
-    file may not outnumber the block's findings + prior refs of that severity.
-A `fixed` grade that another review of the current tip marks "open" is escalated, never counted fixed.
+    legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
+  - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
+    distinct one escalates, whatever it is graded;
+  - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally;
+  - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
+    block finding or prior ref by severity and file (and line, when given). Wording is never compared.
+    Lines that start like a finding but name no file may not outnumber the block's findings + prior
+    refs of that severity. Frozen: LEAD.md "Declared prose limits".
+A `fixed` grade counts only when EVERY review of the current tip closes it in its prior array. One that
+marks it "open" escalates it; one with no entry leaves it not fixed (blocking). Prose never grades.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
     whatever severity the reviewer wrote, so it can never be Noted;
@@ -130,7 +134,11 @@ SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 # A fence opener (LUCY-e3opf G1): n>=3 backticks or tildes, then the info string. It closes only on a
 # line of >=n of the same character, CommonMark-style, so a 4-backtick example can hold a 3-backtick
 # review-verdict block that is content, not the reviewer's answer.
-FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+# Indented 4+ spaces or a tab, it is an indented code block, not a fence (LUCY-e3opf A1).
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# An HTML comment block (CommonMark type 2): a line starting `<!--` (up to 3 spaces in) hides every line
+# up to the one holding `-->`. A review-verdict block inside it is not the reviewer's answer (A1).
+HTML_COMMENT = re.compile(r"^ {0,3}<!--")
 # The exact key sets of a review-verdict block (LUCY-e3opf G2). No aliases: priority is not severity.
 TOP_KEYS, TOP_OPTIONAL = ("verdict", "findings"), ("prior",)
 FINDING_KEYS = ("severity", "file_line", "text")
@@ -146,12 +154,18 @@ class Block:
 
 
 def verdict_blocks(p, text):
-    """The review-verdict blocks at top level, outside any other fence (LUCY-e3opf G1). An unclosed
-    review-verdict fence, or an unclosed fence that swallows one, refuses the file."""
-    out, fence, pos = [], None, 0
+    """The review-verdict blocks at top level, outside any other fence or HTML comment (LUCY-e3opf G1,
+    A1). An unclosed review-verdict fence, or an unclosed fence that swallows one, refuses the file."""
+    out, fence, pos, comment = [], None, 0, False
     for line in text.splitlines(keepends=True):
         start, pos = pos, pos + len(line)
         s = line.rstrip("\r\n")
+        if comment:
+            comment = "-->" not in s
+            continue
+        if fence is None and HTML_COMMENT.match(s):
+            comment = "-->" not in s[s.index("<!--") + 4:]
+            continue
         if fence is None:
             m = FENCE.match(s)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
@@ -160,11 +174,11 @@ def verdict_blocks(p, text):
                          start, pos)
             continue
         ch, n, is_verdict, ostart, bstart = fence
-        if re.fullmatch(rf"[ \t]*{re.escape(ch)}{{{n},}}[ \t]*", s):
+        if re.fullmatch(rf" {{0,3}}{re.escape(ch)}{{{n},}}[ \t]*", s):
             if is_verdict:
                 out.append(Block(ostart, pos, text[bstart:start]))
             fence = None
-    if fence is not None and (fence[2] or re.search(r"(?m)^[ \t]*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
+    if fence is not None and (fence[2] or re.search(r"(?m)^ {0,3}(?:`{3,}|~{3,})[ \t]*review-verdict\b",
                                                      text[fence[4]:])):
         raise ValueError(f"{p}: a review-verdict block is not closed (no closing fence after it)")
     return out
@@ -300,9 +314,6 @@ UNBOUND_NOTES = {}
 # {review path: {(round, severity, path, line, raw)}}: earlier-round "open" notes a review-verdict file's
 # block does not carry; orphan_open_priors requires their raising review as an input (LUCY-e3opf G5).
 NOTE_REFS = {}
-# {review path: {(round, sev, path, line)}}: prose "- rN Px <loc> open:" notes. A seat that keeps a finding open
-# in prose vetoes another seat's closed prior (escalates), so prose can never help grade fixed.
-OPEN_NOTES = {}
 
 
 def tolerated_note(line, mine):
@@ -439,7 +450,7 @@ def block_findings(p, block):
         else:
             # Prose cross-check only (G5): its first repo path ("r1 lib/x.ts:172 + ...", "ACCEPTED (...):
             # lib/x.ts:221 — ..."). Grading still reads only a leading file:line (leading_loc).
-            pm = PATH_TOKEN.search(text)
+            pm = next(iter(repo_paths(text)), None)
             target = (pm.group(1), pm.group(2)) if pm else None
         out.append({"sev": sev, "canon": clean(f"{sev} {text}"), "target": target, "strict": strict})
     if data["verdict"] == "FAIL" and not out:
@@ -589,15 +600,11 @@ def reviewer_findings(paths):
 def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
     """Nothing the parsed segment left out may sit elsewhere in the file (LUCY-p4pjf, Astra r15).
 
-    From the first REVIEWING echo (else the file start) to the end, no verdict line disagrees with
+    The whole file, before and after the echo (LUCY-e3opf B2): no verdict line disagrees with
     `verdict` and no tally disagrees with the findings. Without a block, every canonical finding line
     is one the parser kept (verbatim) and no other finding-shaped line appears. With one, the block is
     the single source of findings and the prose is checked by location only (prose_claim_errors)."""
-    echo = re.search(r"(?m)^\s*REVIEWING:.*$", text)
-    start = echo.end() if echo else 0
-    region = text[start:]
-    if block and block.start >= start:
-        region = text[start:block.start] + text[block.end:]
+    region = text[:block.start] + text[block.end:] if block else text
     plines = region.splitlines()
     if block:
         prose_claim_errors(p, plines, meta, file_prior(p, text))
@@ -623,29 +630,34 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
         raise ValueError(f"{p}: verdicts {sorted(words)} in the file disagree with the final {verdict}")
 
 
-# A repo path in prose (LUCY-e3opf G5), optional :line or :line-line, after a space or "(":
-#  - a path with a directory: "lib/x.ts", "prisma/schema.prisma", ".husky/pre-push:3",
-#    "app/(dashboard)/page.tsx:12", "/Users/s/repo/lib/x.ts:4", "~/x/lib/pay.ts". Without an extension
-#    or a line it must start at a repo top directory ("lib/pay"), so "and/or" and "P1/P2" are not paths;
-#  - a bare file name: with a code extension ("tokens.ts"), or any extension with a line
-#    ("build.gradle:40"), or a dotfile or Capitalised name with a line ("Dockerfile:12", ".gcloudignore:5").
-# Never "H-P0/P1", "Next.js:" prose, or "localhost:3000". Group 1 is the path, group 2 the line.
-CODE_EXT = ("tsx|ts|jsx|js|mjs|cjs|py|sql|jsonl|json|mdx|md|sh|ya?ml|toml|css|scss|html|txt|swift|kt|java"
-            "|go|rb|plist|xml|csv|tsv|lock")
-TOP_DIRS = ("lib|pages|app|components|scripts|tests|mobile|mobile-portal|drizzle|public|hooks|references"
-            "|skills|docs|invariants|content|src|config|bin|styles|types|utils|Product|commands")
+# A repo path in prose (LUCY-e3opf G5 AMENDED, B2), optional :line or :line-line, after a space or "(":
+#  - any token with a slash: "lib/x.ts", "services/worker", "app/(dashboard)/page.tsx:12", "~/x/lib/pay.ts",
+#    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path too: a false refusal, failing closed. A token whose
+#    every segment is a severity, a number or a hazard id ("P1/P2/P3", "9/10", "H-U1/H-U3") is a tally,
+#    never a file (TALLY);
+#  - a name with a 2-10 character extension starting with a letter: "tokens.ts", "schema.prisma",
+#    "Next.js" (a false refusal). One-letter extensions ("e.g.", "main.c") only with a line;
+#  - a dotfile or Capitalised name with a line ("Dockerfile:12", ".gcloudignore:5").
+# Never "H-P0/P1" (no standalone severity), "localhost:3000". Group 1 is the path, group 2 the line.
 _SEG = r"(?:\([\w.-]+\)|[\w.\[\]@+-]+)"
 _LN = r":\d+(?:-\d+)?"
-_NAME = r"[\w\[\]@-][\w.\[\]@-]*"
+_NAME = r"[\w\[\]@-](?:[\w.\[\]@-]*[\w\[\]@-])?"  # never ends in "." (sentence punctuation)
 PATH_TOKEN = re.compile(
     r"(?<![\w./\[\]@+-])("
-    rf"(?:{_SEG}/)+{_NAME}\.[A-Za-z][A-Za-z0-9]{{0,9}}(?![\w.\[\]@+-]*/)"
-    rf"|(?:{_SEG}/)+{_NAME}(?={_LN})"
-    rf"|(?:~?/|(?:{TOP_DIRS})/)(?:{_SEG}/)*{_NAME}"
+    rf"(?:~?/)?(?:{_SEG}/)+(?:{_NAME})?"
+    rf"|~?/{_NAME}"
     rf"|{_NAME}\.[A-Za-z][A-Za-z0-9]{{0,9}}(?={_LN})"
-    rf"|{_NAME}\.(?:{CODE_EXT})"
+    rf"|{_NAME}\.[A-Za-z][A-Za-z0-9]{{1,9}}"
     rf"|(?:\.[\w-][\w.-]*|[A-Z][\w.-]*)(?={_LN})"
     r")(?::(\d+(?:-\d+)?))?(?![\w/-])")
+TALLY = re.compile(r"(?:P[123]|\d+|[A-Z]{1,4}(?:-[A-Z]{1,2})?-?\d{1,3})(?:/(?:P[123]|\d+|[A-Z]{1,4}(?:-[A-Z]{1,2})?-?\d{1,3}))+")
+
+
+def repo_paths(line):
+    """PATH_TOKEN matches in a line, less the tallies."""
+    return [m for m in PATH_TOKEN.finditer(line) if not TALLY.fullmatch(m.group(1))]
+
+
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
 CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
@@ -659,11 +671,9 @@ def path_parts(loc):
 
 
 def claim_sevs(line):
-    """Standalone severity tokens. One inside a `code span` holding more than the token is quoted
-    (`P2 lib/x.ts:12`, `priority:"P1"`), not this reviewer's; `P1`, `[P1]` or `P1:` alone is a claim."""
-    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line)
-             if not re.fullmatch(r"P[123]", re.sub(r"[\W_]", "", m.group(0)))]
-    return [s for s in CLAIM_SEV.finditer(line) if not any(a < s.start() < b for a, b in spans)]
+    """Standalone severity tokens, code spans read like plain text (LUCY-e3opf B2): a quoted example
+    `P2 lib/x.ts:12` is a claim, so a real finding can't hide in backticks."""
+    return list(CLAIM_SEV.finditer(line))
 
 
 def line_claims(line, skip=None):
@@ -671,7 +681,7 @@ def line_claims(line, skip=None):
     path after it (before the next severity), else the nearest path before it. No path, no claim. The
     severity token starting at `skip` (an earlier-round note's own reference) is not a claim."""
     sevs = claim_sevs(line)
-    paths = list(PATH_TOKEN.finditer(line))
+    paths = repo_paths(line)
     if not sevs or not paths:
         return []
     out = []
@@ -724,9 +734,9 @@ def prose_claim_errors(p, lines, meta, prior):
     a finding at the note's location and is checked the same way as an open note."""
     targets = [(f["sev"],) + f["target"] + ("finding",) for f in meta if f["target"]]
     targets += [(sev,) + path_parts(loc) + (st,) for (_r, sev, loc), st in prior.items()]
+    carried = [tg[:3] + ("finding",) for tg in targets]  # a note's own ref: carried in any status
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
-    OPEN_NOTES[str(p)] = set()
     unlocated = {"P1": [], "P2": [], "P3": []}
     for line in lines:
         if clean(line) in verbatim:
@@ -734,24 +744,17 @@ def prose_claim_errors(p, lines, meta, prior):
         claims = []
         note = EARLIER_NOTE.match(line)
         if note:
-            ref = PATH_TOKEN.search(note.group(3))
+            ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
             claims = line_claims(tail)
-            refs = []
-            # "not fixed:", "partially fixed:", "still not resolved:" keep it open: the words between the
-            # location and the status word (paths and parentheticals removed) are read for a qualifier.
-            between = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", PATH_TOKEN.sub(" ", note.group(3))).lower()
-            closed = (note.group(4).lower() in ("closed", "fixed", "resolved")
-                      and not re.search(r"\b(?:not|never|partially|partly|half|mostly|still|un\w*)\b|n't\b", between))
-            if ref and not closed:
-                refs.append(note.group(2))
+            # The note's status word is never read: prose neither grades nor disputes (LUCY-e3opf B1, the
+            # block is authoritative). Its reference, and any path-free severity in its text, names round
+            # N's finding, so the block carries it or the raising review is an input (orphan_open_priors).
+            refs = [note.group(2)] if ref else []
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
             for sev in refs:
-                # Every reference a note keeps open (its own, or a path-free severity in its text) vetoes
-                # a closed prior from another seat or its own block: the run escalates, never FIXED.
-                OPEN_NOTES[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2)))
-                if claim_error(sev, ref.group(1), ref.group(2), targets):
+                if claim_error(sev, ref.group(1), ref.group(2), carried):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
             claims = line_claims(line)
@@ -883,13 +886,11 @@ ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})\.?[ \
 
 
 def echo_of(text):
-    """The commit a review echoes; "" when it echoes none, or two different ones (a second response
-    appended to the file): such a review is at no known tip (LUCY-e3opf)."""
-    echoes = list(ECHO_SHA.finditer(text))
-    if len(echoes) != len(re.findall(r"(?m)^\s*REVIEWING:.*$", text)):
-        return ""  # a REVIEWING line that is not "<branch> @ <bare sha>" (e.g. "@ <sha>^")
-    shas = {m.group(1).lower() for m in echoes}
-    return shas.pop() if len(shas) == 1 else ""
+    """The commit a review echoes; "" unless the file has exactly ONE REVIEWING line, of the form
+    "<branch> @ <bare sha>" (LUCY-e3opf G4, A2). Two lines, even identical ones, are two responses."""
+    lines = re.findall(r"(?m)^\s*REVIEWING:.*$", text)
+    m = ECHO_SHA.search(text)
+    return m.group(1).lower() if len(lines) == 1 and m else ""
 
 
 def current_tip(files):
@@ -907,9 +908,6 @@ def tip_statuses(files, tip, rounds, sev, loc):
             continue
         prior = file_prior(x[0], x[2])
         got = {r: prior[(r, sev, loc)] for r in rounds if (r, sev, loc) in prior}
-        lp, ll = path_parts(loc)
-        got.update({r: "open" for (r, s_, np, nl) in OPEN_NOTES.get(str(x[0]), ())
-                    if r in rounds and s_ == sev and same_file(np, lp) and nl in (None, ll)})
         if got:
             out[x[0]] = got
     return out
@@ -937,17 +935,23 @@ def orphan_open_priors(files, items=()):
     must be an input, so the lead covers it (open) or grades it from this entry (closed). Checked on
     every input review.
 
-    Echoes (LUCY-e3opf G4): a review with a REVIEWING line must echo exactly one commit. Once anything
-    is graded fixed or any input carries a prior entry, EVERY input must, because a seat whose commit
-    is unknown would silently drop out of the current tip and its "open" would never be a dispute."""
+    Echoes (LUCY-e3opf G4, A3): EVERY input echoes exactly one commit, whatever the grades, because a
+    seat whose commit is unknown would silently drop out of the current tip. Strict shape (G2, A4):
+    every input that reviewed the current tip and has a block lists only {severity, file_line, text}
+    findings, whatever the lead graded them."""
     errs = []
-    grading = any(isinstance(f, dict) and f.get("verdict") == "fixed" for f in items)
     priors = {x[0]: file_prior(x[0], x[2]) for x in files}
-    grading = grading or any(priors.values())
+    tip = current_tip(files)[0] if files else ""
     for x in files:
-        if (grading or re.search(r"(?m)^\s*REVIEWING:", x[2])) and not echo_of(x[2]):
+        if not echo_of(x[2]):
             errs.append(f"{Path(x[0]).name}: no single well-formed REVIEWING echo ('REVIEWING: <branch> @ <sha>' "
                         "naming one commit): every review must echo the commit it reviewed")
+        elif same_commit(echo_of(x[2]), tip):
+            b = one_block(x[0], x[2])
+            if b and any(not f["strict"] for f in block_findings(x[0], b.body)):
+                errs.append(f"{Path(x[0]).name}: reviewed the current tip {tip[:10]} but has a finding without "
+                            "file_line (the legacy {severity, text} shape): re-run that seat with the strict "
+                            "review-verdict shape")
         for (r, sev, loc), st in priors[x[0]].items():
             if not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
                                                                     for o in y[1]) for y in files):
@@ -977,15 +981,21 @@ def ref_ambiguity(files, r, sev, loc):
     return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
 
 
-def legacy_shape(x):
-    """Why a review cannot be read strictly at the current tip, or None (LUCY-e3opf G2): it has no
-    review-verdict block, or a finding without file_line."""
-    b = one_block(x[0], x[2])
-    if b is None:
-        return "has no review-verdict block"
-    if any(not f["strict"] for f in block_findings(x[0], b.body)):
-        return "has a finding without file_line (the legacy {severity, text} shape)"
-    return None
+def ambiguous_refs(files):
+    """{finding line: why} for every round-N finding that a prior ref in any input could name alongside
+    another distinct one (LUCY-e3opf G3, A5). Computed before grading: whatever the lead graded such a
+    finding (fixed, dismissed, noted, open), it escalates."""
+    out = {}
+    for x in files:
+        for (r, sev, loc) in file_prior(x[0], x[2]):
+            same = ref_ambiguity(files, r, sev, loc)
+            if len(same) > 1:
+                why = (f"prior ref r{r} {sev} {loc} in {Path(x[0]).name} is ambiguous: it matches {len(same)} "
+                       f"distinct round-{r} findings ({' | '.join(s[:80] for s in same)}); one entry cannot "
+                       "speak for both")
+                for s in same:
+                    out.setdefault(s, why)
+    return out
 
 
 def same_commit(a, b):
@@ -1040,32 +1050,29 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
                 f"(newest review {Path(newest[0]).name})"]
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
-    # Every review of the tip is read strictly: its findings are located by file_line, never by text.
-    for x in at_tip:
-        why = legacy_shape(x)
-        if why:
-            return [f"{tag}: {Path(x[0]).name} reviewed the current tip but {why}: re-run that seat with the "
-                    "strict review-verdict shape before grading anything fixed"]
     for x in at_tip:
         for other in x[1]:
             if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
     # Raised in several rounds: fixed_by must close every one of them.
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
-    mine = tip_statuses(files, tip, rounds, sev, loc).get(later[0], {})
+    st = tip_statuses(files, tip, rounds, sev, loc)
+    mine = st.get(later[0], {})
     missing = [r for r in rounds if mine.get(r) != "closed"]
     if missing:
         refs = " and ".join(f"{{\"ref\": \"r{r} {sev} {loc}\", \"status\": \"closed\"}}" for r in missing)
         return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry {refs}"
                 + (" (it says open)" if "open" in mine.values() else "")
                 + ": not fixed. Prose 'closed:' lines are not graded"]
-    for r in rounds:
-        same = ref_ambiguity(files, r, sev, loc)
-        if len(same) > 1:
-            f["_disputed"] = (f"prior ref r{r} {sev} {loc} is ambiguous: it matches {len(same)} distinct round-{r} "
-                              f"findings ({' | '.join(s[:80] for s in same)}); one closed entry cannot close both")
-            return []
     f["_disputed"] = dispute(src, files)
+    # Every seat (LUCY-e3opf B1): each review of the tip must itself close every raising round. One that
+    # says nothing about it leaves it not fixed (blocking), without refusing the run; one that keeps it
+    # open is a dispute (above). A seat's block is authoritative over its own prose.
+    silent = [Path(x[0]).name for x in at_tip if any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
+    if silent and not f["_disputed"]:
+        refs = " and ".join(f"r{r} {sev} {loc}" for r in rounds)
+        f["_not_fixed"] = (f"seat {', '.join(silent)} has no closed prior for {refs}: every review of the current "
+                           f"tip {tip[:10]} must close it before it counts fixed")
     return []
 
 
@@ -1079,6 +1086,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
     ids = [f.get("id") for f in items if isinstance(f, dict) and f.get("id")]
     for dup_id in sorted({i for i in ids if ids.count(i) > 1}):
         errs.append(f"finding id {dup_id!r} is used {ids.count(dup_id)}x: ids must be unique (clearance is by id)")
+    amb = ambiguous_refs(files) if files else {}
     for i, f in enumerate(items):
         tag = f.get("id") or f"#{i + 1}"
         src = clean(f.get("source_line", ""))
@@ -1095,9 +1103,12 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
             errs.append(f"{tag}: category {cat!r} is not one of {sorted(CATEGORIES)}")
         if v == "fixed":
             errs += fixed_errors(tag, f, src, files)
+            if src in amb:
+                f["_disputed"] = amb[src]
+                f.pop("_not_fixed", None)
             continue
         if files:
-            f["_disputed"] = dispute(src, files)
+            f["_disputed"] = amb.get(src) or dispute(src, files)
         protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
         f["_protected"] = protected
         dup = f["_duplicate_path"] = is_duplicate_path(f, src)
@@ -1151,8 +1162,10 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
         if line not in want:
             errs.append(f"lead lists a finding no reviewer made: {line[:100]}")
     errs += orphan_open_priors(files or [], items)
-    blocking = [f for f in items if f.get("verdict") == "act_on" and not f.get("_demoted")
-                and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True)]
+    # A `fixed` grade that some review of the tip does not close stays blocking (LUCY-e3opf B1).
+    blocking = [f for f in items if f.get("_not_fixed") or (
+        f.get("verdict") == "act_on" and not f.get("_demoted")
+        and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True))]
     if len(blocking) > ACT_ON_CAP and not norm(lead.get("act_on_over_cap_reason") or ""):
         errs.append(f"{len(blocking)} blocking act_on items (> {ACT_ON_CAP}): not filtering; filter harder "
                     "or give act_on_over_cap_reason")
@@ -1162,6 +1175,8 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
 
 
 def action_entry(f):
+    if f.get("_not_fixed"):
+        return f"{f['source_line']}\n  graded fixed, but NOT FIXED: {f['_not_fixed']}\n"
     if f.get("_duplicate_path"):
         scenario = norm(f.get("clinic_scenario", "")) or "n/a: structural, no clinic-scenario filter"
         grade = "P1" if clean(f["source_line"]).startswith("P1") else "P2"
@@ -1187,7 +1202,6 @@ def main(argv=None):
         return 1
     UNBOUND_NOTES.clear()
     NOTE_REFS.clear()
-    OPEN_NOTES.clear()
     try:
         lead = json.loads(Path(a.lead).read_text())
         reviewer_lines = reviewer_findings(a.verdict)
@@ -1259,7 +1273,7 @@ def main(argv=None):
         rows += [f"**Premise attacked:** {prem['premise']} (rounds failed on it: {prem.get('rounds_failed_on_it')})",
                  f"**Instead:** {prem.get('action')}", ""]
     for f in items:
-        if f["verdict"] == "act_on" and f in blocking:
+        if f in blocking:
             continue
         if f.get("_demoted"):
             rows.append(f"- **p4 note** (was {f['verdict']}; no ordinary-use path, not carve-out; no fix, "
@@ -1287,7 +1301,7 @@ def main(argv=None):
             rows.append(f"- **verified note** (reviewer's own, outside its finding): {nt.get('line')}\n"
                         f"  - reason: {nt.get('reason')}")
     (out / f"lead-dismissals-round-{n}.md").write_text("\n".join(rows) + "\n")
-    counts = {k: sum(1 for f in items if f["verdict"] == k and not f.get("_disputed"))
+    counts = {k: sum(1 for f in items if f["verdict"] == k and not f.get("_disputed") and not f.get("_not_fixed"))
               for k in ("dismissed", "noted", "fixed")}
     print(f"BLOCKING={len(blocking)} ESCALATE={len(escalate)} FOLLOWUPS={len(follow)} "
           f"DISMISSED={counts['dismissed']} NOTED={counts['noted']} P4={len(demoted)} CLEARED={len(cleared)} "

@@ -236,10 +236,11 @@ class G5ProseByLocation(unittest.TestCase):
         text = self.file("- P2 lib/pay.ts:37 is still open at this tip", prior=[(REF, "open")])
         self.assertEqual(parse_text(text), [])
 
-    def test_severity_in_a_code_span_is_quoted(self):
-        found = parse_text(self.file("P2 lib/a.ts:3 — two seats both wrote `P2 lib/x.ts:12`",
-                                     [("P2", "lib/a.ts:3", "ambiguous ref — fix")]))
-        self.assertEqual(len(found), 1)
+    def test_severity_in_a_code_span_is_a_claim(self):
+        """LUCY-e3opf B2: code spans are read like plain text, so a quoted example is a claim too."""
+        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at lib/x.ts:12"):
+            parse_text(self.file("P2 lib/a.ts:3 — two seats both wrote `P2 lib/x.ts:12`",
+                                 [("P2", "lib/a.ts:3", "ambiguous ref — fix")]))
 
     def test_closure_note_is_not_a_claim_but_a_new_located_severity_is(self):
         self.assertEqual(parse_text(self.file("- r1 P1 lib/pay.ts:37 closed: do not populate; tests fail without it")),
@@ -279,9 +280,19 @@ class G5RealFiles(unittest.TestCase):
         chk.NOTE_REFS.clear()
         return chk.reviewer_findings([str(FIX / name)])
 
+    def server_text(self):
+        """The q2lod cp2 server seat with 'identity/idempotent' reworded (B2 reads it as a path)."""
+        text = (FIX / "NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md").read_text()
+        assert "identity/idempotent" in text
+        return text.replace("identity/idempotent", "identity, idempotent")
+
     def test_q2lod_cp2_seats_parse(self):
-        for name, n in (("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md", 5),
-                        ("NOTES_REVIEW_q2lod_cp2_astra-xhigh-app_2026-10-24.md", 4),
+        # B2: the server seat's carry line says 'identity/idempotent' next to its P3, a slash token, so the
+        # real file is refused (an accepted false refusal, listed on the bead); reworded it parses.
+        with self.assertRaisesRegex(ValueError, "prior ref at identity/idempotent"):
+            self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
+        self.assertEqual(len(parse_text(self.server_text())), 5)
+        for name, n in (("NOTES_REVIEW_q2lod_cp2_astra-xhigh-app_2026-10-24.md", 4),
                         ("NOTES_REVIEW_q2lod_cp2_astra-xhigh-tests_2026-10-24.md", 2),
                         ("NOTES_REVIEW_q2lod_cp2_opus-h2h_2026-10-24.md", 7)):
             self.assertEqual(len(self.parse(name)), n, name)
@@ -291,22 +302,30 @@ class G5RealFiles(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertTrue(found[0].startswith("P3 lib/ava/unpaid-reply.ts:96 — "), found[0])
 
-    def test_e3opf_astra_review_with_a_quoted_example_parses(self):
-        self.assertEqual(len(self.parse("REVIEW_e3opf_structured_astra-high_2026-10-24.md")), 5)
+    def test_e3opf_astra_review_with_a_quoted_example_is_refused(self):
+        """B2: its prose quotes `r1 P2 lib/x.ts:12` as an example; read as plain text that is an unmatched
+        claim (the accepted false refusal of a frozen prose sweep)."""
+        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at lib/x.ts:12"):
+            self.parse("REVIEW_e3opf_structured_astra-high_2026-10-24.md")
 
     def test_q2lod_server_open_carry_line_resolves_at_run_level(self):
         """'r1 P3 tokens.ts:172 … open: … Earlier P3 grading retained.' is matched by the block when the
         finding is carried; without it the note is deferred to the run-level round-1 origin check."""
-        self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
-        self.assertFalse([n for v in chk.NOTE_REFS.values() for n in v if "tokens.ts" in n[2]])
-        text = (FIX / "NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md").read_text()
+        chk.NOTE_REFS.clear()
+        parse_text(self.server_text())
+        # B1: a note's status word is never read, so its closed r1 P1 :132 note (not carried in the block)
+        # needs its round-1 origin like any other; the carried :172 note does not.
+        self.assertEqual([(n[0], n[1], n[3]) for v in chk.NOTE_REFS.values() for n in v if "tokens.ts" in n[2]],
+                         [(1, "P1", "132")])
+        text = self.server_text()
         data_start = text.index("```review-verdict\n") + len("```review-verdict\n")
         data = json.loads(text[data_start:text.index("\n```", data_start)])
         data["findings"] = [f for f in data["findings"] if "tokens.ts:172" not in f["text"]]
         chk.NOTE_REFS.clear()
         parse_text(text[:data_start] + json.dumps(data) + "\n```\n")
         deferred = [n for v in chk.NOTE_REFS.values() for n in v]
-        self.assertEqual([(n[0], n[1], n[3]) for n in deferred if n[2].endswith("tokens.ts")], [(1, "P3", "172")])
+        self.assertEqual(sorted((n[0], n[1], n[3]) for n in deferred if n[2].endswith("tokens.ts")),
+                         [(1, "P1", "132"), (1, "P3", "172")])
 
 class OwnGateRound1(unittest.TestCase):
     """Own-gate round 1 (Astra xhigh + Opus h2h on cbd9977): three fail-opens, each now refused or escalated."""
@@ -325,17 +344,22 @@ class OwnGateRound1(unittest.TestCase):
                 parse_text(self.file(f"- **P1** {loc} — strips the fixture so the prod build dies — fix"))
 
     def test_words_with_slashes_or_dots_are_not_paths(self):
-        for prose in ("No P2 and/or P3 items remain", "No H-P0/P1 hazards apply",
-                      "Seen on localhost:3000 during the P3 check", "Earlier P3 grading retained."):
+        for prose in ("No H-P0/P1 hazards apply", "Seen on localhost:3000 during the P3 check",
+                      "Earlier P3 grading retained."):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
+        # LUCY-e3opf B2: any slash token is a path, so 'and/or' next to a severity is a claim (an accepted
+        # false refusal: it fails closed).
+        with self.assertRaisesRegex(ValueError, "prior ref at and/or"):
+            parse_text(self.file("No P2 and/or P3 items remain"))
 
     def test_backticked_bare_severity_is_a_claim(self):
         for prose in ("- `P1` lib/auth/tokens.ts:40 — retry bypasses revoke — guard",
                       "Finding `P1`: lib/auth/tokens.ts:40 retry bypasses revoke"):
             with self.assertRaises(ValueError, msg=prose):
                 parse_text(self.file(prose))
-        self.assertEqual(len(parse_text(self.file("P2 lib/a.ts:3 — seats wrote `P2 lib/x.ts:12`",
-                                                  [("P2", "lib/a.ts:3", "ambiguous ref — fix")]))), 1)
+        with self.assertRaises(ValueError):  # B2: a code span is plain text
+            parse_text(self.file("P2 lib/a.ts:3 — seats wrote `P2 lib/x.ts:12`",
+                                 [("P2", "lib/a.ts:3", "ambiguous ref — fix")]))
 
     def test_prose_finding_at_a_closed_prior_location_refused(self):
         for prose in ("- P2 lib/pay.ts:37 — retry still charges twice when the reader reconnects",
@@ -347,19 +371,21 @@ class OwnGateRound1(unittest.TestCase):
         return run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
                          [("REVIEW_x_astra_a.md", R1_RAISE, 1000)] + list(r2s))
 
-    def test_prose_open_note_in_another_seat_escalates(self):
+    def test_prose_open_note_in_a_seat_without_prior_is_not_fixed(self):
+        """LUCY-e3opf B1: the seat has no prior entry for the ref, so it stays NOT fixed (not a dispute)."""
         opus = self.file("- r1 P2 lib/pay.ts:37 open: retry still charges twice at this tip", prior=[])
         code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
                                    ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
         self.assertEqual(code, 0, out)
-        self.assertIn("ESCALATE=1", out)
+        self.assertIn("BLOCKING=1 ESCALATE=0", out)
         self.assertIn("FIXED=0", out)
 
-    def test_prose_open_note_against_own_closed_prior_never_grades(self):
+    def test_block_wins_over_its_own_prose_note(self):
+        """B1: a seat's block is authoritative over its own prose; the status word in prose is never read."""
         r2 = self.file("- r1 P2 lib/pay.ts:37 open: retry still charges twice on the second tap", prior=[(REF, "closed")])
         code, out = self.run_fixed(("REVIEW_x_astra_r2_b.md", r2, 2000))
-        self.assertEqual(code, 1, out)
-        self.assertIn("(it says open): not fixed", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
 
 
 class OwnGateRound2(unittest.TestCase):
@@ -393,44 +419,45 @@ class OwnGateRound2(unittest.TestCase):
                             "app/(dashboard)/clients/page.tsx:12")):
             self.assertEqual(len(parse_text(self.file(prose, [("P1", loc, "leak — fix")]))), 1, prose)
 
-    def test_slashed_words_are_still_not_paths(self):
-        for prose in ("No P2 and/or P3 items remain", "Counts by P1/P2: none", "Both Opus/Astra agree on P3"):
+    def test_tallies_are_not_paths_but_slashed_words_are(self):
+        for prose in ("Counts by P1/P2: none", "Counts by P1/P2/P3: none.", "No P3 in 14/14 suites"):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
+        for prose in ("No P2 and/or P3 items remain", "Both Opus/Astra agree on P3"):  # B2: fails closed
+            with self.assertRaises(ValueError, msg=prose):
+                parse_text(self.file(prose))
 
     def test_bare_bracketed_severity_in_a_code_span_is_a_claim(self):
         for sev in ("`[P1]`", "`P1:`", "`(P1)`"):
             self.refuses(f"- {sev} lib/auth/tokens.ts:40 — retry bypasses revoke")
-        self.assertEqual(len(parse_text(self.file('P2 lib/a.ts:3 — the key `priority:"P1"` is accepted',
-                                                  [("P2", "lib/a.ts:3", "extra key — refuse")]))), 1)
+        with self.assertRaisesRegex(ValueError, "severity mismatch"):  # B2: a code span is plain text
+            parse_text(self.file('P2 lib/a.ts:3 — the key `priority:"P1"` is accepted',
+                                 [("P2", "lib/a.ts:3", "extra key — refuse")]))
 
-    def test_qualified_status_word_is_open(self):
-        for status in ("not fixed", "partially fixed", "still not resolved"):
+    def test_status_word_in_prose_is_never_read(self):
+        """B1: '(not) fixed:' and friends no longer matter. A seat with no prior leaves it not fixed whatever
+        its prose says; a seat that closes it in its block closes it whatever its prose says."""
+        for status in ("not fixed", "partially fixed", "still not resolved", "(not) fixed", "fixed"):
             opus = self.file(f"- r1 P2 lib/pay.ts:37 {status}: retry still charges twice", [("P3", "lib/a.ts:1", "nit — x")])
             code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
                                        ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
-            self.assertNotIn("FIXED=1", out, status)
-            own = self.file(f"- r1 P2 lib/pay.ts:37 {status}: retry still charges twice", prior=[(REF, "closed")])
-            code, out = self.run_fixed(("REVIEW_x_astra_r2_b.md", own, 2000))
-            self.assertEqual(code, 1, status)
-            self.assertNotIn("FIXED=", out)
+            self.assertEqual(code, 1, status)  # opus raises a P3 at the tip that the lead doesn't cover
+            opus = self.file(f"- r1 P2 lib/pay.ts:37 {status}: retry still charges twice", prior=[])
+            code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                       ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+            self.assertIn("BLOCKING=1", out, status)
+            self.assertIn("FIXED=0", out, status)
 
-    def test_basename_or_lineless_open_note_vetoes(self):
+    def test_any_note_in_a_seat_without_prior_leaves_it_not_fixed(self):
+        """B1: open, closed or described, a prose note is not a prior entry."""
         for note in ("- r1 P2 pay.ts:37 open: retry still charges twice", "- r1 P2 lib/pay.ts open: retry twice",
-                     "- r1 P2 lib/pay.ts:37 closed: guard added, but the P2 retry path still double-charges"):
+                     "- r1 P2 lib/pay.ts:37 closed: guard added, but the P2 retry path still double-charges",
+                     "- r1 P2 lib/pay.ts:37 (retry), set by refund.ts and pay.ts:40 closed: guard green"):
             opus = self.file(note, prior=[])
             code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
                                        ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
             self.assertEqual(code, 0, out)
-            self.assertIn("ESCALATE=1", out, note)
+            self.assertIn("BLOCKING=1 ESCALATE=0", out, note)
             self.assertIn("FIXED=0", out, note)
-
-    def test_described_closed_note_stays_closed(self):
-        opus = self.file("- r1 P2 lib/pay.ts:37 (retry), set by refund.ts and pay.ts:40 closed: guard green", prior=[])
-        code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
-                                   ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
-        self.assertEqual(code, 0, out)
-        self.assertIn("ESCALATE=0", out)
-        self.assertIn("FIXED=1", out)
 
 
 
@@ -465,9 +492,185 @@ class OwnGateRound3(unittest.TestCase):
         opus = self.file("- r1 P2 lib/pay.ts:37 not yet fully fixed: the iPad path still charges twice", prior=[])
         code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
                                    ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
-        self.assertIn("ESCALATE=1", out)
+        self.assertIn("BLOCKING=1", out)  # B1: no prior entry in the opus seat
         self.assertIn("FIXED=0", out)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------
+# LUCY-e3opf attempt 4: the nine P2s of the independent Astra review of 5acadb1
+# (Ops/reviews/REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md), each with its exact input.
+def run_one_r2(r2, lead=None, extra=()):
+    """R1_RAISE at SHA_A plus one round-2 file at SHA_B, fixed_by that file unless a lead is given."""
+    return run_named(lead or fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                     [("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("REVIEW_x_astra_r2_b.md", r2, 2000), *extra])
+
+
+def closing_r2(block_text=None, head="", tail=""):
+    """A round-2 PASS at SHA_B whose block closes REF."""
+    block_text = block_text if block_text is not None else strict_block("PASS", prior=[(REF, "closed")])
+    return f"{head}REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- tests\n{tail}{block_text}"
+
+
+class A1CommonMarkTopLevel(unittest.TestCase):
+    """:155 — a closing block inside an HTML comment, or indented 4 spaces / a tab, is not authoritative."""
+
+    def test_html_comment_or_indented_block_is_not_the_answer(self):
+        blk = strict_block("PASS", prior=[(REF, "closed")])
+        for wrapped in ("<!--\n" + blk + "-->\n", "<!-- " + blk + "-->\n",
+                        "".join("    " + ln + "\n" for ln in blk.splitlines()),
+                        "".join("\t" + ln + "\n" for ln in blk.splitlines())):
+            r2 = closing_r2(wrapped)
+            self.assertEqual(chk.verdict_blocks("v", r2), [], wrapped)
+            self.assertEqual(chk.file_prior("v", r2), {}, wrapped)
+            code, out = run_one_r2(r2)
+            self.assertEqual(code, 1, out)
+            self.assertIn("has no review-verdict prior entry", out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_three_space_indent_and_a_closed_comment_before_it_still_count(self):
+        blk = strict_block("PASS", prior=[(REF, "closed")])
+        for r2 in (closing_r2("".join("   " + ln + "\n" for ln in blk.splitlines())),
+                   closing_r2(head="<!-- reviewer scratch -->\n")):
+            code, out = run_one_r2(r2)
+            self.assertEqual(code, 0, out)
+            self.assertIn("FIXED=1", out)
+
+
+class A2OneEchoLine(unittest.TestCase):
+    """:891 — two identical REVIEWING echoes before one closing block."""
+
+    def test_two_identical_echoes_refused(self):
+        r2 = f"REVIEWING: goal/x @ {SHA_B}\n" + closing_r2()
+        self.assertEqual(chk.echo_of(r2), "")
+        code, out = run_one_r2(r2)
+        self.assertEqual(code, 1, out)
+        self.assertIn("REVIEW_x_astra_r2_b.md: no single well-formed REVIEWING echo", out)
+        self.assertNotIn("FIXED=", out)
+
+
+class A3EchoUnconditional(unittest.TestCase):
+    """:950 — a PASS block with no echo, no findings and no priors."""
+
+    def test_pass_without_echo_refused(self):
+        lead = fixed_lead(R1_SRC, "x")
+        lead["findings"] = []
+        code, out = run_named(lead, [("REVIEW_x_astra_a.md", "PASS\nVERIFIED OK\n- tests\n" + strict_block("PASS"), 1000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("REVIEW_x_astra_a.md: no single well-formed REVIEWING echo", out)
+        self.assertNotIn("BLOCKING=", out)
+
+
+class A4StrictAtTheTip(unittest.TestCase):
+    """:1044 — a current-tip legacy {severity, text} finding with a valid dismissal."""
+
+    def test_legacy_finding_at_the_tip_refused_whatever_the_grade(self):
+        legacy = (f"REVIEWING: goal/x @ {SHA_B}\nFAIL\nP3 lib/a.ts:1 — copy nit\n```review-verdict\n"
+                  + json.dumps({"verdict": "FAIL", "findings": [{"severity": "P3", "text": "lib/a.ts:1 — copy nit"}]})
+                  + "\n```\n")
+        lead = fixed_lead(R1_SRC, "x")
+        lead["findings"] = [{"id": "F1", "source_line": "P3 lib/a.ts:1 — copy nit", "verdict": "dismissed",
+                             "category": "style", "reason": "copy only, the owner agreed the wording"}]
+        code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md", legacy, 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("has a finding without file_line", out)
+        self.assertNotIn("DISMISSED=", out)
+
+
+class A5AmbiguityWhateverTheGrade(unittest.TestCase):
+    """:1062 — two distinct round-1 findings sharing a ref, one closed prior, both dismissed."""
+    A, B = G3RefIdentity.A, G3RefIdentity.B
+    C = "P2 lib/label.ts:4 — the save button label reads Submit — rename"
+    D = "P2 lib/label.ts:4 — the tooltip overlaps the field — move it"
+
+    def test_dismissing_both_still_escalates(self):
+        ref = "r1 P2 lib/label.ts:4"
+        for grade in ("dismissed", "noted", "consider"):
+            lead = fixed_lead(self.A, "x")
+            lead["findings"] = [{"id": f"F{i + 1}", "source_line": s, "verdict": grade, "category": "other",
+                                 "reason": "reviewer agreed it is cosmetic only", "follow_up": "tidy",
+                                 "ordinary_use": "reception opens the client form"} for i, s in enumerate((self.C, self.D))]
+            code, out = run_named(lead, [("REVIEW_x_astra_a.md", r1_seat(self.C), 1000),
+                                         ("REVIEW_x_sonnet_a.md", r1_seat(self.D), 1100),
+                                         ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(ref, "closed")]), 2000)])
+            if grade == "noted":  # only a P3 may be Noted: refused for that, never passed
+                self.assertEqual(code, 1, out)
+                continue
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=2", out, grade)
+            self.assertIn("DISMISSED=0", out, grade)
+            self.assertIn("FOLLOWUPS=0", out, grade)
+            self.assertIn("FIXED=0", out, grade)
+
+    def test_fixed_grade_still_escalates(self):
+        code, out = G3RefIdentity().run_pair(self.B)
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+
+
+class B1EverySeatPrior(unittest.TestCase):
+    """:735 — prose dissent is replaced by a structured rule: every tip review must close it."""
+
+    def run_two(self, opus, astra=None):
+        return run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("REVIEW_x_opus_r2_b.md", opus, 2000),
+            ("REVIEW_x_astra_r2_b.md", astra or r2_file(prior=[(REF, "closed")]), 2100)])
+
+    def test_prose_dissent_without_a_prior_is_not_fixed(self):
+        for note in ("- r1 P2 lib/pay.ts:37 is still open", "- r1 P2 lib/pay.ts:37 (not) fixed: the iPad path"):
+            opus = closing_r2(strict_block("PASS", prior=[]), tail=note + "\n")
+            code, out = self.run_two(opus)
+            self.assertNotIn("FIXED=1", out, note)
+            if code == 0:
+                self.assertIn("BLOCKING=1", out, note)
+                self.assertIn("FIXED=0", out, note)
+
+    def test_seat_without_prior_is_named_in_the_builder_input(self):
+        out_dir = base.Path(base.tempfile.mkdtemp(dir="/private/tmp"))
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("REVIEW_x_opus_r2_b.md", closing_r2(strict_block("PASS", prior=[])), 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)], extra=["--out-dir", str(out_dir)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=1 ESCALATE=0", out)
+        actions = (out_dir / "lead-actions-round-2.txt").read_text()
+        self.assertIn("NOT FIXED: seat REVIEW_x_opus_r2_b.md has no closed prior for r1 P2 lib/pay.ts:37", actions)
+
+    def test_open_entry_escalates_and_every_close_fixes(self):
+        code, out = self.run_two(closing_r2(strict_block("PASS", prior=[(REF, "open")])))
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
+        code, out = self.run_two(closing_r2())
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+    def test_seat_without_a_block_at_the_tip_is_silent_too(self):
+        opus = f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- tests\n"
+        code, out = self.run_two(opus)
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=1", out)
+        self.assertIn("FIXED=0", out)
+
+
+class B2WholeResponseSweep(unittest.TestCase):
+    """:596, :640, :664 — the claim sweep covers the whole file, every path form and code spans."""
+
+    def test_each_unmatched_claim_refuses_and_never_grades(self):
+        for head, tail in (("P2 lib/lost.ts:9 — omitted bug\n", ""),
+                           ("", "There is P2 in services/worker — still broken\n"),
+                           ("", "There is P2 in schema.prisma — still broken\n"),
+                           ("", "- `P2 lib/lost.ts:9` — still broken\n")):
+            r2 = closing_r2(head=head, tail=tail)
+            with self.assertRaisesRegex(ValueError, "prose finding not in the review-verdict block", msg=head + tail):
+                parse_text(r2)
+            code, out = run_one_r2(r2)
+            self.assertEqual(code, 1, out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_tallies_are_not_paths(self):
+        for prose in ("Findings: none at P1/P2. No new P3.", "Suites 14/14 green, no P2.",
+                      "H-U1/H-U3 answered; no P3."):
+            self.assertEqual(parse_text(closing_r2(tail=prose + "\n")), [], prose)
