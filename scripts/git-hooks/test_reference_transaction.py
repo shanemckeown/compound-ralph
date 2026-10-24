@@ -565,6 +565,19 @@ def test_s1_every_worktree_sees_the_common_hooks_dir(repo, tmp_path):
         assert repo.git("config", "--get", "core.hooksPath", cwd=where).stdout.strip() == want
 
 
+
+def test_s1_worktree_seeing_another_hooks_path_refused(repo, tmp_path):
+    """Without extensions.worktreeConfig, an includeIf scoped to one worktree's branch can still
+    give it another core.hooksPath. Only the post-install check sees that."""
+    wt = tmp_path / "wt"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    inc = tmp_path / "other-hooks.cfg"
+    inc.write_text(f"[core]\n\thooksPath = {tmp_path / 'elsewhere'}\n")
+    repo.git("config", "includeIf.onbranch:wtb.path", str(inc))
+    res = repo.install()
+    assert res.returncode == 1
+    assert f"worktree {wt} sees core.hooksPath='{tmp_path / 'elsewhere'}'" in res.stderr
+
 # S2: install.sh installs main's committed blobs, from main, for the orchestrator only
 def test_s2_install_uses_committed_blob_not_working_tree(repo):
     repo.write("scripts/git-hooks/reference-transaction", "#!/bin/sh\nexit 0\n")  # uncommitted
