@@ -117,6 +117,25 @@ PROTECTED = re.compile(
     r"|H-M\d|H-B\d|H-C\d|H-T\d)\b",
     re.I,
 )
+# The file-length ratchet names the files it counts, and the lander regenerates its baseline, so a credit or
+# cron file name must not make it protected (LUCY-mz6fk). Exempt from the keyword backstop by SHAPE only:
+# declared at the ratchet test, every other path in "<path> [is] N/M [lines]" count form, and nothing else
+# path-like or protected left once those are removed. A protected category still wins.
+RATCHET_TEST = "tests/meta/file-length-ratchet.test.ts"
+RATCHET_COUNT = re.compile(r"(?<![\w./\[\]-])[\w./\[\]-]*[A-Za-z_][\w./\[\]-]*\.[A-Za-z]{1,5}"
+                           r"\s+(?:is\s+)?\d+\s*/\s*\d+(?:\s+lines?)?(?![\w/])")
+PATH_LIKE = re.compile(r"[\w\[\]-]\.(?:tsx?|jsx?|mjs|cjs|py|sql|json|md|sh|ya?ml)\b"
+                       r"|\b[A-Za-z_][\w.-]*/[A-Za-z_\[]|:\d")
+
+
+def ratchet_only(src):
+    loc = leading_loc(src)
+    if not loc or loc.rsplit(":", 1)[0] != RATCHET_TEST:
+        return False
+    rest = RATCHET_COUNT.sub(" ", src[3:].replace(loc, " ", 1))
+    return not PATH_LIKE.search(rest) and not PROTECTED.search(rest)
+
+
 FINDING = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(P[123])(?:\*\*)?[\s:]+\S+.*$")
 # A line that STARTS like a finding (after bullets, numbering, bold, brackets) but isn't one in
 # the FINDING shape is refused, because it could hide a finding; so is any line with a severity
@@ -1301,7 +1320,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
             continue
         if files:
             f["_disputed"] = amb.get(src) or dispute(src, files)
-        protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
+        protected = cat in PROTECTED_CATEGORIES or (bool(PROTECTED.search(src)) and not ratchet_only(src))
         f["_protected"] = protected
         dup = f["_duplicate_path"] = is_duplicate_path(f, src)
         if triage_ordinary_use(f, protected):
