@@ -76,19 +76,30 @@ def unlanded(branch, ct, descends=False, equivalent=False):
     return dict(ref(branch, ct=ct, on_main=False), descends=descends, equivalent=equivalent)
 
 
+TIP_T = LAND_T - 3600  # the landed tip was committed an hour before the train made its land commit
+
+
 def test_newer_unlanded_branch_skips_older_superseded_sibling_does_not():
     newer = unlanded("goal/aestheticcnext-2dp1n-r2", LAND_T + 60)
-    assert us.decide_landed(bead(), LAND, [ref(), newer])["action"] == "skip"
-    stale = unlanded("goal/aestheticcnext-2dp1n-r1", LAND_T - 60)
-    assert us.decide_landed(bead(), LAND, [stale])["action"] == "close"
+    assert us.decide_landed(bead(), LAND, [ref(), newer], TIP_T)["action"] == "skip"
+    stale = unlanded("goal/aestheticcnext-2dp1n-r1", TIP_T - 60)
+    assert us.decide_landed(bead(), LAND, [stale], TIP_T)["action"] == "close"
+
+
+def test_rebased_sibling_committed_between_landed_tip_and_land_commit_skips():
+    # review r2: a -r2 rebased and committed while the train ran, pushed after the land
+    mid = unlanded("goal/aestheticcnext-2dp1n-r2", TIP_T + 600)
+    assert us.decide_landed(bead(), LAND, [mid], TIP_T)["action"] == "skip"
+    # landed tip time unknown: no divergent branch can be proven superseded
+    assert us.decide_landed(bead(), LAND, [unlanded("goal/aestheticcnext-2dp1n-r1", TIP_T - 60)])["action"] == "skip"
 
 
 def test_commits_pushed_on_top_of_the_landed_tip_skip_even_if_older_than_the_land():
     # builder pushed more work while the train tested the pinned tip: committed before the land commit
-    past = unlanded("goal/aestheticcnext-2dp1n", LAND_T - 30, descends=True)
-    assert us.decide_landed(bead(), LAND, [past])["action"] == "skip"
+    past = unlanded("goal/aestheticcnext-2dp1n", TIP_T - 30, descends=True)  # only `descends` holds it
+    assert us.decide_landed(bead(), LAND, [past], TIP_T)["action"] == "skip"
     same = unlanded("goal/aestheticcnext-2dp1n", LAND_T + 60, equivalent=True)  # rebased copy of landed work
-    assert us.decide_landed(bead(), LAND, [same])["action"] == "close"
+    assert us.decide_landed(bead(), LAND, [same], TIP_T)["action"] == "close"
 
 
 def test_bead_lookup_failure_never_closes(monkeypatch):

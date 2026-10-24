@@ -337,11 +337,12 @@ def _ts(s):
         return None
 
 
-def decide_landed(d, land_hit, refs):
+def decide_landed(d, land_hit, refs, tip_ct=None):
     """What to do with one non-closed bead. land_hit: (sha, ct, subject) or None. refs: [{branch, tip, ct,
     on_main, names_bead, equivalent, descends}] for remote branches carrying this bead's exact key
     (equivalent: every commit patch-equivalent on main; descends: tip is past the landed tip). Returns None
-    (no landing evidence) or {action: close|report|skip, sha, ct, evidence, why}."""
+    (no landing evidence) or {action: close|report|skip, sha, ct, evidence, why}. tip_ct: commit time of
+    the landed tip itself (0 when unknown: then every divergent unlanded branch holds the close)."""
     ev = None
     if land_hit:
         ev = {"sha": land_hit[0], "ct": land_hit[1], "evidence": land_hit[2][:140]}
@@ -352,10 +353,12 @@ def decide_landed(d, land_hit, refs):
             ev = {"sha": r["tip"], "ct": r["ct"], "evidence": f"branch {r['branch']} tip is an ancestor of origin/main"}
     if not ev:
         return None
-    # In flight: commits pushed on top of the landed tip (while the train ran, or after), or any newer
-    # unlanded branch. An older -rN sibling the land superseded is not; nor is a patch-equivalent one.
+    # In flight: commits on top of the landed tip, or any unlanded branch committed after the landed tip
+    # was (a rebased -r2 can be committed before the land commit and pushed after it: review r2). Only a
+    # sibling older than the landed tip itself was superseded; a patch-equivalent one carries nothing new.
+    since = ev["ct"] if not land_hit else (tip_ct or 0)
     busy = [r for r in refs if not r["on_main"] and not r.get("equivalent")
-            and (r.get("descends", True) or r["ct"] > ev["ct"])]
+            and (r.get("descends", True) or r["ct"] > since)]
     if busy:
         return dict(ev, action="skip", why=f"unlanded work on {busy[0]['branch']} past or newer than the land")
     for c in d.get("comments") or []:
@@ -408,7 +411,8 @@ def landed_open(env, land):
             res.append({"bead": b["id"], "status": b.get("status"), "action": "skip", "sha": "",
                         "why": "bd show failed; cannot check for a re-dispatch, not closed"})
             continue
-        r = decide_landed(d, idx.get(k), refs)
+        rc, tct = git("log", "-1", "--format=%ct", landed_tip)
+        r = decide_landed(d, idx.get(k), refs, int(tct.strip()) if rc == 0 and tct.strip().isdigit() else 0)
         if r:
             res.append({"bead": b["id"], "status": b.get("status"), "priority": b.get("priority"),
                         "title": (b.get("title") or "")[:90], "sha": r["sha"][:10], "evidence": r["evidence"],
