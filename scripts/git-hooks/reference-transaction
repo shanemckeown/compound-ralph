@@ -14,8 +14,11 @@ allowed (Shane's escape hatch). Present but empty or malformed, or the checker f
 hanging = refused (fail closed). A FLEET_ROLE env var is never trusted.
 
 The checker is never run from the working tree, which a merge has already rewritten by
-the time this hook runs: its blobs are read from main's current (pre-update) commit into
-a fresh temp dir and run with python3 -I. Every git inspection uses --no-replace-objects.
+the time this hook runs: its blobs (fleet-role.py and the fleet_codex_rpc.py it imports)
+are read from the transaction's old value of the LOCAL refs/heads/main (never a
+remote-tracking ref or FETCH_HEAD) into a fresh temp dir, and run there with python3 -E -s
+(not -I: that drops the script dir from sys.path and the sibling import fails). Every git
+inspection uses --no-replace-objects.
 
 Install with scripts/git-hooks/install.sh (orchestrator only): it copies this file into
 the absolute common hooks dir and points core.hooksPath there, so linked worktrees and
@@ -61,8 +64,9 @@ GATE_PATHS = (
 CHECKER = "scripts/fleet-role.py"
 CHECKER_SIBLINGS = ("scripts/fleet_codex_rpc.py",)
 
-# Longer than fleet-role's own 30 s registry probe. Tests may lower it, never raise it.
-TIMEOUT_MAX_S = 45.0
+# Longer than fleet-role's worst case: its Codex probe has three 15 s budgets. A timeout is
+# a refusal. Tests may lower it, never raise it.
+TIMEOUT_MAX_S = 60.0
 TIMEOUT_TEST_ENV = "WQN96_TEST_TIMEOUT_S"
 
 # Claude session ids and Codex thread ids are both UUIDs. A leading hex digit also keeps
@@ -121,11 +125,14 @@ def materialise_checker(tip, dest):
 
 
 def is_orchestrator(agent_id, checker):
-    # The bare id only: the committed fleet-role.py exits 2 on any unknown flag.
+    # Exactly one argument, the validated id: its informational flags (--who, --release)
+    # exit 0 without proving anything. cwd and the script dir are the temp dir, so the
+    # sibling import resolves to the committed blob.
     try:
         res = subprocess.run(
-            [sys.executable, "-I", checker, agent_id],
+            [sys.executable, "-E", "-s", checker, agent_id],
             capture_output=True, text=True, timeout=timeout_s(),
+            cwd=os.path.dirname(checker),
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -165,6 +172,7 @@ def main():
         return 0
     blocked = []
     tip = main_tip()
+    trusted = None  # the checker comes from main's value before this transaction
     for line in sys.stdin.read().splitlines():
         parts = line.split(" ", 2)
         # Case-folded: on macOS refs/heads/MAIN is the same loose ref file as main.
@@ -174,6 +182,8 @@ def main():
         if old == ZERO:
             # update-ref without an expected value sends a zero old: use main's current tip.
             old = tip or ZERO
+        if old != ZERO:
+            trusted = trusted or old
         if old == new:
             continue
         if old == ZERO:
@@ -189,7 +199,7 @@ def main():
         blocked.extend(p for p in paths if is_gate_path(p))
     if not blocked:
         return 0
-    if caller_role(tip) in ("human", "orchestrator"):
+    if caller_role(trusted) in ("human", "orchestrator"):
         return 0
     sys.stderr.write(
         "REFUSED (LUCY-wqn96): this session is not the orchestrator, so it cannot move "

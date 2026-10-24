@@ -353,7 +353,7 @@ def test_r3_branch_rename_away_from_main_refused(repo):
 
 
 # R4: a set-but-junk id is not a human and never reaches the checker as a flag
-@pytest.mark.parametrize("bad_id", ["", " ", "--who", "x\ny", "--------", "not-a-uuid!"])
+@pytest.mark.parametrize("bad_id", ["", " ", "--who", "--release", "x\ny", "--------", "not-a-uuid!"])
 def test_r4_malformed_id_refused(repo, bad_id):
     repo.set_role("orchestrator")  # even a yes-checker must not be asked
     repo.as_agent(value=bad_id)
@@ -368,7 +368,8 @@ def test_r4_codex_thread_id_shape_accepted():
         assert hook.AGENT_ID_RE.fullmatch(good)
 
 
-# R5: the outer timeout outlasts fleet-role's 30 s probe, and tests may only lower it
+# R5/R9: the outer timeout outlasts fleet-role's probes (three 15 s Codex budgets), and
+# tests may only lower it
 def test_r5_slow_orchestrator_allowed(repo):
     repo.set_role("slow-orchestrator")
     repo.as_agent()
@@ -378,12 +379,12 @@ def test_r5_slow_orchestrator_allowed(repo):
 
 def test_r5_timeout_bounds(monkeypatch):
     hook = load_hook()
-    assert hook.TIMEOUT_MAX_S == 45
-    for value, want in (("2", 2.0), ("100", 45.0), ("0", 45.0), ("-1", 45.0), ("junk", 45.0)):
+    assert hook.TIMEOUT_MAX_S == 60
+    for value, want in (("2", 2.0), ("100", 60.0), ("0", 60.0), ("-1", 60.0), ("junk", 60.0)):
         monkeypatch.setenv("WQN96_TEST_TIMEOUT_S", value)
         assert hook.timeout_s() == want, value
     monkeypatch.delenv("WQN96_TEST_TIMEOUT_S")
-    assert hook.timeout_s() == 45.0
+    assert hook.timeout_s() == 60.0
 
 
 # R6: replacement objects cannot hide the real diff
@@ -395,6 +396,55 @@ def test_r6_replace_objects_ignored(repo):
     res = repo.git("update-ref", "refs/heads/main", tip, check=False)
     assert res.returncode != 0 and "REFUSED (LUCY-wqn96)" in res.stderr
     assert repo.git("--no-replace-objects", "rev-parse", "main").stdout.strip() == before
+
+
+# R7: the committed checker can import its committed sibling (python3 -E -s, not -I)
+def test_r7_checker_imports_committed_sibling(repo):
+    sibling = "scripts/fleet_codex_rpc.py"
+    repo.write(sibling, "ROLE = 'ORCHESTRATOR'\n")
+    repo.write(CHECKER, textwrap.dedent(f"""\
+        import sys
+        open({str(repo.seen)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')
+        from fleet_codex_rpc import ROLE
+        print(ROLE)
+        sys.exit(0 if ROLE == 'ORCHESTRATOR' else 1)
+    """))
+    repo.git("add", CHECKER, sibling, env=repo.human_env())
+    repo.git("commit", "-q", "-m", "checker with sibling", env=repo.human_env())
+    # An uncommitted SUB sibling in the working tree must not be the one imported.
+    repo.write(sibling, "ROLE = 'SUB'\n")
+    repo.as_agent()
+    res = repo.commit(GATE_FILE, "ok\n")
+    assert res.returncode == 0, res.stderr
+
+
+# R7 clarify: the checker comes from LOCAL main's old value, never origin/main
+def test_r7_permissive_origin_main_checker_ignored(repo):
+    repo.git("checkout", "-q", "-b", "permissive")
+    repo.write(CHECKER, stub_source("orchestrator", repo.seen))
+    repo.git("add", CHECKER)
+    repo.git("commit", "-q", "-m", "permissive")
+    repo.git("update-ref", "refs/remotes/origin/main", repo.rev("permissive"))
+    repo.git("checkout", "-q", "main")
+    repo.git("branch", "-q", "-D", "permissive")
+    repo.as_agent()
+    before = repo.rev("main")
+    assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
+
+
+# Live recurrence 24 Oct (LUCY-nd0r5, b0da2da): exactly that path set, committed on main
+def test_nd0r5_land_batch_commit_on_main_refused(repo):
+    paths = ("skills/land-batch/SKILL.md", "skills/land-batch/bin/tier_gates.py",
+             "skills/land-batch/tests/test_tier_gates.py")
+    repo.as_agent()
+    before = repo.rev("main")
+    for path in paths:
+        repo.write(path, "unreviewed\n")
+    repo.git("add", *paths)
+    res = repo.git("commit", "-q", "-m", "nd0r5", check=False)
+    assert_refused(res, repo, before, what="skills/land-batch/bin/tier_gates.py")
+    for path in paths:
+        assert path in res.stderr
 
 
 def test_codex_thread_id_is_an_agent(repo):
