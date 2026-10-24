@@ -8,6 +8,7 @@ Run: ~/.claude/skills/land-batch/.venv/bin/python3 -m pytest scripts/git-hooks/ 
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import subprocess
 import textwrap
 import time
@@ -62,16 +63,24 @@ class Repo:
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "t@example.com")
         self.git("config", "user.name", "t")
-        res = subprocess.run(["bash", INSTALL, str(self.root)], env=self.env,
-                             capture_output=True, text=True)
-        assert res.returncode == 0, res.stderr
-        self.install_output = res.stdout
-        # The baseline commit is made as a human (no agent id), so the hook allows it.
+        # The baseline commit (made as a human, before any hook) carries the hook file:
+        # install.sh installs main's committed blob, never the working tree.
         self.write(GATE_FILE, "v0\n")
         self.write("commands/closeout.md", "v0\n")
         self.write(CHECKER, stub_source(role, self.seen))
+        dest = self.root / "scripts/git-hooks/reference-transaction"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HOOK, dest)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "base")
+        res = self.install()
+        assert res.returncode == 0, res.stderr
+        self.install_output = res.stdout
+        self.common = self.git("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+
+    def install(self, env=None):
+        return subprocess.run(["bash", INSTALL, str(self.root)], env=env or self.env,
+                              capture_output=True, text=True)
 
     def human_env(self):
         return {k: v for k, v in self.env.items() if k not in AGENT_VARS}
@@ -520,3 +529,213 @@ def test_gate_path_matching():
     for p in ("commands/closeout.md", "hooks-old/x.sh", "settings.json.bak",
               "skills/land-batchx/a", "scripts/review-gate.sh.bak", "foo/settings.json"):
         assert not hook.is_gate_path(p), p
+
+
+# ---- Layer A hardening (S1-S5, T3): install and startup trust anchors ----
+
+# S1: a per-worktree core.hooksPath would override the shared one
+def test_s1_per_worktree_hooks_path_refused(repo, tmp_path):
+    wt = tmp_path / "wt"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    repo.git("config", "extensions.worktreeConfig", "true")
+    repo.git("config", "--worktree", "core.hooksPath", str(tmp_path / "elsewhere"), cwd=wt)
+    hooks_path_before = repo.git("config", "--get", "core.hooksPath").stdout
+    res = repo.install()
+    assert res.returncode == 1
+    # Refused up front, naming the worktree, before anything is installed or reconfigured.
+    assert f"worktree {wt} sets its own core.hooksPath" in res.stderr
+    assert repo.git("config", "--get", "core.hooksPath").stdout == hooks_path_before
+
+
+def test_s1_per_worktree_hooks_path_equal_to_common_allowed(repo, tmp_path):
+    wt = tmp_path / "wt"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    repo.git("config", "extensions.worktreeConfig", "true")
+    repo.git("config", "--worktree", "core.hooksPath", os.path.join(repo.common, "hooks"), cwd=wt)
+    res = repo.install()
+    assert res.returncode == 0, res.stderr
+
+
+def test_s1_every_worktree_sees_the_common_hooks_dir(repo, tmp_path):
+    wt = tmp_path / "wt"
+    repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
+    assert repo.install().returncode == 0
+    want = os.path.join(repo.common, "hooks")
+    for where in (repo.root, wt):
+        assert repo.git("config", "--get", "core.hooksPath", cwd=where).stdout.strip() == want
+
+
+# S2: install.sh installs main's committed blobs, from main, for the orchestrator only
+def test_s2_install_uses_committed_blob_not_working_tree(repo):
+    repo.write("scripts/git-hooks/reference-transaction", "#!/bin/sh\nexit 0\n")  # uncommitted
+    assert repo.install().returncode == 0
+    installed = open(os.path.join(repo.common, "hooks", "reference-transaction")).read()
+    assert installed == open(HOOK).read()
+    repo.as_agent()
+    before = repo.rev("main")
+    assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
+
+
+def test_s2_install_refuses_when_head_is_not_main(repo):
+    repo.git("checkout", "-q", "-b", "other")
+    res = repo.install()
+    assert res.returncode == 1 and "not refs/heads/main" in res.stderr
+
+
+@pytest.mark.parametrize("role,code", [("sub", 1), ("orchestrator", 0)])
+def test_s2_install_needs_the_orchestrator(repo, role, code):
+    if role != "sub":  # the base checker already answers SUB
+        repo.set_role(role)
+    repo.as_agent()
+    res = repo.install()
+    assert res.returncode == code, res.stderr
+    if code:
+        assert "not the orchestrator" in res.stderr
+
+
+def test_s2_install_refuses_a_malformed_agent_id(repo):
+    repo.set_role("orchestrator")
+    repo.as_agent(value="--who")
+    assert repo.install().returncode == 1
+
+
+# S3: python startup files and PYTHONPATH cannot pre-empt the hook
+def test_s3_startup_injection_ignored(repo, tmp_path):
+    inject = tmp_path / "inject"
+    inject.mkdir()
+    for name in ("sitecustomize.py", "usercustomize.py"):
+        for where in (inject, repo.root):
+            (where / name).write_text("import os; os._exit(0)\n")
+    (inject / "subprocess.py").write_text("import os; os._exit(0)\n")
+    repo.env["PYTHONPATH"] = f"{inject}:."
+    repo.env["PYTHONSTARTUP"] = str(inject / "sitecustomize.py")
+    repo.as_agent()
+    before = repo.rev("main")
+    assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
+
+
+def test_s3_non_isolated_start_re_execs(repo, tmp_path):
+    """Started as plain `python3 hook` with a shadowing subprocess.py on PYTHONPATH, the hook
+    re-execs under -I -S before importing it, so the shadow never runs."""
+    inject = tmp_path / "inject"
+    inject.mkdir()
+    (inject / "subprocess.py").write_text("import os; os._exit(0)\n")
+    tip = repo.branch_with_gate_change()
+    env = dict(repo.env, PYTHONPATH=str(inject), CLAUDE_CODE_SESSION_ID=AGENT_ID)
+    res = subprocess.run(["python3", HOOK, "prepared"], cwd=repo.root, env=env, text=True,
+                         input=f"{repo.rev('main')} {tip} refs/heads/main\n", capture_output=True)
+    assert res.returncode == 1 and "REFUSED (LUCY-wqn96)" in res.stderr
+
+
+def test_s3_shebang_is_isolated():
+    with open(HOOK) as fh:
+        assert fh.readline().strip() == "#!/usr/bin/env -S python3 -I -S"
+
+
+# S4: main must be a direct ref
+def test_s4_commit_on_symbolic_mains_target_refused(repo):
+    repo.git("checkout", "-q", "-b", "e3")
+    repo.git("symbolic-ref", "refs/heads/main", "refs/heads/e3")  # as a human: allowed
+    repo.as_agent()
+    before = repo.rev("e3")
+    res = repo.commit("commands/closeout.md", "moves main via its target\n")
+    assert res.returncode != 0 and "(main is a symbolic ref to refs/heads/e3)" in res.stderr
+    assert repo.rev("e3") == before
+
+
+def test_s4_making_main_symbolic_refused(repo):
+    repo.git("checkout", "-q", "-b", "e3")
+    repo.as_agent()
+    res = repo.git("symbolic-ref", "refs/heads/main", "refs/heads/e3", check=False)
+    assert res.returncode != 0 and "(makes main a symbolic ref)" in res.stderr
+    assert repo.git("symbolic-ref", "-q", "refs/heads/main", check=False).returncode != 0
+
+
+def test_s4_orchestrator_may_make_main_symbolic(repo):
+    repo.set_role("orchestrator")
+    repo.git("checkout", "-q", "-b", "e3")
+    repo.as_agent()
+    assert repo.git("symbolic-ref", "refs/heads/main", "refs/heads/e3", check=False).returncode == 0
+
+
+# S5 / T2: recreating main takes the checker from main's reflog only. git drops the reflog with
+# the ref and cannot read a deleted ref's log, so after a delete only a human recreates main.
+def test_s5_orchestrator_deletes_main_and_a_human_recreates_it(repo):
+    repo.set_role("orchestrator")
+    tip = repo.rev("main")
+    repo.git("checkout", "-q", "-b", "other")
+    repo.as_agent()
+    assert repo.git("update-ref", "-d", "refs/heads/main", check=False).returncode == 0
+    res = repo.git("update-ref", "refs/heads/main", tip, check=False)
+    assert res.returncode != 0 and "(creates main)" in res.stderr
+    res = repo.git("update-ref", "refs/heads/main", tip, check=False, env=repo.human_env())
+    assert res.returncode == 0, res.stderr
+    assert repo.rev("main") == tip
+
+
+def test_s5_sub_recreate_refused_with_orchestrator_checker_on_a_branch(repo):
+    """The anchor is main's last value (SUB checker), not a branch carrying a yes-checker."""
+    repo.git("checkout", "-q", "-b", "permissive")
+    repo.write(CHECKER, stub_source("orchestrator", repo.seen))
+    repo.git("add", CHECKER)
+    repo.git("commit", "-q", "-m", "permissive")
+    repo.git("update-ref", "-d", "refs/heads/main")  # human
+    repo.as_agent()
+    res = repo.git("update-ref", "refs/heads/main", repo.rev("permissive"), check=False)
+    assert res.returncode != 0 and "(creates main)" in res.stderr
+
+
+def test_s5_no_anchor_refused_even_for_orchestrator(repo):
+    repo.set_role("orchestrator")
+    tip = repo.rev("main")
+    repo.git("checkout", "-q", "-b", "other")
+    repo.git("update-ref", "-d", "refs/heads/main")  # human
+    repo.as_agent()
+    res = repo.git("update-ref", "refs/heads/main", tip, check=False)
+    assert res.returncode != 0 and "(creates main)" in res.stderr
+
+
+# T3: every link of main's symbolic chain is watched
+def make_chain(repo):
+    """main -> middle -> leaf, made by a human; HEAD on another branch."""
+    repo.git("checkout", "-q", "-b", "other")
+    repo.git("branch", "leaf", "main")
+    env = repo.human_env()
+    repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/leaf", env=env)
+    repo.git("symbolic-ref", "refs/heads/main", "refs/heads/middle", env=env)
+    assert repo.rev("main") == repo.rev("leaf")
+
+
+def test_t3_sub_redirecting_an_intermediate_link_refused(repo):
+    tip = repo.branch_with_gate_change()
+    repo.git("checkout", "-q", "main")
+    make_chain(repo)
+    before = repo.rev("main")
+    repo.as_agent()
+    res = repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/e3", check=False)
+    assert res.returncode != 0 and "REFUSED (LUCY-wqn96)" in res.stderr
+    assert repo.rev("main") == before != tip
+
+
+def test_t3_orchestrator_may_redirect_an_intermediate_link(repo):
+    repo.set_role("orchestrator")
+    tip = repo.branch_with_gate_change()
+    repo.git("checkout", "-q", "main")
+    make_chain(repo)
+    repo.as_agent()
+    assert repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/e3", check=False).returncode == 0
+    assert repo.rev("main") == tip
+
+
+def test_t3_symref_chain_walks_every_link(repo):
+    make_chain(repo)
+    hook = load_hook()
+    env = dict(os.environ, GIT_DIR=repo.common)
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        assert hook.symref_chain() == ["refs/heads/middle", "refs/heads/leaf"]
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)

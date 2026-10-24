@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -S
 """reference-transaction hook: only the orchestrator moves main onto a gate-path change (LUCY-wqn96).
 
 Git runs this for every ref update, whatever the route: commit (with or without
@@ -8,6 +8,8 @@ the ref is left where it was.
 
 Rule: an update of refs/heads/main whose old..new diff touches a GATE_PATHS entry, and
 any deletion or creation of main, is refused unless the caller is the fleet orchestrator.
+While main is a symbolic ref, any update of it or of its target is refused the same way,
+and so is turning main into a symbolic ref.
 Identity comes from scripts/fleet-role.py (exit 0 + "ORCHESTRATOR", else SUB) run on
 $CLAUDE_CODE_SESSION_ID and $CODEX_THREAD_ID. Both variables absent = a human terminal =
 allowed (Shane's escape hatch). Present but empty or malformed, or the checker failing or
@@ -18,28 +20,38 @@ the time this hook runs: its blobs (fleet-role.py and the fleet_codex_rpc.py it 
 are read from the transaction's old value of the LOCAL refs/heads/main (never a
 remote-tracking ref or FETCH_HEAD) into a fresh temp dir, and run there with python3 -E -s
 (not -I: that drops the script dir from sys.path and the sibling import fails). Every git
-inspection uses --no-replace-objects.
+inspection uses --no-replace-objects. Recreating a deleted main takes the checker from
+main's reflog; with no reflog (git deletes it with the ref) only a human may recreate main.
+While main is symbolic, every ref in its chain (main -> ... -> leaf) is watched.
 
-Install with scripts/git-hooks/install.sh (orchestrator only): it copies this file into
-the absolute common hooks dir and points core.hooksPath there, so linked worktrees and
+This file runs with python3 -I -S (no PYTHON* env, no cwd or user site on sys.path, no
+site import) and re-execs itself that way if started otherwise.
+
+Install with scripts/git-hooks/install.sh (orchestrator only): it copies the committed blob
+into the absolute common hooks dir and points core.hooksPath there, so linked worktrees and
 local pushes run it too. A relative core.hooksPath resolves per worktree and skips it.
 
-Residual routes no ref hook sees (tracked in LUCY-4oxj3): `git branch -C/-M` onto main,
-`git -c core.hooksPath=...` overrides, and direct writes to packed-refs or ref files.
-The committed fleet-role.py only knows Claude sessions, so a Codex orchestrator is
-refused here (fails closed) until a provider-aware checker lands on main.
+Residual routes (tracked in LUCY-4oxj3): `git branch -C/-M` onto main, `git -c
+core.hooksPath=...` overrides, direct writes to packed-refs or ref files, and replacing the
+installed hook (any process running as Shane can). This guards ref moves only: an
+uncommitted edit in ~/.claude's main checkout runs before any ref moves (LUCY-p122j).
 """
 import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
+
+if __name__ == "__main__" and not (sys.flags.isolated and sys.flags.no_site):
+    os.execv(sys.executable, [sys.executable, "-I", "-S", os.path.abspath(__file__)] + sys.argv[1:])
+
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 
 MAIN_REF = "refs/heads/main"
 ZERO = "0" * 40
 
 # Prefixes (ending "/") match a directory; anything else matches that exact path.
+# scripts/risk_tier.py decides the land tier and tier_gates.py imports it, so it is a gate.
 GATE_PATHS = (
     "references/review-lead/",
     "scripts/review-gate.sh",
@@ -51,6 +63,7 @@ GATE_PATHS = (
     "scripts/gate-watch.py",
     "scripts/gate-tier.py",
     "scripts/build-gate.py",
+    "scripts/risk_tier.py",
     "scripts/git-hooks/",
     "skills/land-batch/",
     "skills/aestheticc-review/",
@@ -73,6 +86,7 @@ TIMEOUT_TEST_ENV = "WQN96_TEST_TIMEOUT_S"
 # the id from being read as a flag: the checker treats any "--x" argument as an option.
 AGENT_ID_RE = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{7,63}")
 AGENT_ID_VARS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+OID_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 RULE = (
     "Gate changes go on a branch: commit there, get the independent Astra fail-open "
@@ -91,6 +105,45 @@ def git(*args, text=True):
 def main_tip():
     cur = git("rev-parse", "--verify", "-q", MAIN_REF + "^{commit}")
     return cur.stdout.strip() if cur.returncode == 0 else None
+
+
+def symbolic_main():
+    """The ref main points at when main is symbolic, else None."""
+    out = git("symbolic-ref", "-q", MAIN_REF)
+    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def symref_chain():
+    """Every ref main's symbolic chain passes through, lowercased: main -> middle -> leaf.
+
+    Empty when main is a direct ref. A loop or a chain deeper than 10 ends the walk; the
+    refs seen so far are still all watched.
+    """
+    chain, ref = [], MAIN_REF
+    for _ in range(10):
+        out = git("symbolic-ref", "--no-recurse", "-q", ref)
+        target = out.stdout.strip() if out.returncode == 0 else ""
+        if not target or target.lower() in chain or target.lower() == MAIN_REF:
+            break
+        chain.append(target.lower())
+        ref = target
+    return chain
+
+
+def is_commit(oid):
+    return bool(oid) and OID_RE.fullmatch(oid) is not None and \
+        git("cat-file", "-e", oid + "^{commit}").returncode == 0
+
+
+def recreate_anchor():
+    """Main's last value before it was deleted, from the reflog, else None (only a human may
+    then recreate it)."""
+    log = git("reflog", "show", "--format=%H", MAIN_REF)
+    if log.returncode == 0:
+        for oid in log.stdout.split():
+            if oid != ZERO and is_commit(oid):
+                return oid
+    return None
 
 
 def changed_paths(old, new):
@@ -167,18 +220,28 @@ def caller_role(trusted_tip):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def main():
-    if len(sys.argv) < 2 or sys.argv[1] != "prepared":
-        return 0
+def prepared(lines):
     blocked = []
     tip = main_tip()
+    sym = symbolic_main()
+    # Every link: with main -> middle -> leaf, moving middle moves main too.
+    watched = {MAIN_REF} | set(symref_chain())
     trusted = None  # the checker comes from main's value before this transaction
-    for line in sys.stdin.read().splitlines():
+    for line in lines:
         parts = line.split(" ", 2)
         # Case-folded: on macOS refs/heads/MAIN is the same loose ref file as main.
-        if len(parts) != 3 or parts[2].lower() != MAIN_REF:
+        if len(parts) != 3 or parts[2].lower() not in watched:
             continue
         old, new, _ = parts
+        if sym:
+            # main must be a direct ref: a commit on its target would move main unchecked.
+            blocked.append("(main is a symbolic ref to %s)" % sym)
+            trusted = trusted or tip
+            continue
+        if old.startswith("ref:") or new.startswith("ref:"):
+            blocked.append("(makes main a symbolic ref)")
+            trusted = trusted or tip
+            continue
         if old == ZERO:
             # update-ref without an expected value sends a zero old: use main's current tip.
             old = tip or ZERO
@@ -187,6 +250,7 @@ def main():
         if old == new:
             continue
         if old == ZERO:
+            trusted = trusted or recreate_anchor()
             blocked.append("(creates main)")
             continue
         if new == ZERO:
@@ -210,5 +274,14 @@ def main():
     return 1
 
 
+def main(argv):
+    if argv == ["--check-orchestrator"]:
+        # install.sh: may this caller install? Same identity rule as a gate move.
+        return 0 if caller_role(main_tip()) in ("human", "orchestrator") else 1
+    if argv[:1] == ["prepared"]:
+        return prepared(sys.stdin.read().splitlines())
+    return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
