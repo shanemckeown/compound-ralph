@@ -66,7 +66,14 @@ Read earlier rounds. If two or more fix rounds that share one premise failed the
 
 ## Calibration
 
-- **Fixed in a later round** (orchestrator, 23 Oct). A finding from an earlier round's review (pass that file as a `--verdict` too) is graded `fixed` only when an independent review of the current tip (the commit the newest review reviewed, not the one that raised it) has, in its review-verdict block, the prior entry `{"ref": "r<N> <sev> <file:line>", "status": "closed"}` (LUCY-e3opf; a range such as `:78-83` is matched exactly; a review file with no `_r<N>_` in its name is round 1), and no review of that tip raises it again. Prose `closed:` lines in VERIFIED OK are never graded. Name that review as `fixed_by`. If another review of the same tip marks it `open`, the checker escalates it to the orchestrator. The checker verifies this; you never confirm a fix yourself. No clearance is needed for a confirmed fix.
+- **Fixed in a later round** (orchestrator, 23 Oct). A finding from an earlier round's review (pass that file as a `--verdict` too) is graded `fixed` only when an independent review of the current tip (the commit the newest review reviewed, not the one that raised it) has, in its review-verdict block, the prior entry `{"ref": "r<N> <sev> <file:line>", "status": "closed"}` (LUCY-e3opf; a range such as `:78-83` is matched exactly; a review file with no `_r<N>_` in its name is round 1), and no review of that tip raises it again. Prose `closed:` lines in VERIFIED OK are never graded. Name that review as `fixed_by`. If another review of the same tip marks it `open`, the checker escalates it to the orchestrator. It also escalates when the ref could name two different round-N findings, say two seats' differently worded findings at one `<sev> <file:line>` (G3). Every review of that tip must use the strict block: one block per file, a single `REVIEWING:` echo in every input file, findings exactly `{"severity", "file_line", "text"}` and prior entries exactly `{"ref", "status", "evidence"}` (G1, G2, G4). For example:
+
+```
+{"verdict": "PASS", "findings": [],
+ "prior": [{"ref": "r1 P2 lib/pay.ts:37", "status": "closed", "evidence": "retry regression green at this tip; reverting the guard turns it red"}]}
+```
+
+The checker verifies this; you never confirm a fix yourself. No clearance is needed for a confirmed fix.
 - **More than 5 blocking Act on items means you're not filtering hard enough.** Filter harder, or give `act_on_over_cap_reason`.
 - The Dismissed list isn't busywork. It's the trust mechanism that lets the orchestrator or Shane overrule you.
 - When a dismissal is a new, reusable shape, append a `candidate` pattern to DISMISSAL_PATTERNS.md (format in that file). Never add one whose "Skip when" covers a never-dismiss area.

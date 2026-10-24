@@ -20,8 +20,17 @@ Refuses (exit 1, reasons on stderr) when:
   - more than 5 blocking act_on items without act_on_over_cap_reason;
   - round >= 2 and no premise block;
   - a pre_existing act_on / consider item lacks a follow_up bead title;
-  - a review-verdict block finding has no severity or no file:line, or its `prior` is malformed;
   - a `fixed` grade has no "closed" prior entry in a review of the current tip (LUCY-e3opf).
+The review-verdict grammar (LUCY-e3opf, attempt 3), each refused:
+  - G1: more than one top-level review-verdict block in a file (fences nest CommonMark-style, so a
+    block quoted inside a longer fence is content), or an unclosed one;
+  - G2: a key missing, extra, null or empty: top level {verdict, findings[, prior]}, a finding
+    {severity, file_line, text}, a prior entry {ref, status, evidence}. A raising review may use the
+    legacy {severity, text}; a review of the current tip may not;
+  - G3: a prior ref matching no round-N finding. One matching two distinct findings escalates;
+  - G4: when anything is graded fixed or carries a prior, an input file without one REVIEWING echo;
+  - G5: a prose severity + path that matches no block finding or prior ref by severity and file
+    (and line, when given). Wording is never compared.
 A `fixed` grade that another review of the current tip marks "open" is escalated, never counted fixed.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
@@ -112,10 +121,73 @@ SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 #   {"verdict": "PASS"|"FAIL",
 #    "findings": [{"severity": "P2", "file_line": "lib/x.ts:12", "text": "failure scenario — fix"}],
 #    "prior": [{"ref": "r1 P2 lib/x.ts:12", "status": "closed"|"open", "evidence": "how checked"}]}
-# When a file has one, the last block is the whole input from that file; prose is not parsed.
+# A file holds at most one, at top level; it is the whole source of that file's findings, and its prose
+# is checked against it by location only (LUCY-e3opf G1, G5).
 # `prior` (LUCY-e3opf) is the only thing that grades an earlier finding fixed: prose "closed:" lines
 # are never graded, because negation-word rules could not be both fail-closed and accepting.
-STRUCTURED = re.compile(r"(?ms)^\s*```\s*review-verdict\s*\n(.*?)^\s*```\s*$")
+# A fence opener (LUCY-e3opf G1): n>=3 backticks or tildes, then the info string. It closes only on a
+# line of >=n of the same character, CommonMark-style, so a 4-backtick example can hold a 3-backtick
+# review-verdict block that is content, not the reviewer's answer.
+FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+# The exact key sets of a review-verdict block (LUCY-e3opf G2). No aliases: priority is not severity.
+TOP_KEYS, TOP_OPTIONAL = ("verdict", "findings"), ("prior",)
+FINDING_KEYS = ("severity", "file_line", "text")
+LEGACY_FINDING_KEYS = ("severity", "text")  # written before file_line existed: raising reviews only
+PRIOR_KEYS = ("ref", "status", "evidence")
+
+
+class Block:
+    """One top-level review-verdict block: start/end of the whole fence in the file, and its JSON body."""
+
+    def __init__(self, start, end, body):
+        self.start, self.end, self.body = start, end, body
+
+
+def verdict_blocks(p, text):
+    """The review-verdict blocks at top level, outside any other fence (LUCY-e3opf G1). An unclosed
+    review-verdict fence, or an unclosed fence that swallows one, refuses the file."""
+    out, fence, pos = [], None, 0
+    for line in text.splitlines(keepends=True):
+        start, pos = pos, pos + len(line)
+        s = line.rstrip("\r\n")
+        if fence is None:
+            m = FENCE.match(s)
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                info = m.group(2).split()
+                fence = (m.group(1)[0], len(m.group(1)), bool(info) and info[0].lower() == "review-verdict",
+                         start, pos)
+            continue
+        ch, n, is_verdict, ostart, bstart = fence
+        if re.fullmatch(rf"[ \t]*{re.escape(ch)}{{{n},}}[ \t]*", s):
+            if is_verdict:
+                out.append(Block(ostart, pos, text[bstart:start]))
+            fence = None
+    if fence is not None and (fence[2] or re.search(r"(?m)^[ \t]*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
+                                                     text[fence[4]:])):
+        raise ValueError(f"{p}: a review-verdict block is not closed (no closing fence after it)")
+    return out
+
+
+def one_block(p, text):
+    """The file's single review-verdict block, or None. Two or more is two responses: refused, never
+    merged or last-one-wins (LUCY-e3opf G1)."""
+    blocks = verdict_blocks(p, text)
+    if len(blocks) > 1:
+        raise ValueError(f"{p}: {len(blocks)} review-verdict blocks; one response per file")
+    return blocks[0] if blocks else None
+
+
+def key_error(what, d, need, optional=()):
+    """'' when dict d has exactly the keys `need` (plus any of `optional`), else a message naming the
+    missing and unexpected keys (LUCY-e3opf G2)."""
+    keys = set(d)
+    missing = [k for k in need if k not in keys]
+    extra = sorted(keys - set(need) - set(optional))
+    if not missing and not extra:
+        return ""
+    parts = ([f"missing keys {','.join(missing)}"] if missing else []) + \
+            ([f"unexpected keys {','.join(extra)}"] if extra else [])
+    return f"{what}: {'; '.join(parts)}; expected {','.join(need + tuple(optional))}"
 # bd comment header, as `bd comments` prints it (timestamps are UTC).
 COMMENT_HEADER = re.compile(r"^\[(?P<author>[^\]]*)\] at (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*$")
 BEAD_ID = re.compile(r"(?<![A-Za-z0-9-])(?:AestheticcNext|LUCY)-[a-z0-9]+(?:\.\d+)*(?![A-Za-z0-9-]|\.\d)", re.I)
@@ -203,23 +275,6 @@ def round_of(name):
 # A later round's line about an earlier round's finding: "- r1 P2 <file:line>[ and ...] closed: ...".
 EARLIER_REF = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+.*?)(?:\*\*)?\s+"
                          r"(?:closed|fixed|resolved):\s*(.*)$", re.I)
-# A severity named only as a parenthetical back-reference, e.g. "... fails for the marked case (P1)."
-BACK_REF = re.compile(r"\((P[123])\)")
-HAZARDS_HEAD = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?hazards?\b", re.I)
-
-
-def hazard_lines(lines):
-    """Indexes of the lines inside a Hazards section, any case (until the next section or verdict)."""
-    cur, out = False, set()
-    for i, line in enumerate(lines):
-        if HAZARDS_HEAD.match(line):
-            cur = True
-            continue
-        if SECTION.match(line) or VERDICT_HEAD.match(line) or re.match(r"^\s*(?:#+\s*)?REVIEWING:", line):
-            cur = False
-        if cur:
-            out.add(i)
-    return out
 
 
 def verified_lines(lines):
@@ -240,6 +295,9 @@ def verified_lines(lines):
 # Finding-shaped VERIFIED OK notes the parser let through: each must be adjudicated by the lead in
 # `verified_notes` with a reason, never silently dropped. Reset by main() before parsing.
 UNBOUND_NOTES = {}
+# {review path: {(round, severity, path, line, raw)}}: earlier-round "open" notes a review-verdict file's
+# block does not carry; orphan_open_priors requires their raising review as an input (LUCY-e3opf G5).
+NOTE_REFS = {}
 
 
 def tolerated_note(line, mine):
@@ -276,39 +334,6 @@ def tolerated_note(line, mine):
             return False
     UNBOUND_NOTES[clean(line)] = line.strip()
     return True
-
-
-def back_reference_note(line, mine):
-    """A Hazards bullet whose only severity is a parenthetical back-reference to a severity the file
-    lists ("- H-U0: ... fails for the marked-thread case (P1).") points at that finding. It goes to
-    the lead (verified_notes), never silently dropped; one with a location, a never-dismiss area, a
-    bare severity, or a severity the file does not list is refused (LUCY-l1s6g j)."""
-    if not re.match(r"^\s*[-*\u2022]\s", line) or FINDING.match(line) or FINDING_START.match(line):
-        return False
-    refs = BACK_REF.findall(line)
-    rest = BACK_REF.sub(" ", line)
-    if (not refs or FILE_LINE.search(line) or PROTECTED.search(line) or SEVERITY_TOKEN.search(rest)
-            or EXPLICIT_LABEL.search(rest) or any(not any(m.startswith(r) for m in mine) for r in refs)):
-        return False
-    UNBOUND_NOTES[clean(line)] = line.strip()
-    return True
-
-
-def prose_match(line, mine, used):
-    """Index of the block finding a prose finding line stands for, or None: the same severity and the
-    same leading file:line as the block finding's fields, one prose line per block finding. Never by
-    wording: a reviewer may reword the block (LUCY-e3opf, 3bm73 r5)."""
-    c = clean(line)
-    for i, m in enumerate(mine):
-        if i not in used and m == c:
-            return i
-    loc = leading_loc(c)
-    if not loc:
-        return None
-    for i, m in enumerate(mine):
-        if i not in used and m[:2] == c[:2] and leading_loc(m) == loc:
-            return i
-    return None
 
 
 def leading_loc(finding):
@@ -352,47 +377,75 @@ def load_block(block):
     return json.loads(block, object_pairs_hook=_no_duplicate_keys)
 
 
-def structured_findings(p, block):
+def block_data(p, block):
+    """A review-verdict block's JSON object, its top-level keys exact (LUCY-e3opf G2)."""
     try:
         data = load_block(block)
     except json.JSONDecodeError as e:
         raise ValueError(f"{p}: review-verdict block is not valid JSON ({e})")
-    if not isinstance(data, dict) or data.get("verdict") not in ("PASS", "FAIL"):
+    if not isinstance(data, dict):
+        raise ValueError(f"{p}: review-verdict block must be a JSON object")
+    bad = key_error("review-verdict block", data, TOP_KEYS, TOP_OPTIONAL)
+    if bad:
+        raise ValueError(f"{p}: {bad}")
+    if data["verdict"] not in ("PASS", "FAIL"):
         raise ValueError(f"{p}: review-verdict block needs \"verdict\": \"PASS\" or \"FAIL\"")
-    items = data.get("findings", [])
-    if not isinstance(items, list):
+    if not isinstance(data["findings"], list):
         raise ValueError(f"{p}: review-verdict \"findings\" must be a list")
-    mine = []
-    for i, f in enumerate(items):
-        sev = f.get("severity") if isinstance(f, dict) else None
-        text = norm(f.get("text", "")) if isinstance(f, dict) else ""
-        if sev not in ("P1", "P2", "P3") or not text:
-            raise ValueError(f"{p}: review-verdict finding #{i + 1} needs severity P1/P2/P3 and text")
+    return data
+
+
+def block_findings(p, block):
+    """[{sev, canon, loc, strict}] for a review-verdict block's findings (LUCY-e3opf G2). A finding has
+    exactly {severity, file_line, text}; a raising review written before file_line existed may give
+    exactly {severity, text}, located by the text's leading file:line (after an optional 'r<N> ' carry
+    prefix). Any other key set, or a missing, null or empty value, refuses the file, naming the keys."""
+    data = block_data(p, block)
+    out = []
+    for i, f in enumerate(data["findings"]):
+        what = f"review-verdict finding #{i + 1}"
+        if not isinstance(f, dict):
+            raise ValueError(f"{p}: {what} must be an object with keys {','.join(FINDING_KEYS)}")
+        strict = set(f) == set(FINDING_KEYS)
+        if not strict and set(f) != set(LEGACY_FINDING_KEYS):
+            raise ValueError(f"{p}: {key_error(what, f, FINDING_KEYS)}")
+        sev, text = f["severity"], f["text"]
+        if sev not in ("P1", "P2", "P3"):
+            raise ValueError(f"{p}: {what} severity {sev!r} is not P1, P2 or P3")
+        if not isinstance(text, str) or not norm(text):
+            raise ValueError(f"{p}: {what} text must be a non-empty string")
+        text = norm(text)
         # The text may repeat the severity ("P2 lib/x.ts:3 ..." with severity P2): one prefix, not
         # "P2 P2 ..." (LUCY-l1s6g a). A different leading severity contradicts the field: refused.
         text = re.sub(rf"^(?:\*\*)?{sev}(?:\*\*)?[\s:]+", "", text)
         if re.match(r"^(?:\*\*)?P[123]\b", text):
-            raise ValueError(f"{p}: review-verdict finding #{i + 1} text starts with a severity other than {sev}")
-        # The location is the file_line field (LUCY-e3opf). A block written before the field existed
-        # gives it as the text's own leading file:line. With neither, the finding has no location: it
-        # pairs with prose only verbatim and can never be graded fixed (both fail closed), and old
-        # files like that still parse (3bm73 r1 sonnet, q2lod11-13 opus-h2h).
+            raise ValueError(f"{p}: {what} text starts with a severity other than {sev}")
         lead_loc = LEADING_LOC.match(text)
-        fl = f.get("file_line")
-        if fl is not None:
+        if strict:
+            fl = f["file_line"]
             if not isinstance(fl, str) or not LOC.fullmatch(fl.strip()):
-                raise ValueError(f"{p}: review-verdict finding #{i + 1} file_line {fl!r} is not <file>:<line>")
+                raise ValueError(f"{p}: {what} file_line {fl!r} is not <file>:<line> or <file>:<line>-<line>")
             fl = fl.strip()
             if lead_loc and lead_loc.group(1) != fl:
-                raise ValueError(f"{p}: review-verdict finding #{i + 1} file_line {fl} contradicts its text "
-                                 f"({lead_loc.group(1)})")
+                raise ValueError(f"{p}: {what} file_line {fl} contradicts its text ({lead_loc.group(1)})")
             if not lead_loc:
                 text = f"{fl} — {text}"
-        mine.append(clean(f"{sev} {text}"))
-    if data["verdict"] == "FAIL" and not mine:
+            target = path_parts(fl)
+        else:
+            # Prose cross-check only (G5): its first repo path ("r1 lib/x.ts:172 + ...", "ACCEPTED (...):
+            # lib/x.ts:221 — ..."). Grading still reads only a leading file:line (leading_loc).
+            pm = PATH_TOKEN.search(text)
+            target = (pm.group(1), pm.group(2)) if pm else None
+        out.append({"sev": sev, "canon": clean(f"{sev} {text}"), "target": target, "strict": strict})
+    if data["verdict"] == "FAIL" and not out:
         raise ValueError(f"{p}: review-verdict is FAIL but lists no findings")
     structured_prior(p, data)
-    return mine
+    return out
+
+
+def structured_findings(p, block):
+    """Canonical finding lines ("P2 lib/x.ts:12 — ...") of a review-verdict block."""
+    return [f["canon"] for f in block_findings(p, block)]
 
 
 # A finding's leading location in block text, past optional `code` / **bold** markup.
@@ -408,15 +461,21 @@ def structured_prior(p, data):
         raise ValueError(f"{p}: review-verdict \"prior\" must be a list")
     out = {}
     for i, e in enumerate(prior):
-        ref = norm(e.get("ref")) if isinstance(e, dict) and isinstance(e.get("ref"), str) else ""
+        what = f"review-verdict prior #{i + 1}"
+        if not isinstance(e, dict):
+            raise ValueError(f"{p}: {what} must be an object with keys {','.join(PRIOR_KEYS)}")
+        bad = key_error(what, e, PRIOR_KEYS)
+        if bad:
+            raise ValueError(f"{p}: {bad}")
+        ref = norm(e["ref"]) if isinstance(e["ref"], str) else ""
         m = PRIOR_REF.match(ref)
         if not m:
-            raise ValueError(f"{p}: review-verdict prior #{i + 1} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>'")
-        status, ev = e.get("status"), e.get("evidence")
+            raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>'")
+        status, ev = e["status"], e["evidence"]
         if status not in ("closed", "open"):
-            raise ValueError(f"{p}: review-verdict prior #{i + 1} status {status!r} is not \"closed\" or \"open\"")
-        if not isinstance(ev, str) or (status == "closed" and len(norm(ev)) < 8):
-            raise ValueError(f"{p}: review-verdict prior #{i + 1} needs evidence (how it was checked)")
+            raise ValueError(f"{p}: {what} status {status!r} is not \"closed\" or \"open\"")
+        if not isinstance(ev, str) or not norm(ev) or (status == "closed" and len(norm(ev)) < 8):
+            raise ValueError(f"{p}: {what} needs evidence (how it was checked)")
         key = (int(m.group(1)), m.group(2), m.group(3))
         if out.get(key, status) != status:
             raise ValueError(f"{p}: review-verdict prior marks {ref} both closed and open")
@@ -425,16 +484,10 @@ def structured_prior(p, data):
 
 
 def file_prior(p, text):
-    """The prior entries of every review-verdict block in a file, merged; {} for a file without one.
-    One ref marked closed in one block and open in another refuses the file: a later block never
-    silently drops an earlier "open"."""
-    out = {}
-    for b in STRUCTURED.finditer(text):
-        for key, status in structured_prior(p, load_block(b.group(1))).items():
-            if out.get(key, status) != status:
-                raise ValueError(f"{p}: review-verdict blocks mark r{key[0]} {key[1]} {key[2]} both closed and open")
-            out[key] = status
-    return out
+    """The prior entries of the file's one top-level review-verdict block; {} for a file without one
+    (LUCY-e3opf G1: no merge across blocks, a second block refuses the file)."""
+    b = one_block(p, text)
+    return structured_prior(p, block_data(p, b.body)) if b else {}
 
 
 def check_summary_counts(p, lines, mine):
@@ -459,52 +512,30 @@ def reviewer_findings(paths):
     found = []
     for p in paths:
         text = Path(p).read_text(errors="ignore")
-        blocks = list(STRUCTURED.finditer(text))
-        openers = list(re.finditer(r"(?m)^\s*```\s*review-verdict\s*$", text))
-        if openers and (not blocks or openers[-1].start() >= blocks[-1].end()):
-            raise ValueError(f"{p}: a review-verdict block is not closed (no ``` after it)")
-        if blocks:
+        block = one_block(p, text)
+        if block:
             # The block is the final answer. A verdict or finding after it means the reviewer
             # changed its mind (or the block is a stale template): refuse, never pick one.
-            trailing = text[blocks[-1].end():].splitlines()
+            trailing = text[block.end:].splitlines()
             for line in trailing:
                 if VERDICT_HEAD.match(line) or VERDICT_DECL.search(line) or finding_shaped(line):
                     raise ValueError(f"{p}: verdict content after the last review-verdict block: "
                                      f"{line.strip()[:100]}")
-            mine = structured_findings(p, blocks[-1].group(1))
-            file_prior(p, text)
+            meta = block_findings(p, block.body)
+            mine = [f["canon"] for f in meta]
             check_summary_counts(p, trailing, mine)
             # The final response before the block (from its last REVIEWING echo, else the file
-            # start) must agree with it: same verdict word, no finding the block leaves out, and
-            # summary counts that match the block.
-            head = text[:blocks[-1].start()]
+            # start) must agree with it: same verdict word and summary counts that match the block.
+            head = text[:block.start]
             echo = list(re.finditer(r"(?m)^\s*REVIEWING:.*$", head))
             final = head[echo[-1].end():] if echo else head
-            verdict = load_block(blocks[-1].group(1))["verdict"]
+            verdict = load_block(block.body)["verdict"]
             words = decl_words(final.splitlines())
             if words - {verdict}:
                 raise ValueError(f"{p}: prose verdict {sorted(words)} contradicts the review-verdict block "
                                  f"({verdict})")
-            flines = final.splitlines()
-            ver = verified_lines(flines)
-            haz = hazard_lines(flines)
-            used = set()
-            for i, line in enumerate(flines):
-                if i in ver and tolerated_note(line, mine):
-                    continue
-                if i in haz and back_reference_note(line, mine):
-                    continue
-                if FINDING.match(line):
-                    j = prose_match(line, mine, used)
-                    used.add(j)
-                    if j is None:
-                        raise ValueError(f"{p}: finding missing from the review-verdict block: "
-                                         f"{line.strip()[:100]}")
-                elif finding_shaped(line):
-                    raise ValueError(f"{p}: unrecognised finding format before the review-verdict block: "
-                                     f"{line.strip()[:100]}")
             check_summary_counts(p, final.splitlines(), mine)
-            sweep_whole_response(p, text, mine, verdict)
+            sweep_whole_response(p, text, mine, verdict, block, meta)
             found += mine
             continue
         # "PASS", "**FAIL**", "Verdict: FAIL", "**Verdict: PASS**" on a line of their own.
@@ -550,50 +581,141 @@ def reviewer_findings(paths):
     return found
 
 
-def sweep_whole_response(p, text, mine, verdict):
+def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
     """Nothing the parsed segment left out may sit elsewhere in the file (LUCY-p4pjf, Astra r15).
 
-    From the first REVIEWING echo (else the file start) to the end: every canonical finding line is
-    one the parser kept, no other finding-shaped line appears, and no verdict line or review-verdict
-    block disagrees with `verdict`. Two appended responses for one tip, or a finding written above
-    the verdict line, refuse the file instead of losing the finding."""
+    From the first REVIEWING echo (else the file start) to the end, no verdict line disagrees with
+    `verdict` and no tally disagrees with the findings. Without a block, every canonical finding line
+    is one the parser kept (verbatim) and no other finding-shaped line appears. With one, the block is
+    the single source of findings and the prose is checked by location only (prose_claim_errors)."""
     echo = re.search(r"(?m)^\s*REVIEWING:.*$", text)
-    region = text[echo.end():] if echo else text
-    blocks = list(STRUCTURED.finditer(region))
-    prose = STRUCTURED.sub("", region)
-    plines = prose.splitlines()
-    ver = verified_lines(plines)
-    haz = hazard_lines(plines)
-    kept, used = [], set()
-    # Without a block, prose lines are the findings themselves: verbatim only.
-    paraphrase_ok = bool(blocks)
-    for i, line in enumerate(plines):
-        if i in ver and tolerated_note(line, mine):
-            continue
-        if blocks and i in haz and back_reference_note(line, mine):
-            continue
-        kept.append(line)
-        if FINDING.match(line):
-            j = prose_match(line, mine, used) if paraphrase_ok else (
-                next((k for k, m in enumerate(mine) if k not in used and m == clean(line)), None))
-            used.add(j)
-            if j is None:
-                raise ValueError(f"{p}: finding outside the parsed response: {line.strip()[:100]}")
-        elif finding_shaped(line):
-            raise ValueError(f"{p}: finding-shaped line outside the parsed response: {line.strip()[:100]}")
+    start = echo.end() if echo else 0
+    region = text[start:]
+    if block and block.start >= start:
+        region = text[start:block.start] + text[block.end:]
+    plines = region.splitlines()
+    if block:
+        prose_claim_errors(p, plines, meta, file_prior(p, text))
+        kept = plines
+    else:
+        ver = verified_lines(plines)
+        kept, used = [], set()
+        for i, line in enumerate(plines):
+            if i in ver and tolerated_note(line, mine):
+                continue
+            kept.append(line)
+            if FINDING.match(line):
+                j = next((k for k, m in enumerate(mine) if k not in used and m == clean(line)), None)
+                used.add(j)
+                if j is None:
+                    raise ValueError(f"{p}: finding outside the parsed response: {line.strip()[:100]}")
+            elif finding_shaped(line):
+                raise ValueError(f"{p}: finding-shaped line outside the parsed response: {line.strip()[:100]}")
     # Every declaration and tally anywhere in the response (not only the parsed segment) must agree.
     words = decl_words(kept)
     check_summary_counts(p, [ln for ln in kept if not FINDING.match(ln)], mine)
-    for b in blocks:
-        try:
-            words.add(str(load_block(b.group(1)).get("verdict", "")).upper())
-        except (ValueError, AttributeError):
-            raise ValueError(f"{p}: unreadable review-verdict block")
-        for f in structured_findings(p, b.group(1)):
-            if f not in mine:
-                raise ValueError(f"{p}: review-verdict block finding outside the parsed response: {f[:100]}")
     if words - {verdict}:
         raise ValueError(f"{p}: verdicts {sorted(words)} in the file disagree with the final {verdict}")
+
+
+# A repo path in prose (LUCY-e3opf G5): a file name with a code extension, optional directories, optional
+# :line or :line-line. "tokens.ts", "lib/x.ts:12", "lib/x.ts:12-20"; never "and/or" or "H-P0/P1".
+CODE_EXT = ("tsx|ts|jsx|js|mjs|cjs|py|sql|jsonl|json|mdx|md|sh|ya?ml|toml|css|scss|html|txt|swift|kt|java"
+            "|go|rb|plist|xml|csv|tsv|lock")
+PATH_TOKEN = re.compile(rf"(?<![\w./\[\]@-])((?:[\w.\[\]@-]+/)*[\w\[\]@-][\w.\[\]@-]*\.(?:{CODE_EXT}))"
+                        rf"(?::(\d+(?:-\d+)?))?(?![\w/-])")
+# A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
+CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
+# A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
+EARLIER_NOTE = re.compile(r"^\s*(?:[-*•]\s+)?(?:\*\*)?r(\d+)\s+(P[123])\s+(.+?)(?:\*\*)?\s+([A-Za-z]+):(.*)$")
+
+
+def path_parts(loc):
+    """('lib/x.ts', '12-20') from 'lib/x.ts:12-20'."""
+    path, _, line = loc.rpartition(":")
+    return (path, line) if path and re.fullmatch(r"\d+(?:-\d+)?", line) else (loc, None)
+
+
+def claim_sevs(line):
+    """Standalone severity tokens; one inside a `code span` is quoted (an example, a test name)."""
+    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line)]
+    return [s for s in CLAIM_SEV.finditer(line) if not any(a < s.start() < b for a, b in spans)]
+
+
+def line_claims(line, skip=None):
+    """[(severity, path, line or None)] a prose line claims: each standalone severity with the first
+    path after it (before the next severity), else the nearest path before it. No path, no claim. The
+    severity token starting at `skip` (an earlier-round note's own reference) is not a claim."""
+    sevs = claim_sevs(line)
+    paths = list(PATH_TOKEN.finditer(line))
+    if not sevs or not paths:
+        return []
+    out = []
+    for k, s in enumerate(sevs):
+        if s.start() == skip:
+            continue
+        stop = sevs[k + 1].start() if k + 1 < len(sevs) else len(line)
+        after = [m for m in paths if s.end() <= m.start() < stop]
+        before = [m for m in paths if m.end() <= s.start()]
+        m = after[0] if after else (before[-1] if before else paths[0])
+        out.append((s.group(0), m.group(1), m.group(2)))
+    return out
+
+
+def claim_error(sev, path, line, targets):
+    """Why a prose claim matches no block finding or prior ref, else None (LUCY-e3opf G5). Matched on
+    severity + file (equal, or a '/'-anchored suffix: tokens.ts matches lib/auth/tokens.ts, kens.ts
+    does not) + line when the claim gives one."""
+    cands = [t for t in targets if (t[1] == path or t[1].endswith("/" + path)) and (line is None or t[2] == line)]
+    where = f"{path}:{line}" if line else path
+    if not cands:
+        return f"no review-verdict finding or prior ref at {where}"
+    if len({t[1] for t in cands}) > 1 and len({t[0] for t in cands}) > 1:
+        return f"{where} is ambiguous: it matches {', '.join(sorted({f'{t[0]} {t[1]}' for t in cands}))}"
+    if sev not in {t[0] for t in cands}:
+        return f"severity mismatch: the block has {'/'.join(sorted({t[0] for t in cands}))} at {where}, not {sev}"
+    return None
+
+
+def prose_claim_errors(p, lines, meta, prior):
+    """The block is the single source of findings (LUCY-e3opf G5). A prose line is a finding claim when
+    it carries a standalone severity AND a repo path; each claim must match a block finding or a prior
+    ref, or the file is refused, so a P1 written only in prose is never dropped. Wording is never
+    compared, except that a line repeating a block finding verbatim is that finding. A severity with no
+    path (carry or summary text) is ignored. An earlier-round note "- rN Px <loc> closed|fixed|resolved:
+    ..." claims nothing by its own reference (prose never grades, the prior array does). Any other
+    earlier-round note ("open:") names round N's finding: it must match a block finding or prior ref
+    here, or else the review of round N that raised it must be an input to the run (NOTE_REFS, checked
+    by orphan_open_priors), so the lead covers it. A severity in the note's own text with a path of its
+    own is a claim like any other; one without ("Earlier P3 grading retained.", "same as the P2") names
+    a finding at the note's location and is checked the same way as an open note."""
+    targets = [(f["sev"],) + f["target"] for f in meta if f["target"]]
+    targets += [(sev,) + path_parts(loc) for (_r, sev, loc) in prior]
+    verbatim = {f["canon"] for f in meta}
+    NOTE_REFS[str(p)] = set()
+    for line in lines:
+        if clean(line) in verbatim:
+            continue
+        claims = []
+        note = EARLIER_NOTE.match(line)
+        if note:
+            ref = PATH_TOKEN.search(note.group(3))
+            tail = note.group(5)
+            claims = line_claims(tail)
+            refs = []
+            if ref and note.group(4).lower() not in ("closed", "fixed", "resolved"):
+                refs.append(note.group(2))
+            if ref and not claims:
+                refs += [s.group(0) for s in claim_sevs(tail)]
+            for sev in refs:
+                if claim_error(sev, ref.group(1), ref.group(2), targets):
+                    NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
+        else:
+            claims = line_claims(line)
+        for sev, path, ln in claims:
+            why = claim_error(sev, path, ln, targets)
+            if why:
+                raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
 
 
 def bead_comments_text(bead):
@@ -703,7 +825,7 @@ def routed_out(f, scope_lock):
         f.get("pre_existing") is True or (scope_lock and f.get("in_scope") is False))
 
 
-ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
+ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})\.?[ \t]*$")
 
 
 def echo_of(text):
@@ -753,21 +875,60 @@ def dispute(src, files):
     return None
 
 
-def orphan_open_priors(files):
+def orphan_open_priors(files, items=()):
     """Every prior entry names a finding the lead must have in front of it: the review that raised it
     must be an input, so the lead covers it (open) or grades it from this entry (closed). Checked on
-    every input review. A review with a REVIEWING line must echo exactly one commit, or a seat's
-    disagreement could drop out of the current tip unseen."""
+    every input review.
+
+    Echoes (LUCY-e3opf G4): a review with a REVIEWING line must echo exactly one commit. Once anything
+    is graded fixed or any input carries a prior entry, EVERY input must, because a seat whose commit
+    is unknown would silently drop out of the current tip and its "open" would never be a dispute."""
     errs = []
+    grading = any(isinstance(f, dict) and f.get("verdict") == "fixed" for f in items)
+    priors = {x[0]: file_prior(x[0], x[2]) for x in files}
+    grading = grading or any(priors.values())
     for x in files:
-        if re.search(r"(?m)^\s*REVIEWING:", x[2]) and not echo_of(x[2]):
-            errs.append(f"{Path(x[0]).name}: its REVIEWING lines are malformed or name different commits")
-        for (r, sev, loc), st in file_prior(x[0], x[2]).items():
+        if (grading or re.search(r"(?m)^\s*REVIEWING:", x[2])) and not echo_of(x[2]):
+            errs.append(f"{Path(x[0]).name}: no single well-formed REVIEWING echo ('REVIEWING: <branch> @ <sha>' "
+                        "naming one commit): every review must echo the commit it reviewed")
+        for (r, sev, loc), st in priors[x[0]].items():
             if not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
                                                                     for o in y[1]) for y in files):
-                errs.append(f"{Path(x[0]).name} marks r{r} {sev} {loc} {st}, but no --verdict review of round "
-                            f"{r} raises it: pass that review so the lead covers the finding")
+                errs.append(f"{Path(x[0]).name}: prior ref r{r} {sev} {loc} ({st}) matches no round-{r} finding "
+                            f"in the --verdict reviews: pass the review that raised it so the lead covers it")
+        for r, sev, path, line, raw in sorted(NOTE_REFS.get(str(x[0]), ())):
+            raised = [t for y in files if round_of(y[0]) == r for t in finding_targets(y)]
+            if claim_error(sev, path, line, raised):
+                errs.append(f"{Path(x[0]).name}: note on r{r} {sev} {path}{':' + line if line else ''} matches no "
+                            f"round-{r} finding in the --verdict reviews, and its review-verdict block does not "
+                            f"carry it: pass the review that raised it, or list it in the block: {raw}")
     return errs
+
+
+def finding_targets(x):
+    """[(severity, path, line)] where a review's findings sit: its block's, else its prose lines' leading
+    file:line."""
+    b = one_block(x[0], x[2])
+    if b:
+        return [(f["sev"],) + f["target"] for f in block_findings(x[0], b.body) if f["target"]]
+    return [(o[:2],) + path_parts(leading_loc(o)) for o in x[1] if leading_loc(o)]
+
+
+def ref_ambiguity(files, r, sev, loc):
+    """The distinct round-r findings a ref 'r<r> <sev> <loc>' could name (LUCY-e3opf G3). The same text
+    in two seats is one finding; two texts are two, and one ref can never close both."""
+    return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
+
+
+def legacy_shape(x):
+    """Why a review cannot be read strictly at the current tip, or None (LUCY-e3opf G2): it has no
+    review-verdict block, or a finding without file_line."""
+    b = one_block(x[0], x[2])
+    if b is None:
+        return "has no review-verdict block"
+    if any(not f["strict"] for f in block_findings(x[0], b.body)):
+        return "has a finding without file_line (the legacy {severity, text} shape)"
+    return None
 
 
 def same_commit(a, b):
@@ -822,6 +983,12 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
                 f"(newest review {Path(newest[0]).name})"]
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
+    # Every review of the tip is read strictly: its findings are located by file_line, never by text.
+    for x in at_tip:
+        why = legacy_shape(x)
+        if why:
+            return [f"{tag}: {Path(x[0]).name} reviewed the current tip but {why}: re-run that seat with the "
+                    "strict review-verdict shape before grading anything fixed"]
     for x in at_tip:
         for other in x[1]:
             if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
@@ -835,6 +1002,12 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry {refs}"
                 + (" (it says open)" if "open" in mine.values() else "")
                 + ": not fixed. Prose 'closed:' lines are not graded"]
+    for r in rounds:
+        same = ref_ambiguity(files, r, sev, loc)
+        if len(same) > 1:
+            f["_disputed"] = (f"prior ref r{r} {sev} {loc} is ambiguous: it matches {len(same)} distinct round-{r} "
+                              f"findings ({' | '.join(s[:80] for s in same)}); one closed entry cannot close both")
+            return []
     f["_disputed"] = dispute(src, files)
     return []
 
@@ -920,7 +1093,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
     for line in seen:
         if line not in want:
             errs.append(f"lead lists a finding no reviewer made: {line[:100]}")
-    errs += orphan_open_priors(files or [])
+    errs += orphan_open_priors(files or [], items)
     blocking = [f for f in items if f.get("verdict") == "act_on" and not f.get("_demoted")
                 and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True)]
     if len(blocking) > ACT_ON_CAP and not norm(lead.get("act_on_over_cap_reason") or ""):
@@ -956,6 +1129,7 @@ def main(argv=None):
         print("review-lead: REFUSED: --cleared-escalation needs --bead", file=sys.stderr)
         return 1
     UNBOUND_NOTES.clear()
+    NOTE_REFS.clear()
     try:
         lead = json.loads(Path(a.lead).read_text())
         reviewer_lines = reviewer_findings(a.verdict)

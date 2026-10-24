@@ -595,9 +595,10 @@ class StructuredVerdict(unittest.TestCase):
     def test_structured_fail_without_findings_or_bad_json_refused(self):
         for text, needle in ((self.block({"verdict": "FAIL", "findings": []}), "lists no findings"),
                              ("```review-verdict\n{not json\n```\n", "not valid JSON"),
-                             (self.block({"verdict": "MAYBE"}), "needs \"verdict\""),
+                             (self.block({"verdict": "MAYBE", "findings": []}), "needs \"verdict\""),
+                             (self.block({"verdict": "PASS"}), "missing keys findings"),
                              (self.block({"verdict": "FAIL", "findings": [{"severity": "P9", "text": "x"}]}),
-                              "needs severity")):
+                              "is not P1, P2 or P3")):
             code, out, _ = run_check(base_lead(), text)
             self.assertEqual(code, 1, text)
             self.assertIn(needle, out)
@@ -899,7 +900,7 @@ class AstraR15Checker(unittest.TestCase):
         ok = echo + 'PASS\n```review-verdict\n{"verdict": "PASS", "findings": []}\n```\n'
         code, out, _ = run_check(lead, fail + ok)
         self.assertEqual(code, 1, out)
-        self.assertIn("outside the parsed response", out)
+        self.assertIn("2 review-verdict blocks; one response per file", out)  # LUCY-e3opf G1
 
     def test_finding_above_the_verdict_line_refused(self):
         lead = base_lead()
@@ -1007,8 +1008,12 @@ class OrchestratorGapFixedLater(unittest.TestCase):
         self.assertIn("prior entry", out)
 
     def test_prose_confirmation_alone_no_longer_grades(self):
-        # LUCY-e3opf: a strict prose "closed:" line with no block prior entry is not a fix.
+        # LUCY-e3opf: a strict prose "closed:" line with no block prior entry is not a fix. A prose-only
+        # review of the tip cannot grade anything (G2: every tip review is read strictly).
         code, out = self.run_pair(self.r10(prior=None))
+        self.assertEqual(code, 1, out)
+        self.assertIn("has no review-verdict block", out)
+        code, out = self.run_pair(self.r10(prior=()))
         self.assertEqual(code, 1, out)
         self.assertIn("Prose 'closed:' lines are not graded", out)
 
@@ -1210,18 +1215,27 @@ def block(verdict, *findings):
 
 
 def prior_block(verdict, findings=(), prior=(), evidence="red test now green on both paths"):
-    """A review-verdict block with a prior array (LUCY-e3opf): prior is [(ref, status)]."""
+    """A review-verdict block with a prior array (LUCY-e3opf): prior is [(ref, status)]. Findings take
+    the strict shape (file_line from the text's leading file:line) when the text has one."""
+    def finding(s, t):
+        loc = chk.LEADING_LOC.match(t)
+        return {"severity": s, "file_line": loc.group(1), "text": t} if loc else {"severity": s, "text": t}
     return ("```review-verdict\n" + json.dumps({
-        "verdict": verdict, "findings": [{"severity": s, "text": t} for s, t in findings],
+        "verdict": verdict, "findings": [finding(s, t) for s, t in findings],
         "prior": [{"ref": r, "status": st, "evidence": evidence} for r, st in prior]}) + "\n```\n")
 
 
 def with_prior(text, prior, evidence="independently re-driven green at this tip"):
-    """A real reviewer file with a prior array added to its last review-verdict block."""
-    m = list(chk.STRUCTURED.finditer(text))[-1]
-    data = json.loads(m.group(1))
+    """A real reviewer file re-run with the current template: a prior array in its review-verdict block,
+    and each finding in the strict shape (file_line from the text's leading file:line, G2)."""
+    b = chk.one_block("v", text)
+    data = json.loads(b.body)
+    for f in data["findings"]:
+        loc = chk.LEADING_LOC.match(chk.norm(f["text"]))
+        if "file_line" not in f and loc:
+            f["file_line"] = loc.group(1)
     data["prior"] = [{"ref": r, "status": st, "evidence": evidence} for r, st in prior]
-    return text[:m.start(1)] + json.dumps(data) + "\n" + text[m.end(1):]
+    return text[:b.start] + "```review-verdict\n" + json.dumps(data) + "\n```\n" + text[b.end:]
 
 
 def fixed_lead(src, by, extra=()):
@@ -1343,29 +1357,45 @@ class L1s6gE_RoundCountHeading(unittest.TestCase):
 
 
 class L1s6gF_EarlierRoundReferenceInVerifiedOk(unittest.TestCase):
-    """(f) a VERIFIED OK '- rN SEV loc closed: <cleared, not fixed>' line goes to the lead, not refused."""
+    """(f) a VERIFIED OK '- rN SEV loc closed: <cleared, not fixed>' line in a review-verdict file. Since
+    LUCY-e3opf G5 it parses with no lead note (a prose closure never grades); a new located severity on
+    it is refused, and an unlocated one is resolved against the round that raised the location."""
 
     def test_real_opus_h2h_r2_parses_and_needs_the_lead(self):
         found = chk.reviewer_findings([str(FIX_Z0 / Z0_R2[1])])
         self.assertEqual([f[:2] for f in found], ["P3"])
-        self.assertTrue(any("whatsapp.ts:242" in k and "ORCHESTRATOR CLEARED" in k for k in chk.UNBOUND_NOTES),
-                        chk.UNBOUND_NOTES)
+        self.assertEqual(chk.UNBOUND_NOTES, {})
 
     def reference(self, line):
         return parse_text(f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n{line}\nUNVERIFIED\n- live\n"
-                          + block("PASS"))
+                          + block("PASS", ))
 
     def test_reference_line_is_an_unbound_note(self):
         self.reference("- r1 P2 lib/a.ts:5 closed: cleared as pre-existing; the open P2 bead exists")
-        self.assertEqual(len(chk.UNBOUND_NOTES), 1)
+        self.assertEqual(len(chk.UNBOUND_NOTES), 0)
 
     def test_reference_carrying_a_new_finding_still_refused(self):
-        for bad in ("- r1 P2 lib/a.ts:5 closed: cleared; lib/b.ts:9 drops rows at P2",
-                    "- r1 P2 lib/a.ts:5 closed: cleared; a new P1 on the same path",
-                    "- r1 P2 lib/a.ts:5 closed: cleared; Finding (P2): drops rows",
-                    "- r1 P2 lib/pay.ts:5 closed: cleared; the open P2 still double charges"):
-            with self.assertRaises(ValueError, msg=bad):
-                self.reference(bad)
+        with self.assertRaises(ValueError):
+            self.reference("- r1 P2 lib/a.ts:5 closed: cleared; lib/b.ts:9 drops rows at P2")
+        # No path of its own: it names a round-1 finding at lib/a.ts:5, so round 1 must raise one there.
+        r1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\nP2 lib/a.ts:5 — drops rows — fix\n"
+        lead = fixed_lead(R1_SRC, "x")
+        lead["findings"] = [{"id": "F1", "source_line": "P2 lib/a.ts:5 — drops rows — fix", "verdict": "consider",
+                             "category": "other", "follow_up": "Rows", "reason": "owned by the rows epic",
+                             "ordinary_use": "reception saves a client on the desk PC", "carve_out": True}]
+        for bad in ("- r1 P2 lib/a.ts:5 closed: cleared; a new P1 on the same path",
+                    "- r1 P2 lib/a.ts:5 closed: cleared; Finding (P3): drops rows"):
+            r2 = (f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n{bad}\nUNVERIFIED\n- live\n"
+                  + prior_block("PASS"))
+            self.reference(bad)
+            code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_a.md", r1, 1000), ("REVIEW_x_r2_b.md", r2, 2000)])
+            self.assertEqual(code, 1, out)
+            self.assertIn("matches no round-1 finding", out)
+        ok = (f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- r1 P2 lib/a.ts:5 closed: cleared; the open P2 "
+              f"still drops rows\nUNVERIFIED\n- live\n" + prior_block("PASS"))
+        code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_a.md", r1, 1000), ("REVIEW_x_r2_b.md", ok, 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=0", out)
 
 
 class L1s6gG_Freshness(unittest.TestCase):
@@ -1429,7 +1459,7 @@ class L1s6gI_ProseParaphraseOfTheBlock(unittest.TestCase):
     def test_real_sonnet_r1_parses_to_the_block(self):
         found = chk.reviewer_findings([str(FIX_Z0 / Z0_R1_SONNET)])
         self.assertEqual([f[:2] for f in found], ["P1", "P2", "P2"])
-        self.assertTrue(any("(H-U0" in k or "H-U0:" in k for k in chk.UNBOUND_NOTES), chk.UNBOUND_NOTES)
+        self.assertEqual(chk.UNBOUND_NOTES, {})  # G5: a path-free severity back-reference is ignored
 
     def file(self, prose, *findings):
         return f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{prose}\n" + block("FAIL", *findings)
@@ -1453,10 +1483,12 @@ class L1s6gI_ProseParaphraseOfTheBlock(unittest.TestCase):
                 parse_text(self.file(prose, ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
 
     def test_two_prose_findings_for_one_block_finding_refused(self):
+        # LUCY-e3opf G5: the block is the single source of findings; prose is cross-checked by location
+        # only, so two prose lines at the block finding's severity + location both stand for it.
         prose = ("- P2 lib/a.ts:3 — the held thread keeps the new person's text — fix\n"
                  "- P2 lib/a.ts:3 — the held thread keeps the new person's text, again — fix")
-        with self.assertRaises(ValueError):
-            parse_text(self.file(prose, ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
+        found = parse_text(self.file(prose, ("P2", "lib/a.ts:3 — the held thread keeps the new person's text — fix")))
+        self.assertEqual(len(found), 1)
 
 
 class L1s6gJ_HazardSeverityBackReference(unittest.TestCase):
@@ -1467,13 +1499,16 @@ class L1s6gJ_HazardSeverityBackReference(unittest.TestCase):
                 f"## Hazards\n{hazard}\n" + block("FAIL", (sev, "lib/a.ts:3 — thread keeps old history — fix")))
 
     def test_back_reference_needs_the_lead(self):
-        parse_text(self.file("- H-U0: the promise holds except the marked-thread case (P1)."))
-        self.assertEqual(len(chk.UNBOUND_NOTES), 1)
+        # LUCY-e3opf G5: a severity with no repo path on its line is carry/summary text, ignored.
+        for line, sev in (("- H-U0: the promise holds except the marked-thread case (P1).", "P1"),
+                          ("- H-U0: the promise fails for the marked-thread case (P1).", "P2"),
+                          ("- H-M1: deposits are charged twice (P1).", "P1")):
+            parse_text(self.file(line, sev))
+            self.assertEqual(chk.UNBOUND_NOTES, {})
 
     def test_unlisted_or_protected_back_reference_refused(self):
-        for bad, sev in (("- H-U0: the promise fails for the marked-thread case (P1).", "P2"),
-                         ("- H-M1: deposits are charged twice (P1).", "P1"),
-                         ("- H-U0: fails at lib/b.ts:9 (P1).", "P1")):
+        for bad, sev in (("- H-U0: fails at lib/b.ts:9 (P1).", "P1"),
+                         ("- H-U0: lib/a.ts:3 fails for the marked-thread case (P1).", "P2")):
             with self.assertRaises(ValueError, msg=bad):
                 parse_text(self.file(bad, sev))
 
@@ -1493,8 +1528,9 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
 
     def run_lead(self, lead, extra=("--cleared-escalation", "F3", "--cleared-escalation", "F6"), prior=True):
         named = fixture_named(FIX_Z0, [Z0_R1_SONNET, Z0_R1_OPUS] + Z0_R2)
-        if prior:
-            named = [(n, with_prior(t, self.PRIOR) if n in (Z0_R2[0], Z0_R2[2]) else t, m) for n, t, m in named]
+        # Every r2 seat reviewed the tip, so each is re-run with the strict template (G2).
+        named = [(n, with_prior(t, self.PRIOR if prior and n in (Z0_R2[0], Z0_R2[2]) else []) if n in Z0_R2 else t, m)
+                 for n, t, m in named]
         return run_named(lead, named, extra=["--bead", "AestheticcNext-z0ote", "--comments-file",
                                              str(FIX_Z0 / "comments.txt"), *extra])
 
@@ -1504,7 +1540,11 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
     def test_validated(self):
         code, out = self.run_lead(self.lead())
         self.assertEqual(code, 0, out)
-        self.assertIn("BLOCKING=0 ESCALATE=4 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=6", out)
+        # LUCY-e3opf G3: round 1 has two differently-worded P2s at thread-find-or-create.ts:78 (sonnet and
+        # opus), so the one "r1 P2 ...:78" closed entry is ambiguous: both escalate, neither counts fixed.
+        self.assertIn("BLOCKING=0 ESCALATE=6 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=4", out)
+        r1 = [(str(FIX_Z0 / n), chk.reviewer_findings([str(FIX_Z0 / n)])) for n in (Z0_R1_SONNET, Z0_R1_OPUS)]
+        self.assertEqual(len(chk.ref_ambiguity(r1, 1, "P2", "lib/agent-core/thread-find-or-create.ts:78")), 2)
 
     def test_prose_closures_alone_grade_nothing(self):
         code, out = self.run_lead(self.lead(), prior=False)
@@ -1517,11 +1557,13 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
         self.assertIn("only a pre_existing finding can be cleared", out)
 
     def test_cleared_notes_need_the_lead(self):
+        # LUCY-e3opf G5: the r2 seats' "closed: ORCHESTRATOR CLEARED ..." prose notes no longer need the
+        # lead's adjudication: prose never grades, and the structured prior is what the checker reads.
         lead = self.lead()
         lead["verified_notes"] = []
         code, out = self.run_lead(lead)
-        self.assertEqual(code, 1, out)
-        self.assertIn("verified_notes", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=4", out)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1703,16 +1745,20 @@ class E3opfBlockFindingFields(unittest.TestCase):
                 self.parse_block({"severity": "P1", "file_line": "lib/a.ts:3", "text": "reworded entirely"}, prose)
 
     def test_a_location_later_in_the_text_is_not_the_finding_location(self):
-        # Pairing reads only the declared (leading) location; a reworded line-less block pairs verbatim only.
+        # Grading reads only the declared (leading) location: this legacy finding has none, so it can
+        # never be graded fixed. The prose cross-check (G5) locates a legacy block finding by its first
+        # repo path, so the prose may reword it; another severity or path there is still refused.
         f = {"severity": "P2", "text": "AestheticcNext-x.1 lib/a.ts:3 — label wrong"}
+        self.assertIsNone(chk.leading_loc("P2 AestheticcNext-x.1 lib/a.ts:3 — label wrong"))
         self.assertEqual(self.parse_block(f, prose="P2 AestheticcNext-x.1 lib/a.ts:3 — label wrong\n"),
                          ["P2 AestheticcNext-x.1 lib/a.ts:3 — label wrong"])
-        with self.assertRaises(ValueError):
-            self.parse_block(f, prose="P2 lib/a.ts:3 — label wrong, reworded\n")
-        # The prose side too: a location mid-sentence is not the prose finding's location.
-        with self.assertRaises(ValueError):
-            self.parse_block({"severity": "P1", "file_line": "lib/a.ts:3", "text": "label wrong"},
-                             prose="P1 (see lib/a.ts:3) refunds go to the wrong card\n")
+        self.parse_block(f, prose="P2 lib/a.ts:3 — label wrong, reworded\n")
+        for prose in ("P1 lib/a.ts:3 — label wrong\n", "P2 lib/b.ts:3 — label wrong\n"):
+            with self.assertRaises(ValueError, msg=prose):
+                self.parse_block(f, prose=prose)
+        # The prose side: G5 reads location, not wording, wherever on the line the path sits.
+        self.parse_block({"severity": "P1", "file_line": "lib/a.ts:3", "text": "label wrong"},
+                         prose="P1 (see lib/a.ts:3) refunds go to the wrong card\n")
 
     def test_line_less_finding_cannot_be_graded_fixed(self):
         src = "P3 tests/a.test.ts — no failed-fetch test — add one"
@@ -1760,6 +1806,13 @@ class E3opfReal3bm73(unittest.TestCase):
 
     def test_r4_prose_closures_alone_grade_nothing(self):
         code, out = self.run_r4(self.lead(), prior=False)
+        self.assertEqual(code, 1, out)
+        for fid in ("F1", "F2", "F4", "F6"):  # the real r4 block is the legacy shape: never read at the tip
+            self.assertIn(f"{fid}: REVIEW_3bm73_astra-xhigh_r4_2026-10-24.md reviewed the current tip but has a "
+                          "finding without file_line", out)
+        named = [(n, with_prior(t, []) if n == self.R4 else t, m)
+                 for n, t, m in fixture_named(FIX_3B, self.R1 + [self.R2, self.R4])]
+        code, out = run_named(self.lead(), named)
         self.assertEqual(code, 1, out)
         for fid in ("F1", "F2", "F4", "F6"):
             self.assertIn(f"{fid}: fixed_by REVIEW_3bm73_astra-xhigh_r4_2026-10-24.md has no review-verdict prior", out)
@@ -1813,12 +1866,12 @@ class E3opfOwnGateRound1(unittest.TestCase):
         code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md",
                                       r2_file(prior=[(R1_REF, "open")], evidence="not rechecked at this tip"), 2000)])
         self.assertEqual(code, 1, out)
-        self.assertIn("no --verdict review of round 1 raises it", out)
+        self.assertIn("prior ref r1 P2 lib/pay.ts:37 (open) matches no round-1 finding", out)
         # Own-gate r3: a closed entry needs its origin too, or the finding drops out of coverage.
         code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
                                      ("REVIEW_x_astra_r3_c.md", r2_file(prior=[], sha=SHA_C), 3000)])
         self.assertEqual(code, 1, out)
-        self.assertIn("marks r1 P2 lib/pay.ts:37 closed, but no --verdict review of round 1", out)
+        self.assertIn("prior ref r1 P2 lib/pay.ts:37 (closed) matches no round-1 finding", out)
 
     def test_disagreement_escalates_whatever_the_lead_graded(self):
         src = "P2 lib/a.ts:3 — wrong total displayed — fix"
@@ -1869,16 +1922,18 @@ class E3opfOwnGateRound2(unittest.TestCase):
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "open")], evidence="not fixed at B"), 2000),
             ("REVIEW_x_astra_r3_c.md", r2_file(prior=[], sha=SHA_C), 3000)])
         self.assertEqual(code, 1, out)
-        self.assertIn("no --verdict review of round 1 raises it", out)
+        self.assertIn("matches no round-1 finding", out)
 
     def test_open_in_an_earlier_block_survives_a_later_block(self):
+        # LUCY-e3opf G1 (supersedes the cross-block merge): a second block is a second response, and the
+        # file is refused outright, so an earlier "open" can never be dropped by a later block.
         opus = (r2_file(prior=[(R1_REF, "open")], evidence="retry still charges twice")
                 + "Second answer.\n" + prior_block("PASS", (), []))
         code, out = run_r2(("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
                            ("REVIEW_x_opus_r2_b.md", opus, 2100))
-        self.assertEqual(code, 0, out)
-        self.assertIn("ESCALATE=1", out)
-        self.assertIn("FIXED=0", out)
+        self.assertEqual(code, 1, out)
+        self.assertIn("2 review-verdict blocks; one response per file", out)
+        self.assertNotIn("FIXED=", out)
         contradictory = (r2_file(prior=[(R1_REF, "open")], evidence="retry still charges twice")
                          + prior_block("PASS", (), [(R1_REF, "closed")]))
         with self.assertRaises(ValueError):
@@ -1927,4 +1982,4 @@ class E3opfOwnGateRound3(unittest.TestCase):
         code, out = run_r2(("REVIEW_x_opus_r2_b.md", opus, 2000),
                            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2100))
         self.assertEqual(code, 1, out)
-        self.assertIn("REVIEWING lines are malformed", out)
+        self.assertIn("REVIEW_x_opus_r2_b.md: no single well-formed REVIEWING echo", out)

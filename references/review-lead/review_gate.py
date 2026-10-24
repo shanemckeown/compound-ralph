@@ -183,7 +183,11 @@ def main(argv=None):
     earlier = []
     for v in independent:
         body = v.read_text(errors="ignore")
-        if not chk.STRUCTURED.search(body) and v.stat().st_mtime >= PROSE_GATE_CUTOFF:
+        try:
+            has_block = bool(chk.verdict_blocks(v.name, body))
+        except ValueError as e:
+            return refuse(str(e))
+        if not has_block and v.stat().st_mtime >= PROSE_GATE_CUTOFF:
             return refuse(f"{v.name} has no ```review-verdict block: a review written after "
                           "2026-10-23 12:00 UTC is gated only from its structured verdict")
         withdrawn = withdrawal(body) or re.search(r"\bBLOCKING=[1-9]", body)
