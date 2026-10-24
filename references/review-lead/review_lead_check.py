@@ -23,8 +23,8 @@ Refuses (exit 1, reasons on stderr) when:
   - a `fixed` grade has no "closed" prior entry in a review of the current tip (LUCY-e3opf).
 The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
   - G1: more than one top-level review-verdict block in a file (fences nest CommonMark-style, so a
-    block quoted inside a longer fence is content; one indented 4+ spaces or a tab, or inside an HTML
-    comment, is not a block), or an unclosed one;
+    block quoted inside a longer fence is content), an unclosed one, or a review-verdict opener that is
+    not at column 0 or sits inside HTML (indented, list item, quote, <!-- -->, <div>): refused, never dropped;
   - G2: a key missing, extra, null or empty: top level {verdict, findings[, prior]}, a finding
     {severity, file_line, text}, a prior entry {ref, status, evidence}. A raising review may use the
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
@@ -136,9 +136,13 @@ SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 # review-verdict block that is content, not the reviewer's answer.
 # Indented 4+ spaces or a tab, it is an indented code block, not a fence (LUCY-e3opf A1).
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-# An HTML comment block (CommonMark type 2): a line starting `<!--` (up to 3 spaces in) hides every line
-# up to the one holding `-->`. A review-verdict block inside it is not the reviewer's answer (A1).
-HTML_COMMENT = re.compile(r"^ {0,3}<!--")
+# HTML (A1): a `<!--` anywhere outside a fence and a code span hides every line up to the one holding `-->`;
+# a line starting with a tag (`<div>`) opens an HTML block up to the next blank line.
+HTML_START = re.compile(r"^ {0,3}<[A-Za-z/!?]")
+# A review-verdict opener behind any indent or container marker (list item, blockquote). Only one at column 0,
+# outside HTML, is the reviewer's answer; any other is refused, never silently dropped (A1).
+VERDICT_OPENER = re.compile(r"^[ \t>*+\-.)\d]*(?:<(?:!--|[A-Za-z][^>]*>)[ \t]*)*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
+                            re.I)
 # The exact key sets of a review-verdict block (LUCY-e3opf G2). No aliases: priority is not severity.
 TOP_KEYS, TOP_OPTIONAL = ("verdict", "findings"), ("prior",)
 FINDING_KEYS = ("severity", "file_line", "text")
@@ -156,17 +160,27 @@ class Block:
 def verdict_blocks(p, text):
     """The review-verdict blocks at top level, outside any other fence or HTML comment (LUCY-e3opf G1,
     A1). An unclosed review-verdict fence, or an unclosed fence that swallows one, refuses the file."""
-    out, fence, pos, comment = [], None, 0, False
+    out, fence, pos, comment, html = [], None, 0, False, False
     for line in text.splitlines(keepends=True):
         start, pos = pos, pos + len(line)
         s = line.rstrip("\r\n")
+        if fence is None and VERDICT_OPENER.match(s) and (comment or html or not re.match(r"`{3,}|~{3,}", s)):
+            raise ValueError(f"{p}: a review-verdict block is not top-level (indented, in a list or quote, or "
+                             f"inside HTML): put it at column 0: {s.strip()[:80]}")
         if comment:
             comment = "-->" not in s
             continue
-        if fence is None and HTML_COMMENT.match(s):
-            comment = "-->" not in s[s.index("<!--") + 4:]
+        if html:
+            html = bool(s.strip())
             continue
         if fence is None:
+            bare = re.sub(r"`[^`\n]*`", "", s)
+            if "<!--" in bare and "-->" not in bare[bare.index("<!--") + 4:]:
+                comment = True
+                continue
+            if HTML_START.match(s):
+                html = not ("<!--" in bare and "-->" in bare)
+                continue
             m = FENCE.match(s)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
                 info = m.group(2).split()
@@ -882,15 +896,15 @@ def routed_out(f, scope_lock):
         f.get("pre_existing") is True or (scope_lock and f.get("in_scope") is False))
 
 
-ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})\.?[ \t]*$")
+ECHO_SHA = re.compile(r"[ \t]*REVIEWING:[ \t]*\S+[ \t]*@[ \t]*([0-9a-fA-F]{7,40})\.?[ \t]*")
 
 
 def echo_of(text):
     """The commit a review echoes; "" unless the file has exactly ONE REVIEWING line, of the form
     "<branch> @ <bare sha>" (LUCY-e3opf G4, A2). Two lines, even identical ones, are two responses."""
-    lines = re.findall(r"(?m)^\s*REVIEWING:.*$", text)
-    m = ECHO_SHA.search(text)
-    return m.group(1).lower() if len(lines) == 1 and m else ""
+    lines = [ln for ln in text.splitlines() if re.match(r"[ \t]*REVIEWING:", ln)]
+    m = ECHO_SHA.fullmatch(lines[0]) if len(lines) == 1 else None  # one physical line
+    return m.group(1).lower() if m else ""
 
 
 def current_tip(files):
@@ -1068,7 +1082,10 @@ def fixed_errors(tag, f, src, files):
     # Every seat (LUCY-e3opf B1): each review of the tip must itself close every raising round. One that
     # says nothing about it leaves it not fixed (blocking), without refusing the run; one that keeps it
     # open is a dispute (above). A seat's block is authoritative over its own prose.
-    silent = [Path(x[0]).name for x in at_tip if any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
+    # A seat is a tip input with a review-verdict block; a block-less one (the builder's mutants file) has
+    # no prior array to carry and is not a seat.
+    silent = [Path(x[0]).name for x in at_tip if one_block(x[0], x[2])
+              and any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
     if silent and not f["_disputed"]:
         refs = " and ".join(f"r{r} {sev} {loc}" for r in rounds)
         f["_not_fixed"] = (f"seat {', '.join(silent)} has no closed prior for {refs}: every review of the current "

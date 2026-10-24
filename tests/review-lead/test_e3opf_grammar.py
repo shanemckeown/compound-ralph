@@ -516,26 +516,41 @@ def closing_r2(block_text=None, head="", tail=""):
 
 
 class A1CommonMarkTopLevel(unittest.TestCase):
-    """:155 — a closing block inside an HTML comment, or indented 4 spaces / a tab, is not authoritative."""
+    """:155 — a block inside an HTML comment, or indented 4 spaces / a tab, is not authoritative. Own-gate r1
+    (Astra :166/:170, Opus :166): such a block is REFUSED, never silently dropped to the prose parser."""
 
-    def test_html_comment_or_indented_block_is_not_the_answer(self):
+    def assert_refused(self, r2):
+        with self.assertRaisesRegex(ValueError, "review-verdict block is not top-level"):
+            chk.verdict_blocks("v", r2)
+        code, out = run_one_r2(r2)
+        self.assertEqual(code, 1, out)
+        self.assertIn("not top-level", out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_html_comment_or_indented_block_is_refused(self):
         blk = strict_block("PASS", prior=[(REF, "closed")])
-        for wrapped in ("<!--\n" + blk + "-->\n", "<!-- " + blk + "-->\n",
-                        "".join("    " + ln + "\n" for ln in blk.splitlines()),
-                        "".join("\t" + ln + "\n" for ln in blk.splitlines())):
-            r2 = closing_r2(wrapped)
-            self.assertEqual(chk.verdict_blocks("v", r2), [], wrapped)
-            self.assertEqual(chk.file_prior("v", r2), {}, wrapped)
-            code, out = run_one_r2(r2)
+        indent = lambda pre: "".join(pre + ln + "\n" for ln in blk.splitlines())
+        for wrapped in ("<!--\n" + blk + "-->\n", "<!-- " + blk + "-->\n", indent("    "), indent("\t"),
+                        indent("   "), "<div><!--\n" + blk + "-->\n</div>\n", "<div>\n" + blk + "</div>\n",
+                        "notes <!-- scratch\n" + blk + "-->\n",
+                        "- " + "`" * 4 + "markdown\n" + indent("  ") + "  " + "`" * 4 + "\n",
+                        "- item\n" + indent("    "), "> " + blk.replace("\n", "\n> ")):
+            self.assert_refused(closing_r2(wrapped))
+
+    def test_raising_block_with_a_p1_only_in_the_block_is_not_lost(self):
+        """Opus :166: the P2 is in prose, the P1 only in an indented/HTML-hidden block. Refused, never FIXED=1."""
+        blk = strict_block("FAIL", [("P2", "lib/pay.ts:37", "retry charges twice — guard"),
+                                    ("P1", "lib/refund.ts:9", "refund goes to another clinic — scope it")])
+        for hidden in ("- list\n" + "".join("    " + ln + "\n" for ln in blk.splitlines()), "<!--\n" + blk):
+            r1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{R1_SRC}\nVERIFIED OK\n- tests\n{hidden}"
+            code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                                  [("REVIEW_x_astra_a.md", r1, 1000), ("REVIEW_x_astra_r2_b.md", closing_r2(), 2000)])
             self.assertEqual(code, 1, out)
-            self.assertIn("has no review-verdict prior entry", out)
             self.assertNotIn("FIXED=", out)
 
-    def test_three_space_indent_and_a_closed_comment_before_it_still_count(self):
-        blk = strict_block("PASS", prior=[(REF, "closed")])
-        for r2 in (closing_r2("".join("   " + ln + "\n" for ln in blk.splitlines())),
-                   closing_r2(head="<!-- reviewer scratch -->\n"),
-                   closing_r2(tail="<!--\nscratch notes\n-->\n")):
+    def test_column_zero_block_after_closed_html_still_counts(self):
+        for r2 in (closing_r2(head="<!-- reviewer scratch -->\n"), closing_r2(tail="<!--\nscratch notes\n-->\n"),
+                   closing_r2(tail="<details>\nraw\n</details>\n\n"), closing_r2(tail="quoted `<!--` in prose\n")):
             code, out = run_one_r2(r2)
             self.assertEqual(code, 0, out)
             self.assertIn("FIXED=1", out)
@@ -543,6 +558,14 @@ class A1CommonMarkTopLevel(unittest.TestCase):
 
 class A2OneEchoLine(unittest.TestCase):
     """:891 — two identical REVIEWING echoes before one closing block."""
+
+    def test_echo_split_across_lines_refused(self):
+        """Own-gate r1 Astra :892: the echo must be one physical line."""
+        r2 = closing_r2().replace("goal/x @ ", "goal/x @\n")
+        self.assertEqual(chk.echo_of(r2), "")
+        code, out = run_one_r2(r2)
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("FIXED=", out)
 
     def test_two_identical_echoes_refused(self):
         r2 = f"REVIEWING: goal/x @ {SHA_B}\n" + closing_r2()
@@ -648,12 +671,16 @@ class B1EverySeatPrior(unittest.TestCase):
         self.assertIn("BLOCKING=0 ESCALATE=0", out)
         self.assertIn("FIXED=1", out)
 
-    def test_seat_without_a_block_at_the_tip_is_silent_too(self):
-        opus = f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- tests\n"
-        code, out = self.run_two(opus)
+    def test_blockless_tip_input_is_not_a_seat(self):
+        """Own-gate r1 Opus :1071: the builder's mutants file echoes the tip but has no block; it is not a seat,
+        so it cannot deadlock every fixed grade. A seat WITH a block and no entry still blocks."""
+        mutants = f"REVIEWING: goal/x @ {SHA_B}\nPASS\n- KILLED retry guard reverted — pay suite red\n"
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_astra_a.md", R1_RAISE, 1000), ("mutants-round-2.txt", mutants, 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100)])
         self.assertEqual(code, 0, out)
-        self.assertIn("BLOCKING=1", out)
-        self.assertIn("FIXED=0", out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
 
 
 class B2WholeResponseSweep(unittest.TestCase):
