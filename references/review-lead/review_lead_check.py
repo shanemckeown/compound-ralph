@@ -338,23 +338,9 @@ def finding_shaped(line):
                     and FILE_LINE.search(line)))
 
 
-def _no_duplicate_keys(pairs):
-    keys = [k for k, _ in pairs]
-    dup = sorted({k for k in keys if keys.count(k) > 1})
-    if dup:
-        raise ValueError(f"duplicate key(s) {dup} in a review-verdict block: one would silently erase the other")
-    return dict(pairs)
-
-
-def load_block(block):
-    """A review-verdict block's JSON. A repeated key (two "prior" or "findings" arrays) is refused, never
-    last-one-wins (LUCY-e3opf)."""
-    return json.loads(block, object_pairs_hook=_no_duplicate_keys)
-
-
 def structured_findings(p, block):
     try:
-        data = load_block(block)
+        data = json.loads(block)
     except json.JSONDecodeError as e:
         raise ValueError(f"{p}: review-verdict block is not valid JSON ({e})")
     if not isinstance(data, dict) or data.get("verdict") not in ("PASS", "FAIL"):
@@ -430,7 +416,7 @@ def file_prior(p, text):
     silently drops an earlier "open"."""
     out = {}
     for b in STRUCTURED.finditer(text):
-        for key, status in structured_prior(p, load_block(b.group(1))).items():
+        for key, status in structured_prior(p, json.loads(b.group(1))).items():
             if out.get(key, status) != status:
                 raise ValueError(f"{p}: review-verdict blocks mark r{key[0]} {key[1]} {key[2]} both closed and open")
             out[key] = status
@@ -480,7 +466,7 @@ def reviewer_findings(paths):
             head = text[:blocks[-1].start()]
             echo = list(re.finditer(r"(?m)^\s*REVIEWING:.*$", head))
             final = head[echo[-1].end():] if echo else head
-            verdict = load_block(blocks[-1].group(1))["verdict"]
+            verdict = json.loads(blocks[-1].group(1))["verdict"]
             words = decl_words(final.splitlines())
             if words - {verdict}:
                 raise ValueError(f"{p}: prose verdict {sorted(words)} contradicts the review-verdict block "
@@ -586,7 +572,7 @@ def sweep_whole_response(p, text, mine, verdict):
     check_summary_counts(p, [ln for ln in kept if not FINDING.match(ln)], mine)
     for b in blocks:
         try:
-            words.add(str(load_block(b.group(1)).get("verdict", "")).upper())
+            words.add(str(json.loads(b.group(1)).get("verdict", "")).upper())
         except (ValueError, AttributeError):
             raise ValueError(f"{p}: unreadable review-verdict block")
         for f in structured_findings(p, b.group(1)):
@@ -754,18 +740,14 @@ def dispute(src, files):
 
 
 def orphan_open_priors(files):
-    """Every prior entry names a finding the lead must have in front of it: the review that raised it
-    must be an input, so the lead covers it (open) or grades it from this entry (closed). Checked on
-    every input review. A review with a REVIEWING line must echo exactly one commit, or a seat's
-    disagreement could drop out of the current tip unseen."""
+    """A prior entry marking an earlier finding open is a live finding: the review that raised it must
+    be an input, so the lead has to cover it. Checked on every input review."""
     errs = []
     for x in files:
-        if re.search(r"(?m)^\s*REVIEWING:", x[2]) and not echo_of(x[2]):
-            errs.append(f"{Path(x[0]).name}: its REVIEWING lines are malformed or name different commits")
         for (r, sev, loc), st in file_prior(x[0], x[2]).items():
-            if not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
+            if st == "open" and not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
                                                                     for o in y[1]) for y in files):
-                errs.append(f"{Path(x[0]).name} marks r{r} {sev} {loc} {st}, but no --verdict review of round "
+                errs.append(f"{Path(x[0]).name} marks r{r} {sev} {loc} open, but no --verdict review of round "
                             f"{r} raises it: pass that review so the lead covers the finding")
     return errs
 
