@@ -474,13 +474,64 @@ REUSES_CUTOVER = "2026-10-15T06:17:00+00:00"
 REUSES_RE = re.compile(r"(?im)^[ \t>*_#`-]*(?:\d+[.)][ \t]*)?[*_`]*reuses[ \t*_`]*:[ \t*_`]*(.*)$")
 REUSES_NONE_RE = re.compile(r"(?i)^[\s*_`'\"]*(?:none|n/?a)\b[\s*_`'\"]*[—–:-]+\s*\S.{2,}")
 # BRIEF_PATH_RE plus ~/ and absolute paths (harness beads name ~/.claude/scripts/…).
-REUSES_PATH_RE = re.compile(r"(?<![\w.@/~-])(?:~/|/)?(?:[\w.@-]+/)+[\w.@-]+|" + BRIEF_PATH_RE.pattern)
+# Segments may hold () and [] (Next.js route groups and dynamic segments: app/(marketing)/x,
+# pages/api/clients/[id].ts), LUCY-2tjdu. Spaces are handled in reuse_paths().
+REUSES_SEG = r"[\w.@()\[\]-]+"
+REUSES_PATH_RE = re.compile(r"(?<![\w.@/~()\[\]-])(?:~/|/)?(?:" + REUSES_SEG + r"/)+" + REUSES_SEG
+                            + "|" + BRIEF_PATH_RE.pattern)
+# A quoted or backticked path may contain spaces ("Clients/Iconic Cosmetic Clinic/INDEX.md").
+REUSES_QUOTED_RE = re.compile(r"[\"`\u201c]([^\"`\u201d\n]*/[^\"`\u201d\n]*)[\"`\u201d]")
 VAULT = "/Users/shane/Documents/Obsidian"
 REUSES_ROOTS = (REPO, VAULT, os.path.join(VAULT, "Aestheticc"), os.path.expanduser("~"))
 
 
+def reuse_path(path):
+    """A Reuses path as written, without its :line and trailing punctuation; a ( or ) that only
+    wraps the path ("(see lib/x.ts)") is dropped, one inside it (app/(marketing)/x) is kept."""
+    p = path.strip().split(":", 1)[0].rstrip(".,;")
+    while p.endswith(")") and p.count(")") > p.count("("):
+        p = p[:-1].rstrip(".,;")
+    while p.startswith("(") and p.count("(") > p.count(")"):
+        p = p[1:]
+    return p
+
+
+def reuse_paths(value, exists):
+    """Paths named on a Reuses line, each kept whole (LUCY-2tjdu): quoted or backticked spans
+    first; then bare paths, where a missing match is widened over neighbouring words to the
+    widest span that exists (a vault path with spaces). Returns [(path, found)]."""
+    out, taken = [], []
+    for m in REUSES_QUOTED_RE.finditer(value):
+        out.append((m.group(1), exists(m.group(1))))
+        taken.append(m.span())
+    words = [w.span() for w in re.finditer(r"\S+", value)]
+    for m in REUSES_PATH_RE.finditer(value):
+        if any(a <= m.start() < b for a, b in taken):
+            continue
+        if exists(m.group(0)):
+            out.append((m.group(0), True))
+            taken.append(m.span())
+            continue
+        ws = next(i for i, (a, b) in enumerate(words) if a <= m.start() < b)
+        we = next(i for i, (a, b) in enumerate(words) if a < m.end() <= b)
+        best = None
+        for i in range(max(0, ws - 6), ws + 1):
+            for j in range(we, min(len(words), we + 7)):
+                start = m.start() if i == ws else words[i][0]
+                end = m.end() if j == we else words[j][1]
+                cand = value[start:end]
+                if (best is None or end - start > best[1] - best[0]) and exists(cand):
+                    best = (start, end)
+        if best:
+            out.append((value[best[0]:best[1]], True))
+            taken.append(best)
+        else:
+            out.append((m.group(0), False))
+    return out
+
+
 def reuse_path_exists(path):
-    path = os.path.expanduser(path.split(":", 1)[0].rstrip(".,;)"))
+    path = os.path.expanduser(reuse_path(path))
     if os.path.isabs(path):
         return os.path.exists(path)
     return any(os.path.exists(os.path.join(root, path)) for root in REUSES_ROOTS)
@@ -503,10 +554,10 @@ def check_reuses(text, bead, path_exists=None):
     value = values[-1]
     if REUSES_NONE_RE.match(value):
         return [], []
-    paths = REUSES_PATH_RE.findall(value)
+    paths = reuse_paths(value, path_exists or reuse_path_exists)
     if not paths:
         return [f"a 'Reuses:' line with a file path or 'none — <why>' (got {value[:60]!r})"], [fix]
-    missing = [p for p in paths if not (path_exists or reuse_path_exists)(p)]
+    missing = [reuse_path(p) for p, found in paths if not found]
     if missing:
         return [f"'Reuses:' paths that exist (not found: {', '.join(missing[:3])})"], [fix]
     return [], []
