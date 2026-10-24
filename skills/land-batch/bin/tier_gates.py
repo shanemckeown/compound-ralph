@@ -15,13 +15,10 @@ Per-merge scoped gates (scoped lint, related jest) run per candidate in Step 2 a
 listed here. The push-time gates, once on the combined tree, in list order, one at a time:
   every tier: full-project tsc; plus tests/config-effect when a beads export changed (it
          reads KNOWN_GAPS beads, so the export is a test input even in a UI batch).
-  full:  then cloudbuild-full: with LAND_GATE_REMOTE on, two Cloud Build lanes of
-         cloudbuild-gate.yaml via ~/.claude/scripts/cloudbuild-gate-remote.py (LUCY-vxk2v);
-         otherwise the whole Cloud Build simulation (steps #0, #2 and #3). Its step #2 IS the
-         full pg lane, run inside the upload tarball so a fixture .gcloudignore drops fails
-         here and not in Cloud Build. One command under the laptop-wide pg-lane lock, never
-         beside another pg lane: run concurrently on 12 Oct they produced 9 false pg
-         failures (evidence/land-batch/20261012-0u6v0/cloudbuild-run1-contended.log).
+  full:  then cloudbuild-full: two Cloud Build lanes of cloudbuild-gate.yaml via
+         ~/.claude/scripts/cloudbuild-gate-remote.py (LUCY-vxk2v). It is the default since
+         LUCY-nd0r5: no laptop pg lane runs for a land. LAND_GATE_REMOTE=0 (Cloud Build
+         outage) does not fall back to the laptop: the gate exits 75 and the land holds.
 
 `link-node-modules` symlinks the trunk's node_modules into a fresh land scratch. A scratch
 without it fails the prettier pre-commit hook with ENOENT on its first commit.
@@ -39,22 +36,25 @@ _spec = importlib.util.spec_from_file_location("risk_tier", RISK_TIER)
 risk_tier = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(risk_tier)
 
-PG_LOCK = 'python3 "$HOME/.claude/scripts/pg-lane-lock.py" --'
 GATED = 'python3 "$HOME/.claude/scripts/gated-test-run.py"'
 TSC = {"name": "tsc", "cmd": f"{GATED} tsc-heavy --noEmit"}
 BEADS_SUITE = {"name": "beads-config-effect",
                "cmd": f"{GATED} jest --runTestsByPath tests/config-effect/coverage.config-effect.test.ts"}
-CLOUDBUILD = {"name": "cloudbuild-full",
-              # env -u: an inherited SKIP_PG_TESTS=1 would silently drop step #2 (the pg lane).
-              "cmd": f"{PG_LOCK} env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
-# LUCY-vxk2v: the same gate on Cloud Build (two lanes of cloudbuild-gate.yaml). Nothing runs on
+# LUCY-vxk2v: the gate runs on Cloud Build (two lanes of cloudbuild-gate.yaml). Nothing runs on
 # the laptop, so no pg-lane lock. The SKILL loop runs the cmd in the scratch, hence `--scratch .`.
 # `uv run --script` reads the script's inline metadata (PyYAML for its allow-list; system python3
 # has none). Without PyYAML the script refuses with exit 2; it never falls back to a text scan.
-CLOUDBUILD_REMOTE_CMD = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
-# LAND_GATE_REMOTE=1 / =0 picks remote / local; unset uses this. The Manager flips it to True
-# after the live acceptance run; =0 stays the Cloud Build outage fallback.
-REMOTE_DEFAULT = False
+CLOUDBUILD = {"name": "cloudbuild-full",
+              "cmd": 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'}
+# LUCY-nd0r5: LAND_GATE_REMOTE=0 is the Cloud Build outage switch. It holds the land (exit 75,
+# a whole-batch HOLD in the SKILL); it never runs the old laptop simulation in its place.
+# A subshell: the SKILL wrapper evals the cmd, and a bare exit would end the wrapper before it
+# writes the exit file (own-gate review round 1).
+HELD_EXIT = 75
+CLOUDBUILD_HELD_CMD = ("(echo 'HELD: LAND_GATE_REMOTE=0 (Cloud Build gate switched off); no laptop "
+                       f"pg lane runs in its place. Unset it once Cloud Build is back.' >&2; exit {HELD_EXIT})")
+# LAND_GATE_REMOTE=0 holds, =1 or unset (or any other value) runs on Cloud Build.
+REMOTE_DEFAULT = True
 
 
 def gate_remote(env=None):
@@ -68,8 +68,8 @@ def gate_remote(env=None):
 
 def cloudbuild_gate(env=None):
     gate = dict(CLOUDBUILD)
-    if gate_remote(env):
-        gate["cmd"] = CLOUDBUILD_REMOTE_CMD
+    if not gate_remote(env):
+        gate["cmd"] = CLOUDBUILD_HELD_CMD
     return gate
 
 
@@ -85,10 +85,8 @@ def gates_for(tier, paths=(), env=None):
 
 def plan(paths, repo=None, env=None):
     tier, reasons = risk_tier.classify(paths, repo)
-    result = {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths, env)}
-    if gate_remote(env):  # review P4-1: the local plan stays byte-identical to the pre-vxk2v one
-        result["cloudbuild_remote"] = True
-    return result
+    return {"tier": tier, "reasons": reasons, "sequential": True, "gates": gates_for(tier, paths, env),
+            "cloudbuild_remote": gate_remote(env)}
 
 
 def push_problems(tier_plan, head, evidence_dir):
