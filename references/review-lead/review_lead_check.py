@@ -112,7 +112,8 @@ SEVERITY_TOKEN = re.compile(r"(?<![\w-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # "Finding (P1): Retry charges twice", "[P2] ...", "Issue P1 - ...".
 EXPLICIT_LABEL = re.compile(r"\b(?:finding|issue|bug|defect|blocker)s?\b\W{0,4}[\[(]?P[123]\b"
                             r"|[\[(]P[123][\])]|(?<![\w-])P[123]\s*:\s", re.I)
-FILE_LINE = re.compile(r"(?<![\w./\[\]-])(?=[\w./\[\]-]*[A-Za-z_/])[\w./\[\]-]+:\d+")
+# A "(group)/" segment is a Next.js route group: app/(home)/page.tsx:12 (LUCY-e3opf).
+FILE_LINE = re.compile(r"(?<![\w./\[\])-])(?=[\w./\[\]-]*[A-Za-z_/])(?:[\w./\[\]-]|\([\w.-]+\)(?=/))+:\d+")
 # A finding's location as written, keeping a line range ("lib/t.ts:78-83"); compared exactly (LUCY-l1s6g c).
 LOC = re.compile(FILE_LINE.pattern + r"(?:-\d+)?(?![\w-])")
 # A count is a number standing alone: "1 P1", "(0 P1", never the 1 in "Round-1 P1" (LUCY-l1s6g e).
@@ -298,7 +299,7 @@ UNBOUND_NOTES = {}
 # {review path: {(round, severity, path, line, raw)}}: earlier-round "open" notes a review-verdict file's
 # block does not carry; orphan_open_priors requires their raising review as an input (LUCY-e3opf G5).
 NOTE_REFS = {}
-# {review path: {(round, sev, loc)}}: prose "- rN Px <loc> open:" notes. A seat that keeps a finding open
+# {review path: {(round, sev, path, line)}}: prose "- rN Px <loc> open:" notes. A seat that keeps a finding open
 # in prose vetoes another seat's closed prior (escalates), so prose can never help grade fixed.
 OPEN_NOTES = {}
 
@@ -621,22 +622,29 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
         raise ValueError(f"{p}: verdicts {sorted(words)} in the file disagree with the final {verdict}")
 
 
-# A repo path in prose (LUCY-e3opf G5), optional :line or :line-line: a bare file name with a code
-# extension ("tokens.ts"); any path with a directory whose file has an extension or a line
-# ("lib/x.ts", "prisma/schema.prisma", ".husky/pre-push:3", "app/(dashboard)/page.tsx:12"); or a
-# dotfile or capitalised extensionless file with a line ("Dockerfile:12", ".gcloudignore:5"). Never
-# "and/or", "H-P0/P1", "Next.js" or "localhost:3000".
+# A repo path in prose (LUCY-e3opf G5), optional :line or :line-line, after a space or "(":
+#  - a path with a directory: "lib/x.ts", "prisma/schema.prisma", ".husky/pre-push:3",
+#    "app/(dashboard)/page.tsx:12", "/Users/s/repo/lib/x.ts:4", "~/x/lib/pay.ts". Without an extension
+#    or a line it must start at a repo top directory ("lib/pay"), so "and/or" and "P1/P2" are not paths;
+#  - a bare file name: with a code extension ("tokens.ts"), or any extension with a line
+#    ("build.gradle:40"), or a dotfile or Capitalised name with a line ("Dockerfile:12", ".gcloudignore:5").
+# Never "H-P0/P1", "Next.js:" prose, or "localhost:3000". Group 1 is the path, group 2 the line.
 CODE_EXT = ("tsx|ts|jsx|js|mjs|cjs|py|sql|jsonl|json|mdx|md|sh|ya?ml|toml|css|scss|html|txt|swift|kt|java"
             "|go|rb|plist|xml|csv|tsv|lock")
+TOP_DIRS = ("lib|pages|app|components|scripts|tests|mobile|mobile-portal|drizzle|public|hooks|references"
+            "|skills|docs|invariants|content|src|config|bin|styles|types|utils|Product|commands")
 _SEG = r"(?:\([\w.-]+\)|[\w.\[\]@+-]+)"
-_LINE = r":(\d+(?:-\d+)?)"
+_LN = r":\d+(?:-\d+)?"
+_NAME = r"[\w\[\]@-][\w.\[\]@-]*"
 PATH_TOKEN = re.compile(
-    r"(?<![\w./\[\]()@+-])("
-    rf"(?:{_SEG}/)+[\w\[\]@+-][\w.\[\]@+-]*\.[A-Za-z][A-Za-z0-9]{{0,9}}(?={_LINE}|(?![\w./\[\]@+-]))"
-    rf"|(?:{_SEG}/)+[\w.\[\]@+-]+(?={_LINE})"
-    rf"|[\w\[\]@-][\w.\[\]@-]*\.(?:{CODE_EXT})"
-    rf"|(?:\.[\w-][\w.-]*|[A-Z][\w.-]*)(?={_LINE})"
-    rf")(?:{_LINE})?(?![\w/-])")
+    r"(?<![\w./\[\]@+-])("
+    rf"(?:{_SEG}/)+{_NAME}\.[A-Za-z][A-Za-z0-9]{{0,9}}(?![\w.\[\]@+-]*/)"
+    rf"|(?:{_SEG}/)+{_NAME}(?={_LN})"
+    rf"|(?:~?/|(?:{TOP_DIRS})/)(?:{_SEG}/)*{_NAME}"
+    rf"|{_NAME}\.[A-Za-z][A-Za-z0-9]{{0,9}}(?={_LN})"
+    rf"|{_NAME}\.(?:{CODE_EXT})"
+    rf"|(?:\.[\w-][\w.-]*|[A-Z][\w.-]*)(?={_LN})"
+    r")(?::(\d+(?:-\d+)?))?(?![\w/-])")
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
 CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
@@ -650,8 +658,10 @@ def path_parts(loc):
 
 
 def claim_sevs(line):
-    """Standalone severity tokens; one inside a `code span` is quoted (an example, a test name)."""
-    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line) if not re.fullmatch(r"`\s*P[123]\s*`", m.group(0))]
+    """Standalone severity tokens. One inside a `code span` holding more than the token is quoted
+    (`P2 lib/x.ts:12`, `priority:"P1"`), not this reviewer's; `P1`, `[P1]` or `P1:` alone is a claim."""
+    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line)
+             if not re.fullmatch(r"P[123]", re.sub(r"[\W_]", "", m.group(0)))]
     return [s for s in CLAIM_SEV.finditer(line) if not any(a < s.start() < b for a, b in spans)]
 
 
@@ -675,11 +685,17 @@ def line_claims(line, skip=None):
     return out
 
 
+def same_file(a, b):
+    """One path names the other's file: equal, or a '/'-anchored suffix either way (tokens.ts and
+    lib/auth/tokens.ts; /Users/s/repo/lib/x.ts and lib/x.ts). kens.ts is not tokens.ts."""
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+
 def claim_error(sev, path, line, targets):
     """Why a prose claim matches no block finding or prior ref, else None (LUCY-e3opf G5). Matched on
     severity + file (equal, or a '/'-anchored suffix: tokens.ts matches lib/auth/tokens.ts, kens.ts
     does not) + line when the claim gives one."""
-    cands = [t for t in targets if (t[1] == path or t[1].endswith("/" + path)) and (line is None or t[2] == line)]
+    cands = [t for t in targets if same_file(t[1], path) and (line is None or t[2] == line)]
     where = f"{path}:{line}" if line else path
     if not cands:
         return f"no review-verdict finding or prior ref at {where}"
@@ -720,13 +736,19 @@ def prose_claim_errors(p, lines, meta, prior):
             tail = note.group(5)
             claims = line_claims(tail)
             refs = []
-            if ref and note.group(4).lower() not in ("closed", "fixed", "resolved"):
+            # "not fixed:", "partially fixed:", "still not resolved:" keep it open: the two words before
+            # the status word are read for a qualifier.
+            before = " ".join(note.group(3).lower().split()[-2:])
+            closed = (note.group(4).lower() in ("closed", "fixed", "resolved")
+                      and not re.search(r"\b(?:not|never|partially|partly|half|mostly|still|un\w*)\b|n't\b", before))
+            if ref and not closed:
                 refs.append(note.group(2))
-                OPEN_NOTES[str(p)].add((int(note.group(1)), note.group(2),
-                                        ref.group(1) + (f":{ref.group(2)}" if ref.group(2) else "")))
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
             for sev in refs:
+                # Every reference a note keeps open (its own, or a path-free severity in its text) vetoes
+                # a closed prior from another seat or its own block: the run escalates, never FIXED.
+                OPEN_NOTES[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2)))
                 if claim_error(sev, ref.group(1), ref.group(2), targets):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
@@ -872,7 +894,9 @@ def tip_statuses(files, tip, rounds, sev, loc):
             continue
         prior = file_prior(x[0], x[2])
         got = {r: prior[(r, sev, loc)] for r in rounds if (r, sev, loc) in prior}
-        got.update({r: "open" for r in rounds if (r, sev, loc) in OPEN_NOTES.get(str(x[0]), ())})
+        lp, ll = path_parts(loc)
+        got.update({r: "open" for (r, s_, np, nl) in OPEN_NOTES.get(str(x[0]), ())
+                    if r in rounds and s_ == sev and same_file(np, lp) and nl in (None, ll)})
         if got:
             out[x[0]] = got
     return out

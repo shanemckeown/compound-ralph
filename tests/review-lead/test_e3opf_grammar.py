@@ -362,5 +362,76 @@ class OwnGateRound1(unittest.TestCase):
         self.assertIn("(it says open): not fixed", out)
 
 
+class OwnGateRound2(unittest.TestCase):
+    """Own-gate round 2 (Astra xhigh + Opus h2h on 6d4979c)."""
+    file, run_fixed = OwnGateRound1.file, OwnGateRound1.run_fixed
+
+    def refuses(self, prose, findings=(), prior=None):
+        with self.assertRaises(ValueError, msg=prose):
+            parse_text(self.file(prose, findings, prior))
+
+    def test_line_is_captured_for_every_path_form(self):
+        self.refuses("P2 a.ts:38 — the previous patient's notes show — reset id",
+                     [("P2", "lib/a.ts:37", "refresh hides the search input — keep it")])
+        self.refuses("P1 Dockerfile:12 — fixture stripped", [("P1", "Dockerfile:11", "other — fix")])
+        self.refuses("P1 .gcloudignore:5 — fixture stripped", [("P1", ".gcloudignore:4", "other — fix")])
+        self.assertEqual(chk.line_claims("P1 build.gradle:40 x"), [("P1", "build.gradle", "40")])
+
+    def test_parenthesised_absolute_and_bare_paths_are_claims(self):
+        nit = [("P3", "lib/label.ts:4", "label typo — fix")]
+        for prose in ("- P1 (lib/auth/session.ts:40) — a revoked token still opens another clinic's list",
+                      "- P1 retry charges twice (lib/pay.ts:37)", "- P1 retry (lib/pay.ts:37-40, lib/refund.ts:9)",
+                      "- P1 /Users/s/repo/lib/auth/session.ts:40 — revoked token", "- P1 ~/.wt/x/lib/pay.ts:37 — twice",
+                      "- P1 build.gradle:40 — release signing dropped", "- P1 schema.prisma:9 — tenant column gone",
+                      "- P1 the lib/pay module double-charges on retry"):
+            self.refuses(prose, nit)
+        found = parse_text(self.file("- P1 /Users/s/repo/lib/auth/session.ts:40 — revoked token still opens",
+                                     [("P1", "lib/auth/session.ts:40", "revoked token — check version")]))
+        self.assertEqual(len(found), 1)
+        for prose, loc in (("- P1 ~/.wt/x/lib/pay.ts — retry charges twice", "lib/pay.ts:37"),
+                           ("- P1 app/(dashboard)/clients/page.tsx:12 — shows another clinic's clients",
+                            "app/(dashboard)/clients/page.tsx:12")):
+            self.assertEqual(len(parse_text(self.file(prose, [("P1", loc, "leak — fix")]))), 1, prose)
+
+    def test_slashed_words_are_still_not_paths(self):
+        for prose in ("P2 and/or P3 items are in VERIFIED OK", "P1/P2 counts: none", "P3: Opus/Astra agree"):
+            self.assertEqual(parse_text(self.file(prose)), [], prose)
+
+    def test_bare_bracketed_severity_in_a_code_span_is_a_claim(self):
+        for sev in ("`[P1]`", "`P1:`", "`(P1)`"):
+            self.refuses(f"- {sev} lib/auth/tokens.ts:40 — retry bypasses revoke")
+        self.assertEqual(len(parse_text(self.file('P2 lib/a.ts:3 — the key `priority:"P1"` is accepted',
+                                                  [("P2", "lib/a.ts:3", "extra key — refuse")]))), 1)
+
+    def test_qualified_status_word_is_open(self):
+        for status in ("not fixed", "partially fixed", "still not resolved"):
+            opus = self.file(f"- r1 P2 lib/pay.ts:37 {status}: retry still charges twice", [("P3", "lib/a.ts:1", "nit — x")])
+            code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                       ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+            self.assertNotIn("FIXED=1", out, status)
+            own = self.file(f"- r1 P2 lib/pay.ts:37 {status}: retry still charges twice", prior=[(REF, "closed")])
+            code, out = self.run_fixed(("REVIEW_x_astra_r2_b.md", own, 2000))
+            self.assertEqual(code, 1, status)
+            self.assertNotIn("FIXED=", out)
+
+    def test_basename_or_lineless_open_note_vetoes(self):
+        for note in ("- r1 P2 pay.ts:37 open: retry still charges twice", "- r1 P2 lib/pay.ts open: retry twice",
+                     "- r1 P2 lib/pay.ts:37 closed: guard added, but the P2 retry path still double-charges"):
+            opus = self.file(note, prior=[])
+            code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                       ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1", out, note)
+            self.assertIn("FIXED=0", out, note)
+
+    def test_described_closed_note_stays_closed(self):
+        opus = self.file("- r1 P2 lib/pay.ts:37 (retry), set by refund.ts and pay.ts:40 closed: guard green", prior=[])
+        code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                   ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+
 if __name__ == "__main__":
     unittest.main()
