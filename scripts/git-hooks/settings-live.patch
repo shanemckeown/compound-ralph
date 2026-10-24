@@ -1,0 +1,154 @@
+settings-live.patch (LUCY-wqn96 L4): route settings.json hook commands through the live export.
+
+Apply ONLY after scripts/git-hooks/install.sh has run (run-gate must exist):
+  patch -p1 -d ~/.claude < ~/.claude/scripts/git-hooks/settings-live.patch
+Generated 2026-10-24T18:12Z against the LIVE ~/.claude/settings.json, which differs
+from committed main (uncommitted edits by other sessions). Re-generate if it no longer applies.
+
+- PreToolUse guards get --fail-exit 2: Claude Code blocks on exit 2 and only warns on any
+  other code, so a drifted export must block, not wave the tool through.
+- Left on the checkout path, because main has no committed copy to export (commit them first,
+  then route them the same way): hooks/lucy-persona-sessionstart.sh (SessionStart),
+  hooks/build-submit-guard.py (PreToolUse).
+- skills/gstack/.../timeline-stop-hook is not a gate path and is unchanged.
+
+--- a/settings.json
++++ b/settings.json
+@@ -42,17 +42,17 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/observer.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh",
+             "statusMessage": "Observer: loading..."
+           },
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/ceo-review-prompt.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/ceo-review-prompt.sh",
+             "statusMessage": "CEO review check..."
+           },
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/fleet-role-sessionstart.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/fleet-role-sessionstart.sh",
+             "statusMessage": "Fleet role check..."
+           }
+         ]
+@@ -73,7 +73,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/agentview-name-session.py"
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/agentview-name-session.py"
+           }
+         ]
+       },
+@@ -81,7 +81,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/observer.sh"
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh"
+           }
+         ]
+       },
+@@ -89,7 +89,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/voice-check.sh"
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/voice-check.sh"
+           }
+         ]
+       },
+@@ -97,7 +97,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "python3 /Users/shane/.claude/scripts/gate-watch.py --hook",
++            "command": "/Users/shane/.claude/.git/live/run-gate scripts/gate-watch.py --hook",
+             "timeout": 5
+           }
+         ]
+@@ -106,7 +106,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/shane-presence.py",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/shane-presence.py",
+             "timeout": 5
+           }
+         ]
+@@ -118,7 +118,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/observer.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh",
+             "async": true
+           }
+         ]
+@@ -128,7 +128,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/gmail-thread-guard.py",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/gmail-thread-guard.py",
+             "statusMessage": "Gmail thread guard\u2026"
+           }
+         ]
+@@ -139,7 +139,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/observer.sh"
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh"
+           }
+         ]
+       },
+@@ -147,7 +147,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/gbrain-ingest/stop-hook.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/gbrain-ingest/stop-hook.sh",
+             "async": true
+           }
+         ]
+@@ -177,7 +177,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/conductor-deploy-guard.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/conductor-deploy-guard.sh",
+             "statusMessage": "Conductor deploy guard\u2026"
+           }
+         ]
+@@ -187,7 +187,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/codex-background-guard.sh",
++            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/codex-background-guard.sh",
+             "statusMessage": "Codex foreground guard\u2026"
+           }
+         ]
+@@ -197,7 +197,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/sendmessage-guard.py",
++            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/sendmessage-guard.py",
+             "timeout": 30
+           }
+         ]
+@@ -207,7 +207,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "/Users/shane/.claude/hooks/ask-guard.py",
++            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/ask-guard.py",
+             "timeout": 10
+           }
+         ]

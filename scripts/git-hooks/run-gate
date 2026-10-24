@@ -1,0 +1,128 @@
+#!/usr/bin/env -S python3 -I -S
+"""run-gate: run a gate script from the committed live export, never the checkout (LUCY-wqn96 / p122j).
+
+Usage: <git-common-dir>/live/run-gate [--fail-exit N] <relpath> [args...]
+       e.g. ~/.claude/.git/live/run-gate scripts/review-gate.sh <bead> <tip> ...
+
+install.sh copies this file to <git-common-dir>/live/run-gate; callers use that copy. It
+finds its repo from its own location, then refuses (exit 3, or N with --fail-exit) unless:
+  - live/current names a commit equal to refs/heads/main (it waits ~2 s for the
+    reference-transaction hook's export to catch up after a main move), and
+  - every file under live/<main> is exactly main's gate blob, with nothing extra or missing
+    (GATE_PATHS is read from the installed hook, the one definition), and
+  - <relpath> is one of those files.
+Then it execs the exported file with the caller's cwd: a .py entry as python3 -I with its
+own dir on sys.path (so sibling imports resolve inside the export), anything else by its
+shebang, or bash for a non-executable .sh.
+
+Claude Code treats a hook exit of 2 as blocking and any other non-zero as a warning, so a
+PreToolUse guard routed through this passes --fail-exit 2 to fail closed.
+"""
+import os
+import sys
+
+if __name__ == "__main__" and not (sys.flags.isolated and sys.flags.no_site):
+    os.execv(sys.executable, [sys.executable, "-I", "-S", os.path.abspath(__file__)] + sys.argv[1:])
+
+import importlib.machinery  # noqa: E402
+import importlib.util  # noqa: E402
+import time  # noqa: E402
+
+DRIFT = 3
+CATCH_UP_S = 2.0
+PY_BOOT = ("import os, runpy, sys; p = sys.argv[1]; sys.argv = sys.argv[1:]; "
+           "sys.path.insert(0, os.path.dirname(p)); runpy.run_path(p, run_name='__main__')")
+
+
+def refuse(code, why):
+    sys.stderr.write("run-gate: live export drift; refuse (%s)\n" % why)
+    return code
+
+
+def load_hook(common):
+    path = os.path.join(common, "hooks", "reference-transaction")
+    loader = importlib.machinery.SourceFileLoader("wqn96_reference_transaction", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def main(argv):
+    fail = DRIFT
+    if argv[:1] == ["--fail-exit"] and len(argv) >= 2:
+        if not argv[1].isdigit() or not 1 <= int(argv[1]) <= 255:
+            return refuse(DRIFT, "--fail-exit takes 1-255")
+        fail, argv = int(argv[1]), argv[2:]
+    if not argv:
+        return refuse(fail, "usage: run-gate [--fail-exit N] <relpath> [args...]")
+    rel = os.path.normpath(argv[0])
+    if os.path.isabs(rel) or rel.split(os.sep)[0] in ("..", "."):
+        return refuse(fail, "%s is not a repo-relative path" % argv[0])
+
+    live = os.path.dirname(os.path.abspath(__file__))
+    common = os.path.dirname(live)
+    caller_git_dir = os.environ.get("GIT_DIR")
+
+    def own_repo(on):
+        """Point the hook's git() at this repo whatever the cwd, then give the caller its GIT_DIR back."""
+        if on:
+            os.environ["GIT_DIR"] = common
+        elif caller_git_dir is None:
+            os.environ.pop("GIT_DIR", None)
+        else:
+            os.environ["GIT_DIR"] = caller_git_dir
+
+    own_repo(True)
+    try:
+        hook = load_hook(common)
+    except Exception as exc:  # noqa: BLE001
+        return refuse(fail, "cannot load the installed hook: %s" % exc)
+    finally:
+        own_repo(False)
+
+    def check():
+        """(problem or None, the verified export's commit)."""
+        own_repo(True)
+        try:
+            current, tip = hook.live_current(), hook.main_tip()
+            if current is None:
+                return "no live/current export", None
+            if current != tip:
+                return "live/current %s is not main %s" % (current[:12], (tip or "missing")[:12]), None
+            problems = hook.export_drift(os.path.join(live, current), current)
+            if problems:
+                return "; ".join(problems[:5]), None
+            if rel not in hook.gate_tree(current):
+                return "%s is not a gate file at main" % rel, None
+            return None, current
+        finally:
+            own_repo(False)
+
+    deadline = time.monotonic() + CATCH_UP_S
+    why, current = check()
+    while why and "is not main" in why and time.monotonic() < deadline:
+        time.sleep(0.2)
+        why, current = check()
+    if why:
+        return refuse(fail, why)
+
+    # The verified directory, not the current link: the link may move after the check.
+    entry = os.path.join(live, current, rel)
+    args = argv[1:]
+    if rel.endswith(".py"):
+        cmd = [sys.executable, "-I", "-c", PY_BOOT, entry] + args
+    elif os.access(entry, os.X_OK):
+        cmd = [entry] + args
+    elif rel.endswith(".sh"):
+        cmd = ["bash", entry] + args
+    else:
+        return refuse(fail, "%s is not runnable" % rel)
+    try:
+        os.execvp(cmd[0], cmd)
+    except OSError as exc:
+        return refuse(fail, "cannot exec %s: %s" % (rel, exc))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

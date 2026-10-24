@@ -1,23 +1,69 @@
 #!/usr/bin/env bash
-# Install the reference-transaction guard (LUCY-wqn96). Orchestrator only, after merge.
-# Usage: scripts/git-hooks/install.sh [repo]   (default ~/.claude)
+# Install the reference-transaction guard and the live gate export (LUCY-wqn96). Orchestrator
+# only, after merge. Usage: scripts/git-hooks/install.sh [repo]   (default ~/.claude)
 #
-# Copies (never symlinks: a symlink would run uncommitted working-tree edits) the hook
-# into the repo's absolute common hooks dir and points core.hooksPath at that absolute
-# path. A relative core.hooksPath (e.g. ".git/hooks") resolves against each linked
-# worktree's own root, where no hooks dir exists, so the hook silently never runs there.
+# Installs from main's COMMITTED blobs (git show HEAD:...), never the working tree, and
+# refuses unless HEAD is main and the caller is the orchestrator or a human terminal (the
+# hook's own identity rule, run from that blob). Copies, never symlinks:
+#   <common>/hooks/reference-transaction   (the guard; also refreshes the export)
+#   <common>/live/run-gate                 (the only entry point gate callers use)
+# then points core.hooksPath at the ABSOLUTE common hooks dir (a relative one resolves per
+# worktree, where no hooks dir exists, and the hook silently never runs there), checks every
+# worktree sees that value, and exports main's gate paths to <common>/live/current.
 set -euo pipefail
 
 repo="${1:-$HOME/.claude}"
-src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reference-transaction"
-common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)"
-hooks="$common/hooks"
+g() { git -C "$repo" --no-replace-objects "$@"; }
+die() { echo "install.sh: $*; refuse" >&2; exit 1; }
 
-mkdir -p "$hooks"
-cp "$src" "$hooks/reference-transaction.tmp"
-chmod 755 "$hooks/reference-transaction.tmp"
+common="$(g rev-parse --path-format=absolute --git-common-dir)"
+hooks="$common/hooks"
+live="$common/live"
+
+head_ref="$(g symbolic-ref -q HEAD || true)"
+[ "$head_ref" = refs/heads/main ] || die "HEAD of $repo is '${head_ref:-detached}', not refs/heads/main"
+head="$(g rev-parse --verify -q 'HEAD^{commit}')" || die "main has no commit"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+for f in reference-transaction run-gate; do
+  g show "$head:scripts/git-hooks/$f" > "$tmp/$f" 2>/dev/null || die "main has no scripts/git-hooks/$f"
+  [ -s "$tmp/$f" ] || die "main's scripts/git-hooks/$f is empty"
+  chmod 755 "$tmp/$f"
+done
+
+# Only the orchestrator (or Shane at a plain terminal) installs.
+(cd "$repo" && "$tmp/reference-transaction" --check-orchestrator) \
+  || die "this session is not the orchestrator"
+
+# A per-worktree core.hooksPath (extensions.worktreeConfig) would override the shared one.
+worktrees="$(g worktree list --porcelain | sed -n 's/^worktree //p')"
+if [ "$(g config --type=bool --get extensions.worktreeConfig || echo false)" = true ]; then
+  while IFS= read -r wt; do
+    [ -d "$wt" ] || continue
+    own="$(git -C "$wt" config --worktree --get core.hooksPath || true)"
+    if [ -n "$own" ] && [ "$own" != "$hooks" ]; then
+      die "worktree $wt sets its own core.hooksPath=$own (unset it with: git -C '$wt' config --worktree --unset core.hooksPath)"
+    fi
+  done <<< "$worktrees"
+fi
+
+mkdir -p "$hooks" "$live"
+cp "$tmp/reference-transaction" "$hooks/reference-transaction.tmp"
 mv -f "$hooks/reference-transaction.tmp" "$hooks/reference-transaction"
-git -C "$repo" config core.hooksPath "$hooks"
+cp "$tmp/run-gate" "$live/run-gate.tmp"
+mv -f "$live/run-gate.tmp" "$live/run-gate"
+g config core.hooksPath "$hooks"
+
+while IFS= read -r wt; do
+  [ -d "$wt" ] || continue
+  seen="$(git -C "$wt" config --get core.hooksPath || true)"
+  [ "$seen" = "$hooks" ] || die "worktree $wt sees core.hooksPath='$seen', not $hooks"
+done <<< "$worktrees"
+
+(cd "$repo" && "$hooks/reference-transaction" --export "$head") || die "export of $head failed"
 
 echo "installed: $hooks/reference-transaction"
-echo "core.hooksPath: $(git -C "$repo" config --get core.hooksPath)"
+echo "installed: $live/run-gate"
+echo "core.hooksPath: $(g config --get core.hooksPath)"
+echo "live/current: $(readlink "$live/current")"
