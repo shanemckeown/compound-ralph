@@ -95,7 +95,9 @@ RULE = (
 
 
 def is_gate_path(path):
-    return any(path.startswith(g) if g.endswith("/") else path == g for g in GATE_PATHS)
+    # A gate directory's own name counts too: a gitlink or file at "hooks" replaces hooks/.
+    return any(path.startswith(g) or path == g[:-1] if g.endswith("/") else path == g
+               for g in GATE_PATHS)
 
 
 def git(*args, text=True):
@@ -148,7 +150,12 @@ def recreate_anchor():
 
 def changed_paths(old, new):
     """Paths that differ between old and new. None when that can't be worked out."""
-    out = git("diff", "-z", "--name-only", "--no-renames", old, new)
+    # Neither repo config nor an incoming .gitmodules (ignore = all) may hide a path: a
+    # gitlink under a gate prefix is a gate change like any file.
+    out = git("-c", "diff.ignoreSubmodules=none", "-c", "core.quotePath=false",
+              "-c", "diff.relative=false", "diff", "-z", "--name-only", "--no-renames",
+              "--ignore-submodules=none", "--no-relative", "--no-ext-diff", "--no-textconv",
+              old, new)
     if out.returncode != 0:
         return None
     # -z: unquoted names, so "hooks/résumé.py" still starts with "hooks/".
