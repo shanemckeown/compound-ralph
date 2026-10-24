@@ -905,7 +905,8 @@ def checkout_gate_refs(text):
 
 def test_l5_callers_use_run_gate():
     bin_dir = os.path.join(REPO_ROOT, "skills/land-batch/bin")
-    files = CALLERS + ["skills/land-batch/bin/" + f for f in sorted(os.listdir(bin_dir))]
+    files = CALLERS + ["skills/land-batch/bin/" + f for f in sorted(os.listdir(bin_dir))
+                       if os.path.isfile(os.path.join(bin_dir, f)) and not f.endswith(".pyc")]
     offenders = {}
     for rel in files:
         with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as fh:
