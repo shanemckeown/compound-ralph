@@ -172,10 +172,9 @@ def is_builder_evidence(name):
 
 
 def has_review_content(p, text):
-    """A REVIEWING line or a review-verdict opener anywhere, or a block: what makes a file a review, whatever
-    its name (LUCY-e3opf D1). Builder evidence has neither."""
-    return (any(re.match(r"[ \t]*REVIEWING:", ln) or VERDICT_OPENER.match(ln) for ln in lines_of(text))
-            or bool(one_block(p, text)))
+    """A REVIEWING line anywhere, or a review-verdict block, is what makes a file a review, whatever its name
+    (LUCY-e3opf D1). Builder evidence has neither. one_block refuses any opener that isn't one clean block."""
+    return any(re.match(r"[ \t]*REVIEWING:", ln) for ln in lines_of(text)) or bool(one_block(p, text))
 
 
 def builder_evidence_errors(files):
