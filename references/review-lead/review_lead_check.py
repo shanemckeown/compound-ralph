@@ -174,7 +174,7 @@ def is_builder_evidence(name):
 def has_review_content(p, text):
     """A REVIEWING line anywhere, or a review-verdict block, is what makes a file a review, whatever its name
     (LUCY-e3opf D1). Builder evidence has neither. one_block refuses any opener that isn't one clean block."""
-    return any(re.match(r"[ \t]*REVIEWING:", ln) for ln in lines_of(text)) or bool(one_block(p, text))
+    return any(re.match(r"\s*REVIEWING:", ln) for ln in lines_of(text)) or bool(one_block(p, text))
 
 
 def builder_evidence_errors(files):
@@ -1156,6 +1156,22 @@ def same_commit(a, b):
     return bool(a and b) and (a.startswith(b) or b.startswith(a))
 
 
+def scheme_of(name):
+    return "_r<N>_" if ROUND_IN_NAME.search(Path(str(name)).name) else "round-<N>"
+
+
+def builder_at_tip(x, files):
+    """Builder evidence is echo-free (D1), so it is at the current tip by its round: the newest seat round or
+    later. Under the other naming scheme its round can't be compared, so it counts as at the tip (fails closed:
+    its survivors veto, and it can't be an earlier raiser that a later review closes)."""
+    newest = current_tip(files)[1]
+    if is_builder_evidence(newest[0]):
+        return True
+    if scheme_of(x[0]) != scheme_of(newest[0]):
+        return True
+    return (round_of(x[0]) or 0) >= (round_of(newest[0]) or 0)
+
+
 def fixed_errors(tag, f, src, files):
     """A finding graded `fixed` resolves only when a later independent review of the CURRENT tip
     confirms it (LUCY-p4pjf, LUCY-e3opf): `fixed_by` is one of the --verdict files, newer than the
@@ -1185,9 +1201,13 @@ def fixed_errors(tag, f, src, files):
     for x in files:
         if src not in x[1]:
             continue
-        a_ = echo_of(x[2])
-        if x is later or not a_ or a_.startswith(b_) or b_.startswith(a_):
-            return [f"{tag}: {Path(x[0]).name} raises it at the commit fixed_by reviewed (REVIEWING echoes): not fixed"]
+        if is_builder_evidence(x[0]):  # echo-free (D1): ordered by its round, never by an echo
+            if builder_at_tip(x, files):
+                return [f"{tag}: {Path(x[0]).name} (builder evidence) raises it at the current tip: not fixed"]
+        else:
+            a_ = echo_of(x[2])
+            if x is later or not a_ or a_.startswith(b_) or b_.startswith(a_):
+                return [f"{tag}: {Path(x[0]).name} raises it at the commit fixed_by reviewed (REVIEWING echoes): not fixed"]
         # Order by the round each name states, never the mtime: a copy or checkout resets it (LUCY-l1s6g g,
         # LUCY-e3opf C3). Only a later round confirms an earlier one.
         r_later, r_x = round_of(later[0]), round_of(x[0])
@@ -1207,7 +1227,7 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
                 f"(newest review {Path(newest[0]).name})"]
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
-    for x in at_tip:
+    for x in at_tip + [y for y in files if is_builder_evidence(y[0]) and builder_at_tip(y, files)]:
         for other in x[1]:
             if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]

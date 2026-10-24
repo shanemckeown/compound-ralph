@@ -1122,3 +1122,49 @@ class D2OneRoundTokenPerName(unittest.TestCase):
         for name in ("opus_r1_h2h-round-1.md", "REVIEW_x_r2_y_r2_.md", "a-round-2-b-round-2.md"):
             with self.assertRaisesRegex(ValueError, "one round token per file"):
                 chk.round_of(name)
+
+
+class D1OwnGateR1BuilderEvidenceByRound(unittest.TestCase):
+    """Own-gate r1 Opus :1209 / :1189: echo-free builder evidence is placed by its round, never by an echo."""
+    LABEL = "P2 lib/label.ts:4 — the label shows the wrong treatment name"
+    SURVIVOR = "P2 lib/label.ts:4 — mutant survived: label fix reverted, suite still green"
+    REF = "r1 P2 lib/label.ts:4"
+
+    def lead(self, by):
+        return fixed_lead(self.LABEL, by, extra=[{
+            "id": "F2", "source_line": self.SURVIVOR, "verdict": "dismissed", "category": "other",
+            "reason": "the closing seat re-checked the label at this tip"}])
+
+    def files(self, r1, r2, mutants):
+        raise1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{self.LABEL}\nVERIFIED OK\n- tests\n"
+        close2 = r2_file(prior=[(self.REF, "closed")])
+        return [(r1, raise1, 1000), (r2, close2, 2100), (mutants, f"FAIL\n{self.SURVIVOR}\n", 2000)]
+
+    def test_newest_round_survivor_still_vetoes(self):
+        for r1, r2, mut in (("opus-h2h-round-1.md", "opus-h2h-round-2.md", "mutants-round-2.txt"),
+                            ("opus-h2h-round-1.md", "opus-h2h-round-2.md", "mutants-round-3.txt"),
+                            ("REVIEW_x_astra_r1_a.md", "REVIEW_x_astra_r2_b.md", "mutants-round-1.txt")):  # schemes differ
+            code, out = run_named(self.lead(f"@D@/{r2}"), self.files(r1, r2, mut))
+            self.assertEqual(code, 1, (mut, out))
+            self.assertIn(f"{mut} raises P2 at lib/label.ts:4 again at the current tip", out)
+            self.assertNotIn("FIXED=", out)
+
+    def test_earlier_round_survivor_can_be_graded_fixed(self):
+        survivor = "P2 lib/pay.ts:37 — mutant survived: retry guard reverted — add a retry test"
+        files = [("opus-h2h-round-1.md", f"REVIEWING: goal/x @ {SHA_A}\nPASS\nVERIFIED OK\n- tests\n", 1000),
+                 ("mutants-round-1.txt", f"FAIL\n{survivor}\n", 1100),
+                 ("opus-h2h-round-2.md", r2_file(prior=[(REF, "closed")]), 2000)]
+        code, out = run_named(fixed_lead(survivor, "@D@/opus-h2h-round-2.md"), files)
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+        # The same survivor in the newest round raises it at the tip: refused, never fixed.
+        files[1] = ("mutants-round-2.txt", f"FAIL\n{survivor}\n", 1100)
+        code, out = run_named(fixed_lead(survivor, "@D@/opus-h2h-round-2.md"), files)
+        self.assertEqual(code, 1, out)
+        self.assertIn("mutants-round-2.txt (builder evidence) raises it at the current tip", out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_whitespace_prefixed_echo_is_review_content(self):
+        for ch in ("\x0c", " ", "\t"):
+            self.assertTrue(chk.has_review_content("mutants-round-2.txt", f"{ch}REVIEWING: test @ {SHA_B}\nPASS\n"), repr(ch))
