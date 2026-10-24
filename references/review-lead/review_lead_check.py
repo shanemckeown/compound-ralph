@@ -685,8 +685,64 @@ ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*
 
 
 def echo_of(text):
-    m = ECHO_SHA.search(text)
-    return m.group(1).lower() if m else ""
+    """The commit a review echoes; "" when it echoes none, or two different ones (a second response
+    appended to the file): such a review is at no known tip (LUCY-e3opf)."""
+    shas = {m.group(1).lower() for m in ECHO_SHA.finditer(text)}
+    return shas.pop() if len(shas) == 1 else ""
+
+
+def current_tip(files):
+    """(sha, file) of the newest review, by the round in its name, then mtime."""
+    newest = max(files, key=lambda x: (round_of(x[0]), Path(x[0]).stat().st_mtime))
+    return echo_of(newest[2]), newest
+
+
+def tip_statuses(files, tip, rounds, sev, loc):
+    """{review path: {round: status}} from the prior entries naming sev + loc in one of `rounds`,
+    for every review of the current tip that has one."""
+    out = {}
+    for x in files:
+        if not same_commit(echo_of(x[2]), tip):
+            continue
+        prior = file_prior(x[0], x[2])
+        got = {r: prior[(r, sev, loc)] for r in rounds if (r, sev, loc) in prior}
+        if got:
+            out[x[0]] = got
+    return out
+
+
+def dispute(src, files):
+    """Why reviews of the current tip disagree on an earlier finding (one closes a round that raised
+    it, one keeps a round open), else None. Checked whatever the lead graded it (LUCY-e3opf)."""
+    loc = leading_loc(src)
+    tip = current_tip(files)[0] if files else ""
+    if not loc or not tip:
+        return None
+    rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
+    st = tip_statuses(files, tip, rounds, src[:2], loc)
+    closers = sorted(Path(k).name for k, v in st.items() if "closed" in v.values())
+    openers = sorted(Path(k).name for k, v in st.items() if "open" in v.values())
+    if closers and openers:
+        return (f"seats disagree at {tip[:10]} on {src[:2]} {loc}: {', '.join(closers)} close(s) it, "
+                f"{', '.join(openers)} keep(s) it open")
+    return None
+
+
+def orphan_open_priors(files):
+    """A prior entry marking an earlier finding open is a live finding: the review that raised it must
+    be an input, so the lead has to cover it. Checked on reviews of the current tip (all reviews when
+    the tip is unknown)."""
+    tip = current_tip(files)[0] if files else ""
+    errs = []
+    for x in files:
+        if tip and not same_commit(echo_of(x[2]), tip):
+            continue
+        for (r, sev, loc), st in file_prior(x[0], x[2]).items():
+            if st == "open" and not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
+                                                                    for o in y[1]) for y in files):
+                errs.append(f"{Path(x[0]).name} marks r{r} {sev} {loc} open, but no --verdict review of round "
+                            f"{r} raises it: pass that review so the lead covers the finding")
+    return errs
 
 
 def same_commit(a, b):
@@ -712,16 +768,14 @@ def fixed_errors(tag, f, src, files):
     source = next((x for x in files if src in x[1]), None)
     if source is None or source is later:
         return [f"{tag}: fixed_by must be a different review from the one that raised the finding"]
-    l_sha = ECHO_SHA.search(later[2])
+    b_ = echo_of(later[2])
     # Every input that raises it (not just the first) must be an older review of another commit.
-    if not l_sha:
-        return [f"{tag}: fixed_by {Path(later[0]).name} has no REVIEWING echo"]
-    b_ = l_sha.group(1).lower()
+    if not b_:
+        return [f"{tag}: fixed_by {Path(later[0]).name} has no single REVIEWING echo"]
     for x in files:
         if src not in x[1]:
             continue
-        x_sha = ECHO_SHA.search(x[2])
-        a_ = x_sha.group(1).lower() if x_sha else ""
+        a_ = echo_of(x[2])
         if x is later or not a_ or a_.startswith(b_) or b_.startswith(a_):
             return [f"{tag}: {Path(x[0]).name} raises it at the commit fixed_by reviewed (REVIEWING echoes): not fixed"]
         # Order by the round each name states (no _rN_ = round 1); mtime only breaks a tie, because
@@ -735,10 +789,10 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed needs the finding to start with its file:line"]
     # The current tip is what the newest review (by round, then mtime) reviewed. A confirmation of an
     # older commit says nothing about the code that would land.
-    newest = max(files, key=lambda x: (round_of(x[0]), Path(x[0]).stat().st_mtime))
-    tip = echo_of(newest[2])
+    tip, newest = current_tip(files)
     if not tip:
-        return [f"{tag}: the newest review {Path(newest[0]).name} has no REVIEWING echo: the current tip is unknown"]
+        return [f"{tag}: the newest review {Path(newest[0]).name} has no single REVIEWING echo: the current "
+                "tip is unknown"]
     if not same_commit(b_, tip):
         return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
                 f"(newest review {Path(newest[0]).name})"]
@@ -747,25 +801,16 @@ def fixed_errors(tag, f, src, files):
         for other in x[1]:
             if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
+    # Raised in several rounds: fixed_by must close every one of them.
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
-    status = {}
-    for x in at_tip:
-        prior = file_prior(x[0], x[2])
-        got = {prior[k] for k in ((r, sev, loc) for r in rounds) if k in prior}
-        if len(got) > 1:
-            return [f"{tag}: {Path(x[0]).name} marks {sev} {loc} both closed and open across rounds"]
-        if got:
-            status[x[0]] = got.pop()
-    ref = f"r{rounds[0]} {sev} {loc}"
-    if status.get(later[0]) != "closed":
-        return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry "
-                f"{{\"ref\": \"{ref}\", \"status\": \"closed\"}}"
-                + (" (it says open)" if status.get(later[0]) == "open" else "")
+    mine = tip_statuses(files, tip, rounds, sev, loc).get(later[0], {})
+    missing = [r for r in rounds if mine.get(r) != "closed"]
+    if missing:
+        refs = " and ".join(f"{{\"ref\": \"r{r} {sev} {loc}\", \"status\": \"closed\"}}" for r in missing)
+        return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry {refs}"
+                + (" (it says open)" if "open" in mine.values() else "")
                 + ": not fixed. Prose 'closed:' lines are not graded"]
-    disagree = sorted(Path(k).name for k, v in status.items() if v == "open")
-    if disagree:
-        f["_disputed"] = (f"seats disagree at {tip[:10]}: {Path(later[0]).name} closes {ref}, "
-                          f"{', '.join(disagree)} mark(s) it open")
+    f["_disputed"] = dispute(src, files)
     return []
 
 
@@ -796,6 +841,8 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
         if v == "fixed":
             errs += fixed_errors(tag, f, src, files)
             continue
+        if files and v != "act_on":
+            f["_disputed"] = dispute(src, files)
         protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
         f["_protected"] = protected
         dup = f["_duplicate_path"] = is_duplicate_path(f, src)
@@ -848,6 +895,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
     for line in seen:
         if line not in want:
             errs.append(f"lead lists a finding no reviewer made: {line[:100]}")
+    errs += orphan_open_priors(files or [])
     blocking = [f for f in items if f.get("verdict") == "act_on" and not f.get("_demoted")
                 and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True)]
     if len(blocking) > ACT_ON_CAP and not norm(lead.get("act_on_over_cap_reason") or ""):
@@ -909,10 +957,12 @@ def main(argv=None):
     consider = [f for f in items if f["verdict"] == "consider" and not f.get("_demoted")]
     # Protected items not fixed on this branch go to the orchestrator, never silently into a bead.
     # So does an unresolved H-D0 the branch added: a P2 duplicate path blocks landing (LUCY-fuu2h).
+    # An earlier finding one seat closes and another keeps open at the current tip is the orchestrator's
+    # call, whatever the lead graded it (LUCY-e3opf).
     def must_escalate(f):
-        return f.get("_protected") or (f.get("_duplicate_path") and f.get("pre_existing") is not True)
-    # A fix one seat closes and another marks open at the same tip is the orchestrator's call (LUCY-e3opf).
-    disputed = [f for f in items if f["verdict"] == "fixed" and f.get("_disputed")]
+        return (f.get("_protected") or f.get("_disputed")
+                or (f.get("_duplicate_path") and f.get("pre_existing") is not True))
+    disputed = [f for f in items if f["verdict"] in ("fixed", "noted", "dismissed") and f.get("_disputed")]
     escalate = [f for f in consider if must_escalate(f)] + \
                [f for f in out_of_scope if must_escalate(f)] + disputed
     cleared = {}
@@ -970,6 +1020,8 @@ def main(argv=None):
         why = f.get("reason") or f"{'pre-existing' if f.get('pre_existing') is True else 'scope lock'}: " \
                                  f"{f.get('follow_up')}"
         pat = f" [pattern: {f['pattern']}]" if f.get("pattern") else ""
+        if f.get("_disputed"):
+            why += f" | DISPUTED (escalated): {f['_disputed']}"
         if f.get("id") in cleared:
             why += f" | cleared by the orchestrator: {cleared[f['id']]}"
         rows.append(f"- **{label}**{pat}: {f['source_line']}\n  - reason: {why}")

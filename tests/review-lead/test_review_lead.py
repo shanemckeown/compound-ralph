@@ -1786,3 +1786,58 @@ class E3opfReal3bm73(unittest.TestCase):
         code, out = self.run_r4(lead)
         self.assertEqual(code, 1, out)
         self.assertIn("F5: REVIEW_3bm73_astra-xhigh_r4_2026-10-24.md raises P1", out)
+
+
+class E3opfOwnGateRound1(unittest.TestCase):
+    """Astra own-gate round 1 (24 Oct): four fail-open shapes in the first prior-array build."""
+    RAISE_R2 = ("P2", "lib/pay.ts:37 — retry charges twice — guard")
+
+    def test_raised_in_two_rounds_needs_both_closed(self):
+        lead = fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r3_c.md")
+        lead["findings"].append(dict(lead["findings"][0], id="F2"))
+        named = [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                 ("REVIEW_x_astra_r2_b.md", r2_file(prior=[], verdict="FAIL", findings=[self.RAISE_R2]), 2000)]
+        code, out = run_named(copy.deepcopy(lead), named + [
+            ("REVIEW_x_astra_r3_c.md", r2_file(prior=[(R1_REF, "closed")], sha=SHA_C), 3000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("r2 P2 lib/pay.ts:37", out)
+        code, out = run_named(lead, named + [
+            ("REVIEW_x_astra_r3_c.md", r2_file(prior=[(R1_REF, "closed"), ("r2 P2 lib/pay.ts:37", "closed")],
+                                               sha=SHA_C), 3000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=2", out)
+
+    def test_open_prior_without_its_raising_review_refused(self):
+        lead = fixed_lead(R1_SRC, "x")
+        lead["findings"] = []
+        code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md",
+                                      r2_file(prior=[(R1_REF, "open")], evidence="not rechecked at this tip"), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no --verdict review of round 1 raises it", out)
+        # A closed entry with its origin absent grades nothing and blocks nothing.
+        code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+
+    def test_disagreement_escalates_whatever_the_lead_graded(self):
+        src = "P2 lib/a.ts:3 — wrong total displayed — fix"
+        r1 = f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{src}\n"
+        ref = "r1 P2 lib/a.ts:3"
+        for grade in ({"verdict": "consider", "follow_up": "Total display", "reason": "owned by the totals epic"},
+                      {"verdict": "dismissed", "reason": "the total is recomputed on save anyway"}):
+            lead = fixed_lead(src, "x")
+            lead["findings"][0] = dict({"id": "F1", "source_line": src, "category": "user_facing",
+                                        "ordinary_use": "reception opens the bill on the desk PC",
+                                        "carve_out": True}, **grade)
+            code, out = run_named(lead, [
+                ("REVIEW_x_astra_a.md", r1, 1000),
+                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(ref, "closed")]), 2000),
+                ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(ref, "open")], evidence="total still wrong"), 2100)])
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1 FOLLOWUPS=0", out, grade)
+
+    def test_conflicting_echoes_in_the_newest_review_leave_the_tip_unknown(self):
+        r3 = f"REVIEWING: goal/x @ {SHA_B}\n" + r2_file(prior=[], sha=SHA_C)
+        code, out = run_r2(("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
+                           ("REVIEW_x_astra_r3_c.md", r3, 3000))
+        self.assertEqual(code, 1, out)
+        self.assertIn("no single REVIEWING echo", out)
