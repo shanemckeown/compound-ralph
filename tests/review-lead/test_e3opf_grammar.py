@@ -1168,3 +1168,32 @@ class D1OwnGateR1BuilderEvidenceByRound(unittest.TestCase):
     def test_whitespace_prefixed_echo_is_review_content(self):
         for ch in ("\x0c", " ", "\t"):
             self.assertTrue(chk.has_review_content("mutants-round-2.txt", f"{ch}REVIEWING: test @ {SHA_B}\nPASS\n"), repr(ch))
+
+
+class D1OwnGateR2BuilderEvidenceTakesItsRoundsCommit(unittest.TestCase):
+    """Own-gate r2 Opus :1172: an earlier-round survivor raised at the commit the newest round reviewed (a
+    no-new-commit re-review) is at the tip, as a seat raising it there is; one from a seatless round too."""
+    SURV = "P2 lib/pay.ts:37 — mutant survived: retry guard reverted — add a retry test"
+
+    def run_with(self, r1_sha, seatless=False):
+        files = [("mutants-round-1.txt", f"FAIL\n{self.SURV}\n", 1100),
+                 ("opus-h2h-round-2.md", r2_file(prior=[(REF, "closed")]), 2000)]
+        if not seatless:
+            files.insert(0, ("opus-h2h-round-1.md", f"REVIEWING: goal/x @ {r1_sha}\nPASS\nVERIFIED OK\n- tests\n", 1000))
+        return run_named(fixed_lead(self.SURV, "@D@/opus-h2h-round-2.md"), files)
+
+    def test_same_commit_earlier_round_survivor_refused(self):
+        code, out = self.run_with(SHA_B)
+        self.assertEqual(code, 1, out)
+        self.assertIn("mutants-round-1.txt (builder evidence) raises it at the current tip", out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_seatless_round_survivor_refused(self):
+        code, out = self.run_with(SHA_A, seatless=True)
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_other_commit_earlier_round_survivor_fixed(self):
+        code, out = self.run_with(SHA_A)
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)

@@ -1162,14 +1162,19 @@ def scheme_of(name):
 
 def builder_at_tip(x, files):
     """Builder evidence is echo-free (D1), so it is at the current tip by its round: the newest seat round or
-    later. Under the other naming scheme its round can't be compared, so it counts as at the tip (fails closed:
+    later, or an earlier round whose seats reviewed the tip (or that has none). Under the other naming scheme its round can't be compared, so it counts as at the tip (fails closed:
     its survivors veto, and it can't be an earlier raiser that a later review closes)."""
     newest = current_tip(files)[1]
     if is_builder_evidence(newest[0]):
         return True
     if scheme_of(x[0]) != scheme_of(newest[0]):
         return True
-    return (round_of(x[0]) or 0) >= (round_of(newest[0]) or 0)
+    if (round_of(x[0]) or 0) >= (round_of(newest[0]) or 0):
+        return True
+    # An earlier round: its commit is its round's. A seat of that round on the current tip (a no-new-commit
+    # re-review) puts it at the tip too; a round with no seat has no known commit (own-gate r2 Opus :1172).
+    mine = [y for y in review_seats(files) if round_of(y[0]) == round_of(x[0])]
+    return not mine or any(same_commit(echo_of(y[2]), echo_of(newest[2])) for y in mine)
 
 
 def fixed_errors(tag, f, src, files):
