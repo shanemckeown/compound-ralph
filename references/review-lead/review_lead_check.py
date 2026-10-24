@@ -135,17 +135,61 @@ VERDICT_DECL = re.compile(r"\bverdict\b[^\n]*?\b(PASS|FAIL)\b", re.I)
 SECTION = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?(HAZARDS|VERIFIED OK|UNVERIFIED)\b")
 # A later round's reviewer confirming an earlier finding fixed (LUCY-p4pjf, orchestrator 23 Oct), in its
 # VERIFIED OK section, exactly: "- r9 P3 lib/x.ts:37 closed: <how it was checked>".
-CONFIRM_FIXED = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+(?:-\d+)?)(?:\*\*)?\s+(?:closed|fixed|resolved):\s+"
-                           r"(?=\S)[^?]{8,}$", re.I)
-CONFIRM_NEGATION = re.compile(r"\b(not|no|never|but|however|yet|partial|partially|unable|cannot|"
-                              r"unconfirmed|unverified|untested|fails?|failed|broken|regressed|reopen\w*|"
-                              r"unresolved|outstanding|pending|intermittent\w*|flaky|sometimes)\b"
-                              r"|n't\b", re.I)
-# "still" / "remains" are adverse unless the state that follows is a passing one ("the control remains
-# green"); "removing the fix makes it fail" is mutant evidence, not a failing fix (LUCY-l1s6g d).
-CONFIRM_STATE = re.compile(r"\b(still|remains?|remaining)\b(?!\s+(?:green|passing|passes|pass|correct|clean|"
-                           r"intact|unchanged|closed|fixed|resolved)\b)", re.I)
+# The location may be a file with no line when the finding named one ("tests/x.test.tsx", LUCY-e3opf).
+CONFIRM_FIXED = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+([\w./\[\]-]*[/.][\w./\[\]-]*?(?::\d+(?:-\d+)?)?)"
+                           r"(?:\*\*)?\s+(?:closed|fixed|resolved):\s+(?=\S)[^?]{8,}$", re.I)
+# Adverse wording is a judgement on the finding, not any negative word in the evidence (LUCY-e3opf):
+# "tests confirm allergies do not populate", "restoring it caused the test to fail" and "no longer
+# defaults smoking" are how a closure reads. Checked a sentence at a time:
+#   - the first sentence opening on a non-closure ("not fixed", "but still ...", "partially");
+CONFIRM_LEAD = re.compile(r"^\W*(?:not|no(?!\s+longer)|never|but|however|yet|partial|partially|partly|unable|cannot|"
+                          r"can't|unconfirmed|unverified|untested|broken|regressed|reopen\w*|unresolved|outstanding|"
+                          r"pending\W*$|intermittent\w*|flaky|sometimes|still|open|only partly)\b"
+                          r"|^\W*fail(?:s|ed|ing)?\b(?!-)(?!\s+(?:fetch|read|request|response|get|load|refetch|call|"
+                          r"network|every|each|all)\b)",
+                          re.I)
+#   - hedges anywhere;
+CONFIRM_NEGATION = re.compile(r"\b(but|however|yet|partial|partially|partly|unconfirmed|unverified|untested|unfixed|"
+                              r"incomplete|regressed|reopen\w*|unresolved|outstanding|intermittent\w*|flaky|sometimes|"
+                              r"pending\s+(?:a\s+|the\s+)?(?:verification|review|confirmation|fix|deploy\w*|prod\w*|"
+                              r"check|re-?test\w*|landing)|(?:is|are|still|remains?)\s+pending)\b", re.I)
+#   - a negated status, or a test that does not catch the revert ("not fixed", "isn't verified",
+#     "does not fail without the guard", "did not run");
+CONFIRM_NEG_STATUS = re.compile(r"(?:\b(?:not|never)|n't)\b(?:\s+[\w-]+){0,3}?\s+(?:fixed|closed|resolved|"
+                                r"addressed|verified|confirmed|tested|checked|covered|run|ran|exercised|caught|catch\w*|"
+                                r"detect\w*|killed|kill|fail|fails|failed|work|works|working|hold|holds|match|matches|matched)\b"
+                                r"|\bnot\s+(?:what|true|the case|so|as (?:claimed|described|stated|expected))\b"
+                                r"|\b(?:unable to|cannot|can't|could not|couldn't)\s+(?:\w+\s+)?(?:verify|confirm|"
+                                r"test|run|check|exercise)\b", re.I)
+#   - "still" / "remains" followed by a bug state ("still reproduces", "remains broken", "still charges");
+#     a passing state ("the control remains green", "Medication remained empty") is evidence;
+CONFIRM_STATE = re.compile(r"\b(?:still|remains?|remaining)\b(?!\s+(?:green|passing|passes|pass|correct|clean|"
+                           r"intact|unchanged|closed|fixed|resolved|empty|blank|unset|absent|safe|showed|shows|"
+                           r"shown|reads?\s+as(?!\s+(?:broken|fail\w*|open|wrong|unfixed|stale|incorrect|buggy)\b))\b)", re.I)
+#   - "fails" / "failed" outside mutant evidence ("restoring the default failed its regression") and
+#     outside a failure the probe injected ("failed-fetch tests", "failed every GET").
+FAIL_WORD = re.compile(r"(?<!-)(?<!\ba )(?<!\ban )\bfail(?:s|ed|ing)?\b(?!-)(?!\s+(?:fetch|read|request|response|get|load|refetch|call|"
+                       r"network|every|each|all)\b)", re.I)
+THEN_FAIL = re.compile(r"\bthen\s+fail(?:s|ed)?\b", re.I)
+BROKEN = re.compile(r"\b(?:is|are|was|were|still|remains?|left)\s+broken\b", re.I)
 MUTANT_FAIL = re.compile(r"\bmakes?\s+(?:it|them)\s+fail\b", re.I)
+MUTANT_SENTENCE = re.compile(r"\b(?:restor(?:ing|ed)|remov(?:ing|ed)|revert\w*|replac(?:ing|ed)|mutat\w*|mutant\w*|"
+                             r"undo(?:ing)?|bypass(?:ing|ed)|"
+                             r"weaken\w*|without the (?:fix|guard|change|check))\b", re.I)
+# A revert that changes nothing: the test does not catch the finding.
+MUTANT_SURVIVED = re.compile(r"\bno (?:difference|change|effect)\b|\b(?:still|also|continues? to)\s+pass(?:es|ed)?\b"
+                             r"|\b(?:stays?|stayed|remains?|remained)\s+green\b", re.I)
+# A sentence pointing at a different finding the same file lists ("The cleared-answer defect remains
+# separately open above") is not about this one.
+SEPARATE_FINDING = re.compile(r"\b(?:separate(?:ly)?|distinct|different|another|other)\b.*"
+                              r"\b(?:above|below|reported|listed|raised|tracked)\b", re.I)
+# ... and only when it names that finding as such ("The distinct ... defect is reported above").
+FINDING_NOUN = re.compile(r"\b(?:defect|finding|issue|bug|problem)s?\b", re.I)
+THIS_FINDING = re.compile(r"\b(?:this|that|the same|our|my)\s+(?:\w+\s+)?(?:defect|finding|issue|bug|problem)\b|^\W*it\b", re.I)
+CAUGHT = re.compile(r"\b(?:killed|caught|red|fail(?:s|ed|ing)?)\b", re.I)
+FAILS_A_TEST = re.compile(r"\bfail(?:s|ed)?\s+(?:the|its|that|both|all|\d+|two|three|four)?\s*[\w\- ]{0,40}?"
+                          r"\b(?:tests?|assertions?|cells?|regressions?)\b", re.I)
+ABSENCE = re.compile(r"\bno\s+[\w.\-]+(?:\s+[\w.\-]+){0,2}\s+(?:remains?|remaining|left)\b", re.I)
 # "open" is adverse unless a named thing other than the finding is what stays open ("the held thread
 # now stays open", the fix's own behaviour). "stays open", "left open", "the bug is open" stay adverse.
 OPEN_SUBJECT = re.compile(r"\b([A-Za-z_]\w*)\s+(?:\([^)]*\)\s+)?(?:now\s+)?(?:is\s+|are\s+)?"
@@ -161,14 +205,51 @@ QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”|`[^`]*`")
 def adverse(tail):
     """True when the evidence tail of a 'closed:' line says the finding is not (fully) fixed."""
     t = MUTANT_FAIL.sub(" ", QUOTED.sub(" ", tail))
-    if CONFIRM_NEGATION.search(t) or CONFIRM_STATE.search(t):
+    # "no .cjs references remain" is absence evidence; an all-caps UNVERIFIED is a label being quoted.
+    t = re.sub(r"\bUNVERIFIED\b", " ", ABSENCE.sub(" ", t))
+    if CONFIRM_LEAD.match(t):
         return True
+    kept = []
+    for sentence in re.split(r"(?<=[.!])\s+", t.strip()):
+        mutant_before = False
+        for s in re.split(r"(?<=;)\s+", sentence):
+            if adverse_segment(s, kept, mutant_before):
+                return True
+            mutant_before = mutant_before or bool(MUTANT_SENTENCE.search(s))
+            kept.append(s)
+    t = " ".join(kept)
     for m in re.finditer(r"\bopen\b", t, re.I):
         clause = re.split(r"[;:,.]", t[:m.end()])[-1]
         subj = OPEN_SUBJECT.search(clause)
         if not subj or subj.end() != len(clause) or subj.group(1).lower() in FINDING_REFERENTS:
             return True
     return False
+
+
+def adverse_segment(s, kept, mutant_before):
+    """One sentence or ';' part of a closure tail; `kept` holds the parts before it."""
+    if CONFIRM_NEGATION.search(s) or CONFIRM_NEG_STATUS.search(s):
+        return True
+    if SEPARATE_FINDING.search(s) and FINDING_NOUN.search(s) and not THIS_FINDING.search(s):
+        return False  # "still" / "open" here describe the other finding the file lists
+    if CONFIRM_STATE.search(s) or BROKEN.search(s):
+        return True
+    marked = bool(MUTANT_SENTENCE.search(s))
+    # A revert that changes nothing ("no difference after reverting", "still passes") is a surviving
+    # mutant, unless the same sentence reports it killed; a control is judged in its own clause.
+    if marked and not CAUGHT.search(s) and any(MUTANT_SURVIVED.search(c) and not re.search(r"\bcontrols?\b", c, re.I)
+                                               for c in re.split(r",|\band\b", s)):
+        return True
+    prev = kept[-1] if kept else ""
+    if (MUTANT_SENTENCE.search(prev) and not CAUGHT.search(prev) and re.search(r"\bpass(?:es|ed)?\b", s, re.I)
+            and not CAUGHT.search(s) and any(re.search(r"\bpass(?:es|ed)?\b", c, re.I)
+                                             and not re.search(r"\bcontrols?\b", c, re.I)
+                                             for c in re.split(r",|\band\b", s))):
+        return True  # "The guard was removed. All regression tests pass."
+    # Mutant evidence runs on: "I mutated X. Three tests then fail." / "removing A fails the X test;
+    # dropping B fails the Y test".
+    mutant = marked or (MUTANT_SENTENCE.search(prev) and THEN_FAIL.search(s)) or (mutant_before and FAILS_A_TEST.search(s))
+    return bool(not mutant and FAIL_WORD.search(s))
 
 
 def is_confirmation(line):
@@ -302,7 +383,28 @@ def prose_match(line, mine, used):
         mw = set(re.findall(r"[a-z0-9_]{3,}", m.lower()))
         if words and mw and len(words & mw) / min(len(words), len(mw)) >= 0.8:
             return i
+    # A reworded block finding (LUCY-e3opf, 3bm73 r5: 0.71 overlap): the only unclaimed block finding
+    # with this severity and file:line set is the one, if it still shares a fair part of its wording
+    # (outside the locations), so a different finding at the same line stays refused.
+    # The block may drop a second location the prose cites as evidence: the leading one decides.
+    lead = finding_loc(c)
+    same = [i for i, m in enumerate(mine) if i not in used and m[:2] == c[:2] and lead
+            and finding_loc(m) == lead]
+    if len(same) == 1:
+        cw, mw = content_words(c), content_words(mine[same[0]])
+        if cw and mw and len(cw & mw) / min(len(cw), len(mw)) >= REWORD_OVERLAP:
+            return same[0]
     return None
+
+
+REWORD_OVERLAP = 0.4
+STOP_WORDS = {"the", "and", "for", "with", "that", "this", "from", "into", "then", "when", "are", "was", "its",
+              "has", "have", "but", "not", "fix", "any", "all", "one", "its", "his", "her", "their", "our"}
+
+
+def content_words(s):
+    """Words of a finding outside its file:line locations and common stop words."""
+    return set(re.findall(r"[a-z0-9_]{3,}", FILE_LINE.sub(" ", s).lower())) - STOP_WORDS
 
 
 def decl_words(lines):
@@ -615,6 +717,19 @@ def routed_out(f, scope_lock):
         f.get("pre_existing") is True or (scope_lock and f.get("in_scope") is False))
 
 
+LEAD_LOC = re.compile(r"^P[123]\s+([\w./\[\]-]*[/.][\w./\[\]-]*?(?::\d+(?:-\d+)?)?)(?=[\s,;]|$)")
+
+
+def finding_loc(src):
+    """Where a finding is: its leading path, with or without a line ("P3 tests/x.test.tsx — ..."),
+    else its first file:line (LUCY-e3opf)."""
+    m = LEAD_LOC.match(src)
+    if m and (":" in m.group(1) or not LOC.search(src) or "/" in m.group(1)):
+        return m.group(1)
+    loc = LOC.search(src)
+    return loc.group(0) if loc else None
+
+
 ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
 
 
@@ -654,21 +769,24 @@ def fixed_errors(tag, f, src, files):
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
     rnd = str(round_of(source[0]))
-    loc = LOC.search(src)
+    loc = finding_loc(src)
     if not loc:
         return [f"{tag}: fixed needs a file:line in the finding"]
     sev = src[:2]
+    if ":" not in loc and len({x for f_ in files if round_of(f_[0]) == round_of(source[0]) for x in f_[1]
+                               if x[:2] == sev and finding_loc(x) == loc}) > 1:
+        return [f"{tag}: round {rnd} has more than one {sev} at {loc} with no line: a confirmation "
+                "can't tell them apart; grade it from a review that names the line"]
     for other in later[1]:
-        o = LOC.search(other)
-        if other[:2] == sev and o and o.group(0) == loc.group(0):
-            return [f"{tag}: {Path(later[0]).name} raises {sev} at {loc.group(0)} again: not fixed"]
+        if other[:2] == sev and finding_loc(other) == loc:
+            return [f"{tag}: {Path(later[0]).name} raises {sev} at {loc} again: not fixed"]
     lines = later[2].splitlines()
     for i in verified_lines(lines):
         m = CONFIRM_FIXED.match(lines[i])
         if (m and is_confirmation(lines[i]) and m.group(1) == rnd and m.group(2).upper() == sev
-                and m.group(3) == loc.group(0)):
+                and m.group(3) == loc):
             return []
-    return [f"{tag}: {Path(later[0]).name} has no VERIFIED OK line '- r{rnd} {sev} {loc.group(0)} "
+    return [f"{tag}: {Path(later[0]).name} has no VERIFIED OK line '- r{rnd} {sev} {loc} "
             "closed: ...' confirming the fix"]
 
 
