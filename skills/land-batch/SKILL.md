@@ -75,7 +75,7 @@ reversal.
    review PASS for its exact tip lands automatically. **Every branch needs one, sensitive
    or not (LUCY-qymwm, 23 Oct):** a bead comment whose FIRST line is exactly
    `PASS @<tip>` AND an `Ops/reviews/REVIEW_*.md` with `Verdict: PASS` for that tip
-   (`independent_pass_for`; `~/.claude/scripts/review-gate.sh` writes both). Own-gate
+   (`independent_pass_for`; `scripts/review-gate.sh`, run via `~/.claude/.git/live/run-gate`, writes both). Own-gate
    prose never counts; an unreviewed `auto/*` branch stays held. This includes sensitive paths (money, tenancy, consent, auth); it gets a one-line
    "auto-landed sensitive paths" entry in the landing report. Stops that remain, each
    a report entry and never a question: red gate (tsc, lint, jest, pg lane, ratchet),
@@ -175,13 +175,13 @@ running LAND in the same FIFO. Before admission, for a non-dry LAND run only
 (SHIP, `--status` and `--dry-run` are not gated):
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/trains.py check   # always exit 0; --now/--reason are no-ops
+~/.claude/.git/live/run-gate skills/land-batch/bin/trains.py check   # always exit 0; --now/--reason are no-ops
 ~~~
 
 Record the printed JSON in the run evidence and the final
 report. A run already queued that should give
 way (a P0 lander behind it, or Shane says stop) yields with
-`python3 ~/.claude/skills/land-batch/bin/land-state.py withdraw <ticket-file-or-run-id> --run-id "$RUN_ID"`:
+`~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py withdraw <ticket-file-or-run-id> --run-id "$RUN_ID"`:
 it removes only that run's own ticket, logs it to `withdrawals.jsonl`, and marks the run
 withdrawn so its detached admission worker cannot re-queue or acquire (that worker exits 4
 with an empty `admission.json`). If the result says `"lock_held": true`, the run was
@@ -212,7 +212,7 @@ ADMISSION_EXIT="$EVIDENCE_DIR/admission.exit"
 ADMISSION_LOG="$EVIDENCE_DIR/admission.log"
 ADMISSION_PID="$EVIDENCE_DIR/admission.pid"
 nohup bash -o pipefail -c '
-  python3 ~/.claude/skills/land-batch/bin/land-state.py wait \
+  ~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py wait \
     --run-id "$1" --mode "$2" --claude-pid "$3" \
     --pid-start-time "$4" --session-id "$5" \
     --agent-view-name "$6" --stage preflight \
@@ -263,7 +263,7 @@ the normal, fast one-shot heartbeat and release calls below using that same
 Update heartbeat at every step boundary:
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/land-state.py heartbeat \
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py heartbeat \
   --run-id "$RUN_ID" --stage "<step>" --integration-branch "$INT" \
   --scratch-path "$SCRATCH" --evidence-dir "$EVIDENCE_DIR"
 ~~~
@@ -276,7 +276,7 @@ repo was supplied. Dead tickets are collected using the same rule. Do not
 release while waiting for selection, testing, QA, or deploy.
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/land-state.py release --run-id "$RUN_ID"
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py release --run-id "$RUN_ID"
 ~~~
 
 Release only during final cleanup. --status never takes a lock.
@@ -290,7 +290,7 @@ Release only during final cleanup. --status never takes a lock.
 git -C "$REPO" fetch origin main \
   '+refs/heads/goal/*:refs/remotes/origin/goal/*' --quiet
 LAND_BATCH_REF_SNAPSHOT=fetched-after-admission \
-  bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO" \
+  ~/.claude/.git/live/run-gate skills/land-batch/bin/discover.sh "$REPO" \
   > "$EVIDENCE_DIR/discover.json"
 BASE_SHA="$(jq -er '.base_sha' "$EVIDENCE_DIR/discover.json")"
 ~~~
@@ -299,7 +299,7 @@ Strict dry-run performs no fetch and uses the cached remote-tracking snapshot:
 
 ~~~bash
 DISCOVERY_JSON="$(LAND_BATCH_REF_SNAPSHOT=cached-remote-tracking \
-  bash ~/.claude/skills/land-batch/bin/discover.sh "$REPO")"
+  ~/.claude/.git/live/run-gate skills/land-batch/bin/discover.sh "$REPO")"
 ~~~
 
 Discovery never fetches or mutates refs itself. Verify `ref_snapshot.mode` in
@@ -358,7 +358,7 @@ After admission, and only outside dry-run, update a discovered fix branch while
 keeping discover.sh read-only:
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-fix-branch \
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py kickback-fix-branch \
   --original-branch "<presentation.original_branch>" \
   --fix-branch "<candidate.branch>"
 ~~~
@@ -405,7 +405,7 @@ SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-attempt-$LAND_ATTEMPT"
 git -C "$REPO" worktree add "$SCRATCH" -b "$INT" "$BASE_SHA"
 # Every land scratch gets node_modules before ANY commit: without it the prettier
 # pre-commit hook dies ENOENT on the first merge commit (LUCY-z3ykz.2).
-python3 ~/.claude/skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$SCRATCH" --repo "$REPO"
+~/.claude/.git/live/run-gate skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$SCRATCH" --repo "$REPO"
 ~~~
 
 Before the first merge, prove the pinned main baseline is green. Dependency
@@ -415,9 +415,9 @@ from the scratch root and strips inherited UPDATE_BASELINE/FILE_LENGTH_GROW_OK
 in check mode, so this cannot accidentally repair main drift:
 
 ~~~bash
-RATCHET_HELPER="$HOME/.claude/skills/land-batch/bin/file_length_ratchet.py"
+RATCHET_HELPER="skills/land-batch/bin/file_length_ratchet.py"  # run via run-gate (LUCY-wqn96)
 RATCHET_EXIT=0
-RATCHET_RESULT="$(python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+RATCHET_RESULT="$(~/.claude/.git/live/run-gate "$RATCHET_HELPER" check --repo "$SCRATCH" \
   --expected-head "$BASE_SHA" --evidence-dir "$EVIDENCE_DIR/ratchet-base")" || RATCHET_EXIT=$?
 BASE_RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || BASE_RATCHET_EVIDENCE=""
 if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$BASE_RATCHET_EVIDENCE" ] \
@@ -458,7 +458,7 @@ RATCHET_EVIDENCE="$EVIDENCE_DIR/ratchet-${BR//\//__}"
 SOURCE_REF="<candidate.source_ref>"
 SOURCE_SHA="<candidate.tip_sha>"
 if ! CURRENT_SOURCE_SHA="$(
-  ~/.claude/skills/land-batch/bin/verify-pinned-source.sh \
+  ~/.claude/.git/live/run-gate skills/land-batch/bin/verify-pinned-source.sh \
     "$REPO" "$SOURCE_REF" "$SOURCE_SHA"
 )"; then
   printf 'HELD source missing/moved; rediscover: %s\n' "$SOURCE_REF"
@@ -469,7 +469,7 @@ if ! git -C "$SCRATCH" merge --no-ff --no-verify "$SOURCE_SHA" \
   # Only a baseline-only conflict is mechanically resolvable here. The helper
   # inspects the COMPLETE unmerged list before changing anything.
   RATCHET_EXIT=0
-  RATCHET_RESULT="$(python3 "$RATCHET_HELPER" resolve-conflict --repo "$SCRATCH" \
+  RATCHET_RESULT="$(~/.claude/.git/live/run-gate "$RATCHET_HELPER" resolve-conflict --repo "$SCRATCH" \
     --evidence-dir "$RATCHET_EVIDENCE-conflict")" || RATCHET_EXIT=$?
   CONFLICT_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || CONFLICT_EVIDENCE=""
   if [ "$RATCHET_EXIT" -ne 0 ] || [ -z "$CONFLICT_EVIDENCE" ] \
@@ -500,7 +500,7 @@ per Hard guardrail 10, run the sensitive-file check before the scoped gate:
 
 ~~~bash
 SENSITIVE_MERGE_LOG="$EVIDENCE_DIR/sensitive-merge-check-$BR.log"
-if ! ~/.claude/skills/land-batch/bin/verify-sensitive-file-merge.sh \
+if ! ~/.claude/.git/live/run-gate skills/land-batch/bin/verify-sensitive-file-merge.sh \
   "$SCRATCH" "$MERGE_SHA" > "$SENSITIVE_MERGE_LOG" 2>&1; then
   cat "$SENSITIVE_MERGE_LOG"
   git -C "$SCRATCH" reset --hard "$MERGE_SHA^1"
@@ -525,7 +525,7 @@ and **before scoped gating or any push** (migration uses its separate block belo
 
 ~~~bash
 RATCHET_EXIT=0
-RATCHET_RESULT="$(python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
+RATCHET_RESULT="$(~/.claude/.git/live/run-gate "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
   --merge "$MERGE_SHA" --branch "$BR" --bead-id "$BEAD_ID" \
   --evidence-dir "$RATCHET_EVIDENCE")" || RATCHET_EXIT=$?
 RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || RATCHET_EVIDENCE=""
@@ -696,7 +696,7 @@ Builders and reviewers run targeted tests only (`/goal` runs `~/.claude/scripts/
 related suites only). This default LAND run is therefore where cross-branch breakage is
 caught before main moves (25 Sep: build 1aeebc99), so **nothing is pushed to main from
 LAND until the batch's push-time gates have passed on the exact tree being pushed.**
-Which gates run is decided by `~/.claude/scripts/risk_tier.py` from the combined batch
+Which gates run is decided by `scripts/risk_tier.py` from the combined batch
 diff, never by the agent: one full candidate makes the batch full.
 
 - **light** (every path UI/style/copy presentation, no sensitive keyword; CHANGELOG,
@@ -718,7 +718,7 @@ Compute and record the tier first; a missing or malformed tier file is red:
 ~~~bash
 PG_TREE_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
 TIER_JSON="$EVIDENCE_DIR/tier-$PG_TREE_SHA.json"
-python3 ~/.claude/skills/land-batch/bin/tier_gates.py plan \
+~/.claude/.git/live/run-gate skills/land-batch/bin/tier_gates.py plan \
   --scratch "$SCRATCH" --base "$BASE_SHA" --out "$TIER_JSON" || exit 1
 jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
 GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
@@ -751,7 +751,7 @@ then push, exactly the tree that was classified and tested:
 ~~~bash
 # The script, not this loop, decides: an empty gate list, a missing tsc, a full tier without
 # cloudbuild-full, a stale head or any missing/nonzero exit file all hold (LUCY-z3ykz.8).
-python3 ~/.claude/skills/land-batch/bin/tier_gates.py check \
+~/.claude/.git/live/run-gate skills/land-batch/bin/tier_gates.py check \
   --plan "$TIER_JSON" --head "${PG_TREE_SHA:-}" --evidence-dir "$EVIDENCE_DIR" \
   > "$EVIDENCE_DIR/push-check-${PG_TREE_SHA:-none}.txt"
 GATES_EXIT=$?
@@ -883,7 +883,7 @@ transaction reset/flag/break):
 
 ~~~bash
 RATCHET_EXIT=0
-RATCHET_RESULT="$(python3 "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
+RATCHET_RESULT="$(~/.claude/.git/live/run-gate "$RATCHET_HELPER" regenerate --repo "$SCRATCH" \
   --merge "$MERGE_SHA" --branch "$BR" --bead-id "$BEAD_ID" \
   --evidence-dir "$RATCHET_EVIDENCE")" || RATCHET_EXIT=$?
 RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || RATCHET_EVIDENCE=""
@@ -947,7 +947,7 @@ itself have suffered a clean-merge overwrite):
 ~~~bash
 MIGRATION_RECONCILE_JSON="$EVIDENCE_DIR/migration-reconcile.json"
 MIGRATION_RECONCILE_EXIT=0
-python3 ~/.claude/skills/land-batch/bin/migration_batch.py reconcile \
+~/.claude/.git/live/run-gate skills/land-batch/bin/migration_batch.py reconcile \
   --repo "$SCRATCH" --base-ref "$BASE_SHA" \
   --candidates "$MIGRATION_CANDIDATES_JSON" \
   > "$MIGRATION_RECONCILE_JSON" || MIGRATION_RECONCILE_EXIT="$?"
@@ -973,7 +973,7 @@ Now run the load-bearing gate before any migration batch push:
 
 ~~~bash
 MIGRATION_PROOF_JSON="$EVIDENCE_DIR/migration-proof.json"
-python3 ~/.claude/skills/land-batch/bin/migration_batch.py prove \
+~/.claude/.git/live/run-gate skills/land-batch/bin/migration_batch.py prove \
   --repo "$SCRATCH" --base-ref "$BASE_SHA" \
   --evidence "$MIGRATION_PROOF_JSON"
 jq -e '.valid == true and .scratch_database_from_empty == true
@@ -1003,7 +1003,7 @@ non-force fast-forward push:
 
 ~~~bash
 RATCHET_EXIT=0
-RATCHET_RESULT="$(python3 "$RATCHET_HELPER" check --repo "$SCRATCH" \
+RATCHET_RESULT="$(~/.claude/.git/live/run-gate "$RATCHET_HELPER" check --repo "$SCRATCH" \
   --expected-head "$RECONCILE_SHA" \
   --evidence-dir "$EVIDENCE_DIR/ratchet-migration-final")" || RATCHET_EXIT=$?
 FINAL_RATCHET_EVIDENCE="$(printf '%s\n' "$RATCHET_RESULT" | jq -er '.evidence_dir // empty')" || FINAL_RATCHET_EVIDENCE=""
@@ -1033,7 +1033,7 @@ ordinary /goal session that stops at a green, pushed feature branch.
 For each member of KICKBACKS, first call:
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-status
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py kickback-status
 ~~~
 
 It uses sessions.py's existing kill-0 plus PID-identity liveness contract and
@@ -1111,7 +1111,7 @@ jq -n \
     failure_summary:$failure_summary,signature:$signature,
     evidence_path:$evidence_path,dispatched_at:$dispatched_at}' \
   > "$KICKBACK_RECORD_JSON"
-python3 ~/.claude/skills/land-batch/bin/land-state.py kickback-record \
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py kickback-record \
   --original-branch "$BR" --record "$KICKBACK_RECORD_JSON"
 cd /Users/shane/Documents/GitReBase/AestheticcNext
 claude --bg --name "$KICKBACK_SESSION" "/goal $KICKBACK_BEAD"
@@ -1145,7 +1145,7 @@ plan from bead acceptance + the pinned source diff/stat. These plans are not QA
 evidence. Append them:
 
 ~~~bash
-python3 ~/.claude/skills/land-batch/bin/land-state.py ledger-append \
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py ledger-append \
   --record "$EVIDENCE_DIR/harvested-checks.json" \
   --checklist "$EVIDENCE_DIR/harvested-checks.md"
 ~~~
@@ -1258,7 +1258,7 @@ every command below runs inside an isolated worktree, never bare against
 ~~~bash
 FIX_SCRATCH="$REPO/.claude/worktrees/land-batch-$RUN_ID-fix$ITERATION"
 git -C "$REPO" worktree add "$FIX_SCRATCH" origin/main
-python3 ~/.claude/skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$FIX_SCRATCH" --repo "$REPO"
+~/.claude/.git/live/run-gate skills/land-batch/bin/tier_gates.py link-node-modules --scratch "$FIX_SCRATCH" --repo "$REPO"
 ~~~
 
 For p1/p2 run Codex directly inside `$FIX_SCRATCH`, scoped to offending files. If the feature's
@@ -1276,7 +1276,7 @@ then inside a fresh `$FIX_SCRATCH` off current origin/main:
 ~~~bash
 git -C "$FIX_SCRATCH" revert -m 1 "$MERGE_SHA" --no-edit
 git -C "$FIX_SCRATCH" push origin HEAD:main
-python3 ~/.claude/skills/land-batch/bin/land-state.py ledger-remove --merge-sha "$MERGE_SHA"
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py ledger-remove --merge-sha "$MERGE_SHA"
 ~~~
 
 Remove `$FIX_SCRATCH` (`git -C "$REPO" worktree remove "$FIX_SCRATCH" --force`)
@@ -1321,7 +1321,7 @@ On prod success, archive pre-reset state then reset ledger with prod SHA:
 
 ~~~bash
 PROD_SHA="$(git -C "$SCRATCH" rev-parse HEAD)"
-python3 ~/.claude/skills/land-batch/bin/land-state.py archive-ledger \
+~/.claude/.git/live/run-gate skills/land-batch/bin/land-state.py archive-ledger \
   --evidence-dir "$EVIDENCE_DIR" --prod-sha "$PROD_SHA"
 ~~~
 
@@ -1332,7 +1332,7 @@ This archives pending-qa.md and ledger.json in evidence before reset.
 /status runs:
 
 ~~~bash
-bash ~/.claude/skills/land-batch/bin/lock-status.sh
+~/.claude/.git/live/run-gate skills/land-batch/bin/lock-status.sh
 ~~~
 
 It never locks. It shows holder liveness/run/mode/stage/heartbeat age, complete

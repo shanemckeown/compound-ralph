@@ -44,8 +44,9 @@ HOME = os.path.expanduser("~")
 LEDGER = os.environ.get("GATE_LEDGER", os.path.join(HOME, "Documents/Obsidian/Aestheticc/Ops/GATE_LEDGER.jsonl"))
 CACHE = os.environ.get("GATE_WATCH_CACHE", os.path.join(HOME, ".claude/state/gate-watch-cache.json"))
 SWEEP = os.environ.get("GATE_WATCH_SWEEP", os.path.join(HOME, ".claude/scripts/unlanded-sweep.py"))
-ROLE = os.environ.get("GATE_WATCH_ROLE", os.path.join(HOME, ".claude/scripts/fleet-role.py"))
-SELF = os.path.abspath(__file__)
+# Gates run from the committed live export, never the checkout (LUCY-wqn96).
+RUN_GATE = os.path.join(HOME, ".claude/.git/live/run-gate")
+ROLE = os.environ.get("GATE_WATCH_ROLE")  # tests: a checker script run with this python
 OVERDUE_MIN = 60
 SHIFT_GRACE_MIN = 30
 CACHE_FRESH_S = 600
@@ -328,7 +329,7 @@ def render_block(items):
     lines = []
     if over:
         shane_n = sum(1 for i in items if i.get("audience", "shane") == "shane")
-        ask = f"python3 {os.path.join(HOME, '.claude/scripts/gate-watch.py')} ask <id>"
+        ask = f"{RUN_GATE} scripts/gate-watch.py ask <id>"
         lines += [f"RE-ASK SHANE NOW ({len(over)} overdue of {shane_n} waiting on him; threshold {OVERDUE_MIN} min since last ask)",
                   f"Put each question to Shane THIS turn: AskUserQuestion if he is present, otherwise write it to "
                   f"{LIVE_STATE} and send PushNotification. Then run `{ask}` for each so the clock resets "
@@ -413,7 +414,8 @@ def cmd_mutate(verb, gid, what=None, question=None, now=None, reason=None, until
 
 def is_orchestrator(session_id):
     try:
-        r = subprocess.run([sys.executable, ROLE, session_id, "--provider", "claude"], capture_output=True,
+        role = [sys.executable, ROLE] if ROLE else [RUN_GATE, "scripts/fleet-role.py"]
+        r = subprocess.run(role + [session_id, "--provider", "claude"], capture_output=True,
                            text=True, timeout=3)
         return r.returncode == 0
     except Exception:
@@ -428,7 +430,7 @@ def spawn_refresh():
             return
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         open(lock, "w").close()
-        subprocess.Popen([sys.executable, SELF, "--refresh"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        subprocess.Popen([RUN_GATE, "scripts/gate-watch.py", "--refresh"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
     except Exception:
         pass

@@ -6,7 +6,7 @@
     tier_gates.py check --plan FILE.json --head SHA --evidence-dir DIR   # push-time verdict
 
 `plan` diffs the combined batch tree (the scratch HEAD with every green merge) against the
-pinned base, classifies it with ~/.claude/scripts/risk_tier.py, and writes the tier, its
+pinned base, classifies it with scripts/risk_tier.py, and writes the tier, its
 reasons and the ordered push-time gate list to --out. The agent never picks the tier: the
 script does, from the paths. One full candidate makes the whole batch full, because the
 combined diff contains its paths.

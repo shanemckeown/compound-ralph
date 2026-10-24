@@ -322,10 +322,10 @@ if [ "$NEXT_INFO" != "NONE" ]; then
       python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
       ;;
     goal)
-      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ~/.claude/.git/live/run-gate scripts/fleet-dispatch.py "$NEXT" --pre-claimed
       ;;
     long-goal)
-      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ~/.claude/.git/live/run-gate scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
       ;;
   esac
   RC=$?

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """review_gate.py: the one sanctioned way to record an independent review PASS (LUCY-p4pjf).
 
-  ~/.claude/scripts/review-gate.sh <bead> <full-tip-sha> --lead lead-round-N.json \
+  ~/.claude/.git/live/run-gate scripts/review-gate.sh <bead> <full-tip-sha> --lead lead-round-N.json \
       --verdict ~/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_<...>.md [--verdict ...] \
       --out-dir "$EVIDENCE_DIR" --round N [--scope-lock] [--cleared-escalation F1 ...] [--dry-run]
 

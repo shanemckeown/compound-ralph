@@ -468,7 +468,7 @@ tree (`/land-batch`) and again in Cloud Build, serialised laptop-wide by
 `~/.claude/scripts/pg-lane-lock.py` (a second caller waits and logs). `/ship` still runs
 `npm test` (node + dom, no pg). The Cloud Build tarball check (`test:cloudbuild` steps #0
 and #3) runs once per landing batch whenever the batch's risk tier is full
-(`~/.claude/scripts/risk_tier.py`, LUCY-z3ykz.2), so builders do not need it; run
+(`scripts/risk_tier.py`, LUCY-z3ykz.2), so builders do not need it; run
 `npm run test:cloudbuild -- --step 0` yourself only to debug a test that reads a
 checked-in file or shells out to `git`.
 
@@ -668,7 +668,7 @@ add a round and cannot block**.
 Then gate it. The checker, not you, decides what you may act on:
 
 ```bash
-python3 ~/.claude/references/review-lead/review_lead_check.py \
+~/.claude/.git/live/run-gate references/review-lead/review_lead_check.py \
   --lead "$EVIDENCE_DIR/lead-round-N.json" \
   $( grep -qs "^fallback used" "$EVIDENCE_DIR/fallback-round-N.txt" \
        || echo --verdict "$EVIDENCE_DIR/astra-verdict-round-N.log" ) \
@@ -702,7 +702,7 @@ On exit 0 it writes, and you use **only** these:
 - **Recording the PASS (lead / orchestrator, after the independent review):** when the lead
   reads the `Ops/reviews` file, record its digest: `md5 -q <file> >> <out-dir>/review-file.md5`
   (the gate refuses without it, and refuses a file that changed since). Then run
-  `~/.claude/scripts/review-gate.sh <BEAD_ID> <full tip> --lead … --verdict <Ops/reviews file> …
+  `~/.claude/.git/live/run-gate scripts/review-gate.sh <BEAD_ID> <full tip> --lead … --verdict <Ops/reviews file> …
   --out-dir … --round N [--cleared-escalation F1]`. It runs this checker on the untouched reviewer
   files and, only on BLOCKING=0 ESCALATE=0, writes the `Ops/reviews` gate file and the
   `PASS @<tip>` comment the lander requires. Never hand-write either; a builder never runs it on
@@ -939,10 +939,10 @@ if [ "$NEXT_INFO" != "NONE" ]; then
       python3 ~/.claude/scripts/fleet-dispatch-codex.py dispatch "$NEXT" --pre-claimed "$NEXT_TOKEN"
       ;;
     goal)
-      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --pre-claimed
+      ~/.claude/.git/live/run-gate scripts/fleet-dispatch.py "$NEXT" --pre-claimed
       ;;
     long-goal)
-      python3 ~/.claude/scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
+      ~/.claude/.git/live/run-gate scripts/fleet-dispatch.py "$NEXT" --epic --pre-claimed
       ;;
   esac
   RC=$?

@@ -139,7 +139,7 @@ bd comment <id> "<PASS|FAIL> @<full tip sha>
 
 A FAIL comment in exactly that shape is the review's mirror, and `review-gate.sh` lets the review be gated after the lead's clearance. Any other FAIL, VOID or withdrawal comment on the tip vetoes it. A reviewer's raw `PASS @<tip>` line on its own never lands: `review-gate.sh` writes the landable pair.
 
-**Before acting on a FAIL**, run the review lead on it: a fresh-context Opus agent following `~/.claude/references/review-lead/LEAD.md`, gated by `review_lead_check.py` (the same step as /goal Phase 4, Step 4). Only its `lead-actions` file counts toward a re-dispatch. A FAIL whose lead output is BLOCKING=0 and ESCALATE=0 is landable, and its dismissals file goes in the bead comment. The PASS itself is recorded only by `~/.claude/scripts/review-gate.sh` (it writes the `Ops/reviews` gate file and the `PASS @<tip>` first-line comment the lander requires; see /goal Phase 4 Step 4).
+**Before acting on a FAIL**, run the review lead on it: a fresh-context Opus agent following `~/.claude/references/review-lead/LEAD.md`, gated by `review_lead_check.py` (the same step as /goal Phase 4, Step 4). Only its `lead-actions` file counts toward a re-dispatch. A FAIL whose lead output is BLOCKING=0 and ESCALATE=0 is landable, and its dismissals file goes in the bead comment. The PASS itself is recorded only by `~/.claude/.git/live/run-gate scripts/review-gate.sh` (it writes the `Ops/reviews` gate file and the `PASS @<tip>` first-line comment the lander requires; see /goal Phase 4 Step 4).
 
 **On FAIL**, the orchestrator writes `REFLECTION <date>: attempt N (tip <sha>)` before any re-dispatch. It covers:
 - **Preserve:** what was proven right
