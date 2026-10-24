@@ -1814,9 +1814,11 @@ class E3opfOwnGateRound1(unittest.TestCase):
                                       r2_file(prior=[(R1_REF, "open")], evidence="not rechecked at this tip"), 2000)])
         self.assertEqual(code, 1, out)
         self.assertIn("no --verdict review of round 1 raises it", out)
-        # A closed entry with its origin absent grades nothing and blocks nothing.
-        code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000)])
-        self.assertEqual(code, 0, out)
+        # Own-gate r3: a closed entry needs its origin too, or the finding drops out of coverage.
+        code, out = run_named(lead, [("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
+                                     ("REVIEW_x_astra_r3_c.md", r2_file(prior=[], sha=SHA_C), 3000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("marks r1 P2 lib/pay.ts:37 closed, but no --verdict review of round 1", out)
 
     def test_disagreement_escalates_whatever_the_lead_graded(self):
         src = "P2 lib/a.ts:3 — wrong total displayed — fix"
@@ -1904,3 +1906,25 @@ class E3opfOwnGateRound2(unittest.TestCase):
                            ("REVIEW_x_astra_r3_c.md", r3, 3000))
         self.assertEqual(code, 1, out)
         self.assertIn("no single REVIEWING echo", out)
+
+
+class E3opfOwnGateRound3(unittest.TestCase):
+    """Astra own-gate round 3 (24 Oct): duplicate JSON keys, a malformed echo in a non-newest seat."""
+
+    def test_duplicate_keys_in_a_block_refused(self):
+        for body in ('{"verdict": "PASS", "findings": [], "prior": [{"ref": "r1 P2 lib/pay.ts:37", "status": '
+                     '"open", "evidence": "checked at this tip"}], "prior": []}',
+                     '{"verdict": "PASS", "findings": [{"severity": "P1", "file_line": "lib/a.ts:3", "text": "x"}],'
+                     ' "findings": []}',
+                     '{"verdict": "PASS", "findings": [], "prior": [{"ref": "r1 P2 lib/pay.ts:37", "status": '
+                     '"open", "status": "closed", "evidence": "checked at this tip"}]}'):
+            with self.assertRaises(ValueError, msg=body):
+                parse_text(f"REVIEWING: goal/x @ {SHA_B}\nPASS\n```review-verdict\n{body}\n```\n")
+
+    def test_malformed_echo_in_any_seat_refused(self):
+        opus = r2_file(prior=[(R1_REF, "open")], evidence="retry still charges twice") + \
+            f"REVIEWING: goal/x @ {SHA_B}^\n"
+        code, out = run_r2(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                           ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2100))
+        self.assertEqual(code, 1, out)
+        self.assertIn("REVIEWING lines are malformed", out)
