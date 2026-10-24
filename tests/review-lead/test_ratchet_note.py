@@ -127,6 +127,30 @@ class RatchetNote(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertIn("ESCALATE=1", out, src)
 
+    def test_4d_round2_reproductions_escalate(self):
+        # Round-2 own-gate reproductions (Astra P1/P2, Opus P3 x3): allowed-looking words, fake paths,
+        # extensionless "counts", non-ASCII and meaning-flipping words all keep the backstop.
+        for src in (
+            f"P3 {T} — credit-service.ts 588/578; runtime count exceeds cap — cap the count",
+            f"P3 {T} — credit-service.ts 588/578; build/test:9 — regen",
+            f"P3 {T} — booking.slots 2/1 — regen",
+            f"P3 {T} — credit-service.ts 588/578; \u0434\u0432\u043e\u0439\u043d\u043e\u0435 \u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435 — regen",
+            f"P3 {T} — credit-service.ts 588/578; not a ratchet failure: the real clinic gate fails — regen",
+        ):
+            self.assertFalse(chk.ratchet_only(src), src)
+            code, out, files = self.run_one(lead_for(consider(src)), src)
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1", out, src)
+
+    def test_4e_honest_variants_still_exempt(self):
+        for src in (
+            f"P3 {T} — lib/services/credit-service.ts 588/578 — lander regen",
+            f"P3 **{T}** \u2013 credit-service.ts 588 / 578 lines — regenerate the baseline during landing",
+            f"P3 tests/meta/file-length-ratchet.test.ts:218-220 — file-length ratchet: pages/api/cron/x.ts is "
+            "109/105 lines — lander regenerates",
+        ):
+            self.assertTrue(chk.ratchet_only(src), src)
+
     def test_4c_only_a_p3_is_exempt(self):
         src = f"P2 {T} — lib/services/credit-service.ts 588/578 — regenerate the baseline during landing"
         self.assertFalse(chk.ratchet_only(src))

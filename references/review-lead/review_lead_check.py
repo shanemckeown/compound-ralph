@@ -119,28 +119,28 @@ PROTECTED = re.compile(
 )
 # The file-length ratchet names the files it counts, and the lander regenerates its baseline, so a credit or
 # cron file name must not make it protected (LUCY-mz6fk). Exempt from the keyword backstop by SHAPE only: a P3
-# declared at the ratchet test, every other path in "<path> [is] N/M [lines]" count form, and every word left
-# once those are removed from the ratchet vocabulary below. Anything else (a behaviour claim, another path)
-# keeps the backstop. A protected category still wins.
+# declared at the ratchet test whose text, once its "<source file> [is] N/M [lines]" counts and the fixed
+# phrases below are removed, is only punctuation and RATCHET_WORDS. No word bag can say anything about money,
+# booking, sends or tenancy; anything else (a claim, another path, a digit, non-ASCII) keeps the backstop.
+# A protected category still wins.
 RATCHET_TEST = "tests/meta/file-length-ratchet.test.ts"
-RATCHET_COUNT = re.compile(r"(?<![\w./\[\]-])[\w./\[\]-]*[A-Za-z_][\w./\[\]-]*\.[A-Za-z]{1,5}"
+RATCHET_COUNT = re.compile(r"(?<![\w./\[\]-])[\w./\[\]-]*[A-Za-z_][\w./\[\]-]*\.(?:tsx?|jsx?|mjs|cjs|py|sh|sql|css)"
                            r"\s+(?:is\s+)?\d+\s*/\s*\d+(?:\s+lines?)?(?![\w/])")
-RATCHET_WORDS = frozenset("""
-    a an the and or of for to by as at on in is are this these its it no not only still
-    file files length file-length ratchet baseline regenerate regenerates regenerated regen lander lander's
-    lander-owned landing land during after line lines count counts over above exceeds exceeded grows grew limit
-    limits cap build build-gate gate failure fails fail failing test meta real clinic scenario hygiene
-    explicitly assigned bead bead's comments comment per owned branch branches touch leave left runtime effect
-""".split())
+RATCHET_PHRASES = re.compile(r"\bno (?:real )?clinic scenario\b|\bno runtime effect\b|\bbuild[- ]gate failure\b"
+                             r"|\bbuild hygiene\b|\bfile[- ]length ratchet\b"
+                             r"|\bas explicitly assigned in the bead['\u2019]s comments\b", re.I)
+RATCHET_WORDS = frozenset("a an the and of for in is as during ratchet baseline regenerate regenerates regenerated regen "
+                          "lander lander's landing line lines".split())
 
 
 def ratchet_only(src):
     loc = leading_loc(src)
     if not src.startswith("P3") or not loc or loc.rsplit(":", 1)[0] != RATCHET_TEST:
         return False
-    rest = RATCHET_COUNT.sub(" ", src[3:].replace(loc, " ", 1))
-    words = re.findall(r"[a-z]+(?:[-'][a-z]+)*", rest.lower().replace("\u2019", "'"))
-    return all(w in RATCHET_WORDS for w in words)
+    rest = RATCHET_PHRASES.sub(" ", RATCHET_COUNT.sub(" ", src[3:].replace(loc, " ", 1)))
+    if not re.fullmatch(r"[A-Za-z'\u2019\s,;:.()`*_\u2013\u2014-]*", rest):
+        return False
+    return all(w in RATCHET_WORDS for w in re.findall(r"[a-z]+(?:['\u2019][a-z]+)?", rest.lower().replace("\u2019", "'")))
 
 
 FINDING = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(P[123])(?:\*\*)?[\s:]+\S+.*$")
