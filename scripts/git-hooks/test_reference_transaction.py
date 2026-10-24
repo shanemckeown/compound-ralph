@@ -7,6 +7,7 @@ Run: ~/.claude/skills/land-batch/.venv/bin/python3 -m pytest scripts/git-hooks/ 
 """
 import importlib.machinery
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -932,3 +933,61 @@ def test_l5_detector_catches_checkout_paths():
     assert checkout_gate_refs("python3 ~/.claude/skills/land-batch/bin/land-state.py wait")
     assert not checkout_gate_refs("~/.claude/.git/live/run-gate references/review-lead/review_gate.py")
     assert not checkout_gate_refs("python3 ~/.claude/scripts/gated-test-run.py jest")
+
+
+# Round 6 (lead action): node hooks route through run-gate too
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_l3_run_gate_runs_node_entries_from_the_export(repo):
+    repo.write("hooks/jev-x/hook.mjs", textwrap.dedent("""\
+        import { WHO } from "../jev-common/who.mjs";
+        console.log(WHO, process.argv.slice(2).join(","));
+    """))
+    repo.write("hooks/jev-common/who.mjs", 'export const WHO = "committed";\n')
+    repo.git("add", "hooks")
+    repo.git("commit", "-q", "-m", "node hook")  # human
+    repo.write("hooks/jev-common/who.mjs", 'export const WHO = "tampered";\n')
+    res = repo.gate("--fail-exit", "2", "hooks/jev-x/hook.mjs", "a")
+    assert res.returncode == 0 and res.stdout == "committed a\n", res.stderr
+
+
+def load_patch_maker():
+    loader = importlib.machinery.SourceFileLoader(
+        "make_settings_patch", os.path.join(HOOKS_DIR, "make-settings-patch.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+LIVE_REPO = os.path.expanduser("~/.claude")
+LIVE_SETTINGS = os.path.join(LIVE_REPO, "settings.json")
+
+
+@pytest.mark.skipif(not os.path.isfile(LIVE_SETTINGS), reason="no live ~/.claude/settings.json")
+def test_l5_patched_live_settings_route_every_committed_gate_hook(tmp_path):
+    """Every hook command in the live settings that runs a gate file committed on main goes
+    through run-gate once the patch is applied; the rest are named in the patch header."""
+    with open(os.path.join(HOOKS_DIR, "settings-live.patch"), encoding="utf-8") as fh:
+        patch = fh.read()
+    settings = LIVE_SETTINGS
+    if "/.git/live/run-gate" not in open(LIVE_SETTINGS).read():
+        (tmp_path / "settings.json").write_text(open(LIVE_SETTINGS).read())
+        res = subprocess.run(["patch", "-s", "-p1", "-d", str(tmp_path)], input=patch, text=True,
+                             capture_output=True)
+        assert res.returncode == 0, "settings-live.patch no longer applies; regenerate it with " \
+                                    "make-settings-patch.py: " + res.stdout + res.stderr
+        settings = str(tmp_path / "settings.json")
+    maker, hook = load_patch_maker(), load_hook()
+    committed = set(subprocess.run(["git", "-C", LIVE_REPO, "ls-tree", "-r", "--name-only", "main"],
+                                   capture_output=True, text=True).stdout.splitlines())
+    pattern = maker.command_re(LIVE_REPO)
+    unrouted = []
+    for matchers in json.load(open(settings)).get("hooks", {}).values():
+        for matcher in matchers:
+            for h in matcher.get("hooks", []):
+                m = pattern.fullmatch(h.get("command", ""))
+                if m and hook.is_gate_path(m.group(1)) and not m.group(1).startswith(".git/live/"):
+                    unrouted.append((m.group(1), h["command"]))
+    assert [c for rel, c in unrouted if rel in committed] == []
+    for rel, cmd in unrouted:
+        assert cmd in patch.split("--- a/settings.json")[0], cmd

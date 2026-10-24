@@ -2,15 +2,16 @@ settings-live.patch (LUCY-wqn96 L4): route settings.json hook commands through t
 
 Apply ONLY after scripts/git-hooks/install.sh has run (run-gate must exist):
   patch -p1 -d ~/.claude < ~/.claude/scripts/git-hooks/settings-live.patch
-Generated 2026-10-24T18:12Z against the LIVE ~/.claude/settings.json, which differs
-from committed main (uncommitted edits by other sessions). Re-generate if it no longer applies.
+Generated 2026-10-24T18:45Z by scripts/git-hooks/make-settings-patch.py against the LIVE settings.json
+(it may differ from committed main). If it no longer applies, regenerate it:
+  python3 ~/.claude/scripts/git-hooks/make-settings-patch.py > /tmp/settings-live.patch
 
 - PreToolUse guards get --fail-exit 2: Claude Code blocks on exit 2 and only warns on any
   other code, so a drifted export must block, not wave the tool through.
-- Left on the checkout path, because main has no committed copy to export (commit them first,
-  then route them the same way): hooks/lucy-persona-sessionstart.sh (SessionStart),
-  hooks/build-submit-guard.py (PreToolUse).
-- skills/gstack/.../timeline-stop-hook is not a gate path and is unchanged.
+- Left on the checkout path, because main has no committed copy to export (commit them
+  first, then regenerate):
+    SessionStart: /Users/shane/.claude/hooks/lucy-persona-sessionstart.sh
+    PreToolUse: /Users/shane/.claude/hooks/build-submit-guard.py
 
 --- a/settings.json
 +++ b/settings.json
@@ -35,38 +36,59 @@ from committed main (uncommitted edits by other sessions). Re-generate if it no 
              "statusMessage": "Fleet role check..."
            }
          ]
-@@ -73,7 +73,7 @@
+@@ -73,31 +73,31 @@
          "hooks": [
            {
              "type": "command",
 -            "command": "/Users/shane/.claude/hooks/agentview-name-session.py"
-+            "command": "/Users/shane/.claude/.git/live/run-gate hooks/agentview-name-session.py"
-           }
-         ]
-       },
-@@ -81,7 +81,7 @@
-         "hooks": [
-           {
-             "type": "command",
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
 -            "command": "/Users/shane/.claude/hooks/observer.sh"
-+            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh"
-           }
-         ]
-       },
-@@ -89,7 +89,7 @@
-         "hooks": [
-           {
-             "type": "command",
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
 -            "command": "/Users/shane/.claude/hooks/voice-check.sh"
-+            "command": "/Users/shane/.claude/.git/live/run-gate hooks/voice-check.sh"
-           }
-         ]
-       },
-@@ -97,7 +97,7 @@
-         "hooks": [
-           {
-             "type": "command",
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
 -            "command": "python3 /Users/shane/.claude/scripts/gate-watch.py --hook",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/agentview-name-session.py"
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh"
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/voice-check.sh"
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
 +            "command": "/Users/shane/.claude/.git/live/run-gate scripts/gate-watch.py --hook",
              "timeout": 5
            }
@@ -98,22 +120,38 @@ from committed main (uncommitted edits by other sessions). Re-generate if it no 
              "statusMessage": "Gmail thread guard\u2026"
            }
          ]
-@@ -139,7 +139,7 @@
+@@ -139,15 +139,15 @@
          "hooks": [
            {
              "type": "command",
 -            "command": "/Users/shane/.claude/hooks/observer.sh"
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "/Users/shane/.claude/hooks/gbrain-ingest/stop-hook.sh",
 +            "command": "/Users/shane/.claude/.git/live/run-gate hooks/observer.sh"
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/gbrain-ingest/stop-hook.sh",
+             "async": true
            }
          ]
-       },
-@@ -147,7 +147,7 @@
+@@ -165,7 +165,7 @@
          "hooks": [
            {
              "type": "command",
--            "command": "/Users/shane/.claude/hooks/gbrain-ingest/stop-hook.sh",
-+            "command": "/Users/shane/.claude/.git/live/run-gate hooks/gbrain-ingest/stop-hook.sh",
-             "async": true
+-            "command": "node /Users/shane/.claude/hooks/jev-stop-verify/hook.mjs",
++            "command": "/Users/shane/.claude/.git/live/run-gate hooks/jev-stop-verify/hook.mjs",
+             "timeout": 25
            }
          ]
 @@ -177,7 +177,7 @@
@@ -150,5 +188,14 @@ from committed main (uncommitted edits by other sessions). Re-generate if it no 
 -            "command": "/Users/shane/.claude/hooks/ask-guard.py",
 +            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/ask-guard.py",
              "timeout": 10
+           }
+         ]
+@@ -217,7 +217,7 @@
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "node /Users/shane/.claude/hooks/jev-draft-check/hook.mjs",
++            "command": "/Users/shane/.claude/.git/live/run-gate --fail-exit 2 hooks/jev-draft-check/hook.mjs",
+             "timeout": 15
            }
          ]

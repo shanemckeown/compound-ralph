@@ -12,8 +12,8 @@ finds its repo from its own location, then refuses (exit 3, or N with --fail-exi
     (GATE_PATHS is read from the installed hook, the one definition), and
   - <relpath> is one of those files.
 Then it execs the exported file with the caller's cwd: a .py entry as python3 -I with its
-own dir on sys.path (so sibling imports resolve inside the export), anything else by its
-shebang, or bash for a non-executable .sh.
+own dir on sys.path (so sibling imports resolve inside the export), a .mjs/.cjs/.js entry
+with node, anything else by its shebang, or bash for a non-executable .sh.
 
 Claude Code treats a hook exit of 2 as blocking and any other non-zero as a warning, so a
 PreToolUse guard routed through this passes --fail-exit 2 to fail closed.
@@ -112,6 +112,8 @@ def main(argv):
     args = argv[1:]
     if rel.endswith(".py"):
         cmd = [sys.executable, "-I", "-c", PY_BOOT, entry] + args
+    elif rel.endswith((".mjs", ".cjs", ".js")):
+        cmd = ["node", entry] + args
     elif os.access(entry, os.X_OK):
         cmd = [entry] + args
     elif rel.endswith(".sh"):
