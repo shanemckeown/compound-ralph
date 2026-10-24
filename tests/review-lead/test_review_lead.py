@@ -1841,3 +1841,66 @@ class E3opfOwnGateRound1(unittest.TestCase):
                            ("REVIEW_x_astra_r3_c.md", r3, 3000))
         self.assertEqual(code, 1, out)
         self.assertIn("no single REVIEWING echo", out)
+
+
+class E3opfOwnGateRound2(unittest.TestCase):
+    """Astra own-gate round 2 (24 Oct): five more fail-open shapes."""
+    SRC = "P2 lib/a.ts:3 — wrong total displayed — fix"
+    REF = "r1 P2 lib/a.ts:3"
+
+    def disputed_run(self, grade, extra=()):
+        lead = fixed_lead(self.SRC, "x")
+        lead["findings"][0] = dict({"id": "F1", "source_line": self.SRC, "category": "user_facing",
+                                    "clinic_scenario": "reception opens the bill on the desk PC",
+                                    "demonstrated": "seat reproduced"}, **grade)
+        lead["scope_lock"] = "--scope-lock" in extra
+        return run_named(lead, [
+            ("REVIEW_x_astra_a.md", f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{self.SRC}\n", 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(self.REF, "closed")]), 2000),
+            ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(self.REF, "open")], evidence="total still wrong"), 2100)],
+            extra=list(extra))
+
+    def test_open_prior_in_an_older_review_needs_its_origin(self):
+        lead = fixed_lead(R1_SRC, "x")
+        lead["findings"] = []
+        code, out = run_named(lead, [
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "open")], evidence="not fixed at B"), 2000),
+            ("REVIEW_x_astra_r3_c.md", r2_file(prior=[], sha=SHA_C), 3000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no --verdict review of round 1 raises it", out)
+
+    def test_open_in_an_earlier_block_survives_a_later_block(self):
+        opus = (r2_file(prior=[(R1_REF, "open")], evidence="retry still charges twice")
+                + "Second answer.\n" + prior_block("PASS", (), []))
+        code, out = run_r2(("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
+                           ("REVIEW_x_opus_r2_b.md", opus, 2100))
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
+        contradictory = (r2_file(prior=[(R1_REF, "open")], evidence="retry still charges twice")
+                         + prior_block("PASS", (), [(R1_REF, "closed")]))
+        with self.assertRaises(ValueError):
+            parse_text(contradictory)
+
+    def test_routed_out_act_on_dispute_escalates(self):
+        for grade, extra in (({"verdict": "act_on", "in_scope": False, "follow_up": "Totals"}, ("--scope-lock",)),
+                             ({"verdict": "act_on", "pre_existing": True, "follow_up": "Totals"}, ())):
+            code, out = self.disputed_run(grade, extra)
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1 FOLLOWUPS=0", out, grade)
+
+    def test_disputed_finding_is_never_demoted(self):
+        code, out = self.disputed_run({"verdict": "consider", "category": "other", "carve_out": False,
+                                       "ordinary_use": "none: deliberately crafted synthetic input",
+                                       "reason": "synthetic only", "follow_up": "Totals"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("P4=0", out)
+
+    def test_malformed_second_echo_leaves_the_tip_unknown(self):
+        r3 = f"REVIEWING: goal/x @ {SHA_B}\n" + r2_file(prior=[]).replace(
+            f"REVIEWING: goal/x @ {SHA_B}", f"REVIEWING: goal/x @ {SHA_C}^")
+        code, out = run_r2(("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
+                           ("REVIEW_x_astra_r3_c.md", r3, 3000))
+        self.assertEqual(code, 1, out)
+        self.assertIn("no single REVIEWING echo", out)

@@ -411,9 +411,16 @@ def structured_prior(p, data):
 
 
 def file_prior(p, text):
-    """The prior entries of a file's last review-verdict block; {} for a file without one."""
-    blocks = list(STRUCTURED.finditer(text))
-    return structured_prior(p, json.loads(blocks[-1].group(1))) if blocks else {}
+    """The prior entries of every review-verdict block in a file, merged; {} for a file without one.
+    One ref marked closed in one block and open in another refuses the file: a later block never
+    silently drops an earlier "open"."""
+    out = {}
+    for b in STRUCTURED.finditer(text):
+        for key, status in structured_prior(p, json.loads(b.group(1))).items():
+            if out.get(key, status) != status:
+                raise ValueError(f"{p}: review-verdict blocks mark r{key[0]} {key[1]} {key[2]} both closed and open")
+            out[key] = status
+    return out
 
 
 def check_summary_counts(p, lines, mine):
@@ -451,6 +458,7 @@ def reviewer_findings(paths):
                     raise ValueError(f"{p}: verdict content after the last review-verdict block: "
                                      f"{line.strip()[:100]}")
             mine = structured_findings(p, blocks[-1].group(1))
+            file_prior(p, text)
             check_summary_counts(p, trailing, mine)
             # The final response before the block (from its last REVIEWING echo, else the file
             # start) must agree with it: same verdict word, no finding the block leaves out, and
@@ -669,7 +677,7 @@ def is_carve_out(f, protected):
 def triage_ordinary_use(f, protected):
     """Mark an act_on / consider finding `_demoted` (P4 note) when it has no ordinary-use path
     and is not in the carve-out. Dismissed / noted items are already non-blocking."""
-    f["_carve_out"] = is_carve_out(f, protected) or f.get("_duplicate_path") is True
+    f["_carve_out"] = is_carve_out(f, protected) or f.get("_duplicate_path") is True or bool(f.get("_disputed"))
     f["_demoted"] = (f.get("verdict") in ("act_on", "consider") and not f["_carve_out"]
                      and not has_ordinary_use(f))
     return f["_demoted"]
@@ -687,7 +695,10 @@ ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*
 def echo_of(text):
     """The commit a review echoes; "" when it echoes none, or two different ones (a second response
     appended to the file): such a review is at no known tip (LUCY-e3opf)."""
-    shas = {m.group(1).lower() for m in ECHO_SHA.finditer(text)}
+    echoes = list(ECHO_SHA.finditer(text))
+    if len(echoes) != len(re.findall(r"(?m)^\s*REVIEWING:.*$", text)):
+        return ""  # a REVIEWING line that is not "<branch> @ <bare sha>" (e.g. "@ <sha>^")
+    shas = {m.group(1).lower() for m in echoes}
     return shas.pop() if len(shas) == 1 else ""
 
 
@@ -730,13 +741,9 @@ def dispute(src, files):
 
 def orphan_open_priors(files):
     """A prior entry marking an earlier finding open is a live finding: the review that raised it must
-    be an input, so the lead has to cover it. Checked on reviews of the current tip (all reviews when
-    the tip is unknown)."""
-    tip = current_tip(files)[0] if files else ""
+    be an input, so the lead has to cover it. Checked on every input review."""
     errs = []
     for x in files:
-        if tip and not same_commit(echo_of(x[2]), tip):
-            continue
         for (r, sev, loc), st in file_prior(x[0], x[2]).items():
             if st == "open" and not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
                                                                     for o in y[1]) for y in files):
@@ -841,7 +848,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
         if v == "fixed":
             errs += fixed_errors(tag, f, src, files)
             continue
-        if files and v != "act_on":
+        if files:
             f["_disputed"] = dispute(src, files)
         protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
         f["_protected"] = protected
