@@ -13,7 +13,10 @@ $CODEX_THREAD_ID. No agent id at all = a human terminal = allowed (Shane's escap
 hatch). fleet-role failing or hanging with an agent id set = refused (fail closed).
 A FLEET_ROLE env var is never trusted.
 
-Installed by the orchestrator (symlink from .git/hooks), never by a worker.
+Installed by the orchestrator, never by a worker. Prefer a copy in .git/hooks over a
+symlink into the working tree: a symlinked hook (and fleet-role.py, which is read from
+the working tree either way) runs whatever uncommitted edit sits there, so a buggy
+in-progress edit to the guard could pass its own commit.
 """
 import os
 import subprocess
@@ -67,27 +70,41 @@ def changed_paths(old, new):
         cur = git("rev-parse", "--verify", "-q", MAIN_REF + "^{commit}")
         old = cur.stdout.strip() if cur.returncode == 0 else ZERO
     if old == ZERO:
-        out = git("ls-tree", "-r", "--name-only", new)
+        out = git("ls-tree", "-r", "-z", "--name-only", new)
     else:
-        out = git("diff", "--name-only", "--no-renames", old, new)
+        out = git("diff", "-z", "--name-only", "--no-renames", old, new)
     if out.returncode != 0:
         return None
-    return [p for p in out.stdout.splitlines() if p]
+    # -z: unquoted names, so "hooks/résumé.py" still starts with "hooks/".
+    return [p for p in out.stdout.split("\0") if p]
 
 
-def caller_role():
-    """'human', 'orchestrator', or 'sub' (any doubt is 'sub')."""
-    agent_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
-    if not agent_id:
-        return "human"
+def is_orchestrator(agent_id, provider):
     try:
         res = subprocess.run(
-            [sys.executable, FLEET_ROLE_BIN, agent_id],
+            [sys.executable, FLEET_ROLE_BIN, agent_id, "--provider", provider],
             capture_output=True, text=True, timeout=FLEET_ROLE_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError):
-        return "sub"
-    return "orchestrator" if res.returncode == 0 else "sub"
+        return False
+    return res.returncode == 0
+
+
+def caller_role():
+    """'human', 'orchestrator', or 'sub' (any doubt is 'sub').
+
+    Every agent id in the environment must be the orchestrator: a Codex worker launched
+    from the Claude orchestrator inherits its CLAUDE_CODE_SESSION_ID, and must not pass
+    as it. Only one session holds the role, so carrying both ids means 'sub'.
+    """
+    ids = [(os.environ.get(var), provider) for var, provider in
+           (("CLAUDE_CODE_SESSION_ID", "claude"), ("CODEX_THREAD_ID", "codex"))]
+    ids = [(agent_id, provider) for agent_id, provider in ids if agent_id]
+    if not ids:
+        return "human"
+    if all(is_orchestrator(agent_id, provider) for agent_id, provider in ids):
+        return "orchestrator"
+    return "sub"
 
 
 def main():

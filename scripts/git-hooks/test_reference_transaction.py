@@ -53,6 +53,7 @@ class Repo:
     def set_role(self, role):
         body = {
             "orchestrator": "print('ORCHESTRATOR'); sys.exit(0)",
+            "claude-orchestrator": "sys.exit(0 if sys.argv[-1] == 'claude' else 1)",
             "sub": "print('SUB'); sys.exit(1)",
             "error": "sys.exit(2)",
             "hang": "time.sleep(30)",
@@ -231,6 +232,46 @@ def test_codex_thread_id_is_an_agent(repo):
     repo.as_agent("CODEX_THREAD_ID")
     before = repo.rev("main")
     assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
+
+
+def test_identity_passes_provider(repo):
+    repo.as_agent()
+    repo.commit(GATE_FILE, "bad\n")
+    assert repo.seen.read_text().split() == [AGENT_ID, "--provider", "claude"]
+
+
+def test_codex_worker_inheriting_orchestrator_claude_id_refused(repo):
+    """A Codex worker spawned from the Claude orchestrator carries both ids."""
+    repo.as_agent("CLAUDE_CODE_SESSION_ID")
+    repo.env["CODEX_THREAD_ID"] = "codex-worker-thread"
+    repo.set_role("claude-orchestrator")
+    before = repo.rev("main")
+    assert_refused(repo.commit(GATE_FILE, "bad\n"), repo, before)
+
+
+def test_claude_orchestrator_alone_allowed(repo):
+    repo.as_agent("CLAUDE_CODE_SESSION_ID")
+    repo.set_role("claude-orchestrator")
+    assert repo.commit(GATE_FILE, "ok\n").returncode == 0
+
+
+def test_non_ascii_gate_path_refused(repo):
+    repo.as_agent()
+    before = repo.rev("main")
+    res = repo.commit("hooks/résumé.py", "bad\n")
+    assert res.returncode != 0 and "REFUSED (LUCY-wqn96)" in res.stderr
+    assert repo.rev("main") == before
+
+
+def test_branch_rename_onto_checked_out_main_blocked_by_git(repo):
+    """branch -M/-C bypass the transaction, but git refuses them while main is checked
+    out, and ~/.claude always has main checked out at its root."""
+    repo.as_agent()
+    repo.branch_with_gate_change()
+    before = repo.rev("main")
+    for flag in ("-M", "-C"):
+        assert repo.git("branch", flag, "e3", "main", check=False).returncode != 0
+        assert repo.rev("main") == before
 
 
 def test_fleet_role_env_var_not_trusted(repo):
