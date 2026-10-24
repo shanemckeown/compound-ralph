@@ -19,9 +19,11 @@ Claude Code treats a hook exit of 2 as blocking and any other non-zero as a warn
 PreToolUse guard routed through this passes --fail-exit 2 to fail closed. Every refusal,
 including any exception while checking, exits with that code.
 
-Before exec it drops BASH_ENV, ENV, NODE_OPTIONS, NODE_PATH and every PYTHON* variable, sets
-a fixed PATH (system and Homebrew dirs first, so no user dir can shadow node, python3, git or
-bash), and sets CLAUDE_LIVE_ROOT to the verified export dir for gates that need a root.
+Before exec it drops BASH_ENV, ENV, NODE_OPTIONS, NODE_PATH, every PYTHON* variable and every
+exported bash function (BASH_FUNC_*), sets a fixed PATH, and sets CLAUDE_LIVE_ROOT to the
+verified export dir for gates that need a root. PATH is the export's own bin/ first (main's
+committed bd close-guard, so a gate's `bd close` is always checked), then system and Homebrew
+dirs (so no user dir can shadow node, python3, git or bash), then the user dirs.
 """
 import os
 import sys
@@ -40,18 +42,25 @@ PY_BOOT = ("import os, runpy, sys; p = sys.argv[1]; sys.argv = sys.argv[1:]; "
            "sys.path.insert(0, os.path.dirname(p)); runpy.run_path(p, run_name='__main__')")
 
 
-# System and Homebrew first: today's python3/node/git/bash, never a user-dir lookalike. The
-# user dirs after them hold the tools gates call that live nowhere else: claude (~/.local/bin),
-# the bd and codex wrappers (~/.claude/bin), npx (~/.npm-global/bin).
+# The export's bin/ (only bin/bd, the bead close-guard, is a gate path) comes first: Homebrew
+# has a bd too, and a gate must reach the real one only through the wrapper, which finds it as
+# the first other bd on PATH. Then system and Homebrew: today's python3/node/git/bash, never a
+# user-dir lookalike. The user dirs after them hold the tools gates call that live nowhere
+# else: claude (~/.local/bin), the codex wrapper (~/.claude/bin), npx (~/.npm-global/bin).
 SYSTEM_PATH = ("/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 USER_PATH = (".local/bin", ".claude/bin", ".npm-global/bin")
 SCRUB = ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH")
+# Bash imports a function from BASH_FUNC_<name>%% (older bash: BASH_FUNC_<name>()), and it
+# overrides a command of that name whatever PATH says.
+SCRUB_PREFIXES = ("PYTHON", "BASH_FUNC_")
 
 
 def gate_env(root):
-    env = {k: v for k, v in os.environ.items() if k not in SCRUB and not k.startswith("PYTHON")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in SCRUB and not k.startswith(SCRUB_PREFIXES)}
     home = os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
-    env["PATH"] = ":".join(SYSTEM_PATH + tuple(os.path.join(home, d) for d in USER_PATH))
+    env["PATH"] = ":".join((os.path.join(root, "bin"),) + SYSTEM_PATH
+                           + tuple(os.path.join(home, d) for d in USER_PATH))
     env["CLAUDE_LIVE_ROOT"] = root
     return env
 

@@ -28,8 +28,8 @@ Live export (LUCY-p122j): ~/.claude's main checkout is the running harness, so a
 uncommitted edit there would run before any ref moved. Gates therefore run from
 <git-common-dir>/live/current, a read-only copy of GATE_PATHS at committed main, through
 <git-common-dir>/live/run-gate, which checks the copy against main's blobs before every
-run. In state "committed" this hook refreshes the copy for main's new value, so it moves
-only when main does. The export is written blob by blob from main's tree (never git archive,
+run. In state "committed" this hook refreshes the copy for main's resolved tip whenever main
+or a link of its symbolic chain was updated, so it moves only when main does. The export is written blob by blob from main's tree (never git archive,
 which .gitattributes can change), refuses a symlink, and only ever holds main's current tip:
 the --export CLI (install.sh, live-export.sh) also needs the orchestrator or a human.
 
@@ -64,6 +64,8 @@ ZERO = "0" * 40
 
 # Prefixes (ending "/") match a directory; anything else matches that exact path.
 # scripts/risk_tier.py decides the land tier and tier_gates.py imports it, so it is a gate.
+# bin/bd is the bead close-guard: run-gate puts the exported copy first on a gate's PATH, so a
+# gate's `bd close` goes through main's committed wrapper, never Homebrew's bd directly.
 GATE_PATHS = (
     "references/review-lead/",
     "scripts/review-gate.sh",
@@ -77,6 +79,7 @@ GATE_PATHS = (
     "scripts/build-gate.py",
     "scripts/risk_tier.py",
     "scripts/live-export.sh",
+    "bin/bd",
     "scripts/git-hooks/",
     "skills/land-batch/",
     "skills/aestheticc-review/",
@@ -483,15 +486,19 @@ def prepared(lines):
 
 
 def committed(lines):
-    """Refresh the live export for main's new value. Never fails the (already done) update."""
-    for line in lines:
-        parts = line.split(" ", 2)
-        if len(parts) == 3 and parts[2].lower() == MAIN_REF and OID_RE.fullmatch(parts[1]) \
-                and parts[1] != ZERO:
-            try:
-                export(parts[1])
-            except Exception as exc:  # noqa: BLE001
-                sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s\n" % exc)
+    """Refresh the live export for main's resolved tip when this transaction touched main or any
+    link of its symbolic chain (main -> middle -> leaf: redirecting middle moves main). Never
+    fails the (already done) update."""
+    try:
+        watched = {MAIN_REF} | set(symref_chain())
+        if not any(len(p) == 3 and p[2].lower() in watched
+                   for p in (line.split(" ", 2) for line in lines)):
+            return 0
+        tip = main_tip()
+        if tip:
+            export(tip)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s\n" % exc)
     return 0
 
 

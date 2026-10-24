@@ -545,11 +545,12 @@ def test_gate_path_matching():
     for p in ("references/review-lead/review_lead_check.py", "scripts/review-gate.sh",
               "skills/land-batch/bin/land_batch_safety.py", "skills/land-batch/bin/discover.sh",
               "hooks/x.sh", "settings.json", "commands/goal.md", "scripts/git-hooks/reference-transaction",
-              "scripts/git-hooks/install.sh", "scripts/fleet-role.py", "hooks",
+              "scripts/git-hooks/install.sh", "scripts/fleet-role.py", "bin/bd", "hooks",
               "skills/land-batch", "references/review-lead"):
         assert hook.is_gate_path(p), p
     for p in ("commands/closeout.md", "hooks-old/x.sh", "settings.json.bak",
-              "skills/land-batchx/a", "scripts/review-gate.sh.bak", "foo/settings.json"):
+              "skills/land-batchx/a", "scripts/review-gate.sh.bak", "foo/settings.json",
+              "bin/codex", "bin/bdx"):
         assert not hook.is_gate_path(p), p
 
 
@@ -1295,8 +1296,9 @@ def test_t7_caller_environment_is_scrubbed(repo, tmp_path):
     assert all(seen[k] is None for k in ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH",
                                          "PYTHONPATH", "PYTHONSTARTUP"))
     path = seen["PATH"].split(":")
-    assert path[:5] == ["/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    assert str(fake) not in path and path[5:] == [str(tmp_path / d) for d in
+    assert path[0] == os.path.join(repo.live, repo.rev("main"), "bin")
+    assert path[1:6] == ["/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    assert str(fake) not in path and path[6:] == [str(tmp_path / d) for d in
                                                   (".local/bin", ".claude/bin", ".npm-global/bin")]
     assert seen["node"] != str(fake / "node")
     assert seen["CLAUDE_LIVE_ROOT"] == os.path.join(repo.live, repo.rev("main"))
@@ -1482,3 +1484,198 @@ def test_e1_diff_relative_config_cannot_hide_a_gate_path(repo):
     before = repo.rev("main")
     res = repo.git("merge", "--ff-only", "e3", check=False, cwd=repo.root / "commands")
     assert_refused(res, repo, before)
+
+
+
+# ---- Layer B round 5 (LUCY-p122j B1-B4): the gate's trust anchors ----
+REAL_ROOT = os.path.dirname(os.path.dirname(HOOKS_DIR))
+ORCH_ID = "99999999-8888-7777-6666-555555555555"
+
+
+def commit_files(repo, files):
+    """Commit {repo path: text or (source path,)} to main as a human."""
+    for rel, src in files.items():
+        dest = repo.root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(src, tuple):
+            shutil.copy2(src[0], dest)
+        else:
+            dest.write_text(src)
+        repo.git("add", rel, env=repo.human_env())
+    repo.git("commit", "-q", "-m", "files", env=repo.human_env())
+    assert repo.current() == repo.rev("main")
+
+
+# B1: a gate's bd is main's committed close-guard wrapper, never Homebrew's bd
+BD_STUB = textwrap.dedent("""\
+    #!/bin/sh
+    echo "wrapper $*" >> {log}
+""")
+LANDER = textwrap.dedent("""\
+    import subprocess, sys
+    # as fleet-land-codex.py:383 does: bd looked up on PATH
+    r = subprocess.run(["bd", "close", "LUCY-zzzzz", "--reason", "landed"], capture_output=True, text=True)
+    sys.exit(r.returncode)
+""")
+
+
+def test_b1_gate_bd_close_goes_through_the_exported_wrapper(repo, tmp_path):
+    log = tmp_path / "bd.log"
+    commit_files(repo, {"bin/bd": BD_STUB.format(log=log), "scripts/fleet-land-codex.py": LANDER})
+    os.chmod(repo.root / "bin/bd", 0o755)
+    repo.git("add", "bin/bd", env=repo.human_env())
+    repo.git("commit", "-q", "-m", "x", env=repo.human_env())
+    assert "bin/bd" in export_files(repo)
+    # BEADS_DIR at an empty dir: if the wrapper were skipped, a real bd finds no database.
+    env = dict(repo.env, BEADS_DIR=str(tmp_path / "no-beads"))
+    res = repo.gate("scripts/fleet-land-codex.py", env=env)
+    assert res.returncode == 0, res.stderr
+    assert log.read_text() == "wrapper close LUCY-zzzzz --reason landed\n"
+
+
+def test_b1_checkout_bd_edit_never_runs(repo, tmp_path):
+    log = tmp_path / "bd.log"
+    commit_files(repo, {"bin/bd": BD_STUB.format(log=log), "scripts/fleet-land-codex.py": LANDER})
+    os.chmod(repo.root / "bin/bd", 0o755)
+    repo.git("add", "bin/bd", env=repo.human_env())
+    repo.git("commit", "-q", "-m", "x", env=repo.human_env())
+    repo.write("bin/bd", "#!/bin/sh\necho tampered >> %s\n" % log)  # uncommitted
+    assert repo.gate("scripts/fleet-land-codex.py").returncode == 0
+    assert log.read_text().startswith("wrapper close")
+
+
+def test_b1_bd_is_a_gate_path(repo):
+    repo.as_agent()
+    before = repo.rev("main")
+    assert_refused(repo.commit("bin/bd", "#!/bin/sh\nexit 0\n"), repo, before, what="bin/bd")
+
+
+# B2: the exported, provider-aware fleet-role.py accepts the flags its exported callers pass
+def fleet_home(repo, tmp_path, live_ids):
+    """HOME whose ~/.claude is the repo (so gate-watch's ~/.claude/.git/live/run-gate is this
+    repo's), an orchestrator marker for ORCH_ID and a `claude agents` stub listing live_ids."""
+    commit_files(repo, {rel: (os.path.join(REAL_ROOT, rel),) for rel in (
+        "scripts/fleet-role.py", "scripts/fleet_codex_rpc.py", "scripts/gate-watch.py",
+        "hooks/sendmessage-guard.py")})
+    home = tmp_path / "home"
+    (home / ".local/bin").mkdir(parents=True)
+    os.symlink(repo.root, home / ".claude")
+    (repo.root / "fleet").mkdir(exist_ok=True)
+    (repo.root / "fleet/ORCHESTRATOR").write_text(json.dumps(
+        {"session_id": ORCH_ID, "name": "orch", "provider": "claude", "claimed_at": "2026-10-25T00:00:00Z"}))
+    agents = [{"pid": 4242, "kind": "interactive", "sessionId": sid, "name": name, "id": sid[:8],
+               "startedAt": int((time.time() - 6 * 3600) * 1000)} for name, sid in live_ids]
+    claude = home / ".local/bin/claude"
+    claude.write_text("#!/bin/sh\ncat <<'EOF'\n" + json.dumps(agents) + "\nEOF\n")
+    claude.chmod(0o755)
+    return home, dict(repo.env, HOME=str(home))
+
+
+def shanes_conversation(home, sid):
+    """A busy tab Shane has been talking to: without the orchestrator exemption, NEW WORK is denied."""
+    rows = [{"type": "user", "message": {"role": "user", "content": f"Shane prompt {i}"}} for i in range(4)]
+    rows += [{"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {}}]}} for i in range(40)]
+    rows.append({"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [],
+                 "usage": {"input_tokens": 100_000}}})
+    proj = home / ".claude/projects/p"
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / f"{sid}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+@pytest.mark.parametrize("target,decision", [("orch", "allow"), ("shane", "deny")])
+def test_b2_sendmessage_guard_recognises_the_orchestrator_target(repo, tmp_path, target, decision):
+    other = "22222222-3333-4444-5555-666666666666"
+    home, env = fleet_home(repo, tmp_path, [("orch", ORCH_ID), ("shane", other)])
+    shanes_conversation(home, ORCH_ID)
+    shanes_conversation(home, other)
+    payload = {"tool_name": "SendMessage", "session_id": AGENT_ID,
+               "tool_input": {"to": target, "message": "NEW WORK: do a thing"}}
+    res = subprocess.run([repo.run_gate, "--fail-exit", "2", "hooks/sendmessage-guard.py"],
+                         cwd=repo.root, env=env, input=json.dumps(payload), capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    got = json.loads(res.stdout)["hookSpecificOutput"]["permissionDecision"] if res.stdout.strip() else "allow"
+    assert got == decision, res.stdout
+
+
+def gate_watch_env(tmp_path, env):
+    ledger = tmp_path / "L.jsonl"
+    ledger.write_text(json.dumps({"id": "m1", "what": "w", "question": "q?",
+                                  "first_seen_at": "2020-01-01T00:00:00Z", "resolved_at": None}) + "\n")
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"computed_at": time.time(), "items": [], "sweep_ok": True, "shift_ok": True}))
+    env = {k: v for k, v in env.items() if k != "GATE_WATCH_ROLE"}
+    return dict(env, GATE_LEDGER=str(ledger), GATE_WATCH_CACHE=str(cache))
+
+
+@pytest.mark.parametrize("sid,speaks", [(ORCH_ID, True), ("22222222-3333-4444-5555-666666666666", False)])
+def test_b2_gate_watch_recognises_the_owner_through_run_gate(repo, tmp_path, sid, speaks):
+    _, env = fleet_home(repo, tmp_path, [("orch", ORCH_ID), ("other", "22222222-3333-4444-5555-666666666666")])
+    env = gate_watch_env(tmp_path, env)
+    res = subprocess.run([repo.run_gate, "scripts/gate-watch.py", "--hook"], cwd=repo.root, env=env,
+                         input=json.dumps({"session_id": sid}), capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    if speaks:
+        ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert ctx.startswith("RE-ASK SHANE NOW")
+    else:
+        assert res.stdout.strip() == ""
+
+
+def test_b2_exported_checker_accepts_its_callers_flags(repo, tmp_path):
+    _, env = fleet_home(repo, tmp_path, [("orch", ORCH_ID)])
+    who = subprocess.run([repo.run_gate, "scripts/fleet-role.py", "--who", "--json"], cwd=repo.root,
+                         env=env, capture_output=True, text=True)
+    assert who.returncode == 0 and json.loads(who.stdout)["record"]["session_id"] == ORCH_ID
+    me = subprocess.run([repo.run_gate, "scripts/fleet-role.py", ORCH_ID, "--provider", "claude"],
+                        cwd=repo.root, env=env, capture_output=True, text=True)
+    assert me.returncode == 0 and me.stdout.strip() == "ORCHESTRATOR", me.stderr
+
+
+# B3: an authorised move of any link of main's symbolic chain refreshes the export
+def test_b3_orchestrator_redirecting_an_intermediate_link_refreshes_the_export(repo):
+    repo.set_role("orchestrator")
+    tip = repo.branch_with_gate_change()
+    repo.git("checkout", "-q", "main")
+    make_chain(repo)
+    repo.as_agent()
+    assert repo.git("symbolic-ref", "refs/heads/middle", "refs/heads/e3", check=False).returncode == 0
+    assert repo.rev("main") == tip
+    assert repo.current() == tip
+    res = repo.gate(PROBE)
+    assert res.returncode == 0, res.stderr
+    with open(os.path.join(repo.live, tip, GATE_FILE)) as fh:
+        assert fh.read() == "branch\n"
+
+
+def test_b3_orchestrator_commit_on_the_chain_leaf_refreshes_the_export(repo):
+    repo.set_role("orchestrator")
+    make_chain(repo)
+    repo.git("checkout", "-q", "leaf")
+    repo.as_agent()
+    assert repo.commit(GATE_FILE, "via leaf\n").returncode == 0
+    assert repo.current() == repo.rev("main") == repo.rev("leaf")
+    assert repo.gate(PROBE).returncode == 0
+
+
+def test_b3_unrelated_branch_does_not_refresh(repo):
+    make_chain(repo)
+    before = repo.current()
+    repo.git("checkout", "-q", "-b", "side")
+    assert repo.commit("commands/closeout.md", "side\n").returncode == 0
+    assert repo.current() == before
+
+
+# B4: exported bash functions never reach a gate
+def test_b4_exported_bash_function_is_scrubbed(repo, tmp_path):
+    marker = tmp_path / "fn-ran"
+    probe = "references/review-lead/fnprobe.sh"
+    commit_files(repo, {probe: "#!/usr/bin/env bash\nnode -e 'process.stdout.write(\"real\")' 2>/dev/null || echo nonode\n"})
+    os.chmod(repo.root / probe, 0o755)
+    repo.git("add", probe, env=repo.human_env())
+    repo.git("commit", "-q", "-m", "x", env=repo.human_env())
+    body = "() {  echo fn > %s; echo hijacked\n}" % marker
+    env = dict(repo.env, **{"BASH_FUNC_node%%": body, "BASH_FUNC_node()": body})
+    res = repo.gate(probe, env=env)
+    assert res.returncode == 0, res.stderr
+    assert "hijacked" not in res.stdout and not marker.exists()
