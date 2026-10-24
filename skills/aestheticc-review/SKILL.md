@@ -121,11 +121,17 @@ Take the session ID from the output. Never start a fresh session. Never backgrou
 
 **Step 4: landing check.** Run `git merge-tree $(git merge-base origin/main <tip>) origin/main <tip>` and also check the other pushed-not-landed branches. List the conflicts. VERSION, CHANGELOG, file-length-baseline and migration-number collisions are expected but must be named.
 
-**Step 5: verdict.** Line 1 is `PASS` or `FAIL`. Then one finding per line, in the form `P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix`. After that, list VERIFIED OK and UNVERIFIED items; unverified items are never called verified. In a re-review, confirm each earlier-round finding you checked is fixed with its own VERIFIED OK line, exactly `- r<N> <sev> <file:line> closed: <how you checked>` (no "but"/"still"/"partially"): that line is what lets the lead grade it `fixed`. Notes under VERIFIED OK may discuss a listed finding, but never state a new one there. **End with the structured block. It is required:** `review-gate.sh` refuses any review written after 2026-10-23 12:00 UTC that lacks it (LUCY-p4pjf). The checker reads it as the whole input, and the prose before it must agree (same verdict word, every finding in the block):
+**Step 5: verdict.** Line 1 is `PASS` or `FAIL`. Then one finding per line, in the form `P1|P2|P3 file:line — failure scenario (who does what, what goes wrong) — fix`. After that, list VERIFIED OK and UNVERIFIED items; unverified items are never called verified. Notes under VERIFIED OK may discuss a listed finding, but never state a new one there. **End with the structured block. It is required:** `review-gate.sh` refuses any review written after 2026-10-23 12:00 UTC that lacks it (LUCY-p4pjf). The checker reads it as the whole input, and the prose before it must agree (same verdict word; every prose finding has a block finding with the same severity and `file_line`, one each):
+
+- `findings`: each entry has `severity` (P1/P2/P3), `file_line` (`<file>:<line>`, a range such as `:78-83` allowed) and `text` (failure scenario — fix). The block may word `text` differently from the prose line. Pairing goes by severity + `file_line`.
+- `prior` (**required in every re-review**): one entry for **every** finding from earlier rounds you were given, `{"ref": "r<N> <sev> <file:line>", "status": "closed" | "open", "evidence": "<how you checked>"}`. `r<N>` is the round of the review file that raised it (a file with no `_r<N>_` in its name is round 1), and `<sev> <file:line>` is copied exactly from that finding. Use `closed` only when you checked the fix at this tip yourself. Otherwise use `open`, and also raise it again under `findings` if it still fails. **`prior` is the only thing that lets the lead grade a finding `fixed` (LUCY-e3opf).** Prose `- rN ... closed:` lines are never graded. A missing entry means not fixed. If one seat says closed and another says open, it escalates to the orchestrator. A finding with no line number can never be graded fixed, so give every finding a `file_line`. First-round reviews write `"prior": []`.
 
 ````
 ```review-verdict
-{"verdict": "FAIL", "findings": [{"severity": "P2", "text": "lib/x.ts:12 — failure scenario — fix"}]}
+{"verdict": "FAIL",
+ "findings": [{"severity": "P2", "file_line": "lib/x.ts:12", "text": "failure scenario — fix"}],
+ "prior": [{"ref": "r1 P1 lib/pay.ts:37", "status": "closed", "evidence": "regression test drives the retry path, green; reverting the guard makes it fail"},
+           {"ref": "r1 P3 lib/y.ts:9", "status": "open", "evidence": "label still reads Saved when the write fails"}]}
 ```
 ````
 

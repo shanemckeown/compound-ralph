@@ -19,7 +19,10 @@ Refuses (exit 1, reasons on stderr) when:
     a follow_up title;
   - more than 5 blocking act_on items without act_on_over_cap_reason;
   - round >= 2 and no premise block;
-  - a pre_existing act_on / consider item lacks a follow_up bead title.
+  - a pre_existing act_on / consider item lacks a follow_up bead title;
+  - a review-verdict block finding has no severity or no file:line, or its `prior` is malformed;
+  - a `fixed` grade has no "closed" prior entry in a review of the current tip (LUCY-e3opf).
+A `fixed` grade that another review of the current tip marks "open" is escalated, never counted fixed.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
     whatever severity the reviewer wrote, so it can never be Noted;
@@ -106,8 +109,12 @@ LOC = re.compile(FILE_LINE.pattern + r"(?:-\d+)?(?![\w-])")
 # A count is a number standing alone: "1 P1", "(0 P1", never the 1 in "Round-1 P1" (LUCY-l1s6g e).
 SUMMARY_COUNT = re.compile(r"(?<![\w-])(\d+)\s*(?:x\s*)?(P[123])\b")
 # Structured verdict (LUCY-p4pjf): a fenced ```review-verdict block holding JSON
-#   {"verdict": "PASS"|"FAIL", "findings": [{"severity": "P2", "text": "file:line — ..."}]}
+#   {"verdict": "PASS"|"FAIL",
+#    "findings": [{"severity": "P2", "file_line": "lib/x.ts:12", "text": "failure scenario — fix"}],
+#    "prior": [{"ref": "r1 P2 lib/x.ts:12", "status": "closed"|"open", "evidence": "how checked"}]}
 # When a file has one, the last block is the whole input from that file; prose is not parsed.
+# `prior` (LUCY-e3opf) is the only thing that grades an earlier finding fixed: prose "closed:" lines
+# are never graded, because negation-word rules could not be both fail-closed and accepting.
 STRUCTURED = re.compile(r"(?ms)^\s*```\s*review-verdict\s*\n(.*?)^\s*```\s*$")
 # bd comment header, as `bd comments` prints it (timestamps are UTC).
 COMMENT_HEADER = re.compile(r"^\[(?P<author>[^\]]*)\] at (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*$")
@@ -133,8 +140,9 @@ VERDICT_DECL = re.compile(r"\bverdict\b[^\n]*?\b(PASS|FAIL)\b", re.I)
 
 
 SECTION = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?(HAZARDS|VERIFIED OK|UNVERIFIED)\b")
-# A later round's reviewer confirming an earlier finding fixed (LUCY-p4pjf, orchestrator 23 Oct), in its
-# VERIFIED OK section, exactly: "- r9 P3 lib/x.ts:37 closed: <how it was checked>".
+# A later round's prose note on an earlier finding, in its VERIFIED OK section: "- r9 P3 lib/x.ts:37
+# closed: <how it was checked>". It only lets such a note through the parser silently; it never grades a
+# finding fixed (the block's `prior` array does that, LUCY-e3opf).
 CONFIRM_FIXED = re.compile(r"^\s*[-*]\s+(?:\*\*)?r(\d+)\s+(P[123])\s+(\S+:\d+(?:-\d+)?)(?:\*\*)?\s+(?:closed|fixed|resolved):\s+"
                            r"(?=\S)[^?]{8,}$", re.I)
 CONFIRM_NEGATION = re.compile(r"\b(not|no|never|but|however|yet|partial|partially|unable|cannot|"
@@ -287,22 +295,27 @@ def back_reference_note(line, mine):
 
 
 def prose_match(line, mine, used):
-    """Index of the block finding a prose finding line stands for, or None. Verbatim first; else a
-    paraphrase: same severity, the same set of file:line locations, nearly all the same words, and a
-    block finding not already claimed by another prose line (LUCY-l1s6g i)."""
+    """Index of the block finding a prose finding line stands for, or None: the same severity and the
+    same leading file:line as the block finding's fields, one prose line per block finding. Never by
+    wording: a reviewer may reword the block (LUCY-e3opf, 3bm73 r5)."""
     c = clean(line)
     for i, m in enumerate(mine):
         if i not in used and m == c:
             return i
-    locs = {x.group(0) for x in FILE_LINE.finditer(c)}
-    words = set(re.findall(r"[a-z0-9_]{3,}", c.lower()))
+    loc = leading_loc(c)
+    if not loc:
+        return None
     for i, m in enumerate(mine):
-        if i in used or m[:2] != c[:2] or {x.group(0) for x in FILE_LINE.finditer(m)} != locs or not locs:
-            continue
-        mw = set(re.findall(r"[a-z0-9_]{3,}", m.lower()))
-        if words and mw and len(words & mw) / min(len(words), len(mw)) >= 0.8:
+        if i not in used and m[:2] == c[:2] and leading_loc(m) == loc:
             return i
     return None
+
+
+def leading_loc(finding):
+    """The declared location of a canonical finding line ("P2 lib/x.ts:3 — ..."), or None. A location
+    further into the text is evidence, never the finding's own (LUCY-e3opf)."""
+    m = LEADING_LOC.match(finding[3:])
+    return m.group(1) if m else None
 
 
 def decl_words(lines):
@@ -342,12 +355,65 @@ def structured_findings(p, block):
         if sev not in ("P1", "P2", "P3") or not text:
             raise ValueError(f"{p}: review-verdict finding #{i + 1} needs severity P1/P2/P3 and text")
         # The text may repeat the severity ("P2 lib/x.ts:3 ..." with severity P2): one prefix, not
-        # "P2 P2 ..." (LUCY-l1s6g a). A different leading severity is kept, so it never matches.
+        # "P2 P2 ..." (LUCY-l1s6g a). A different leading severity contradicts the field: refused.
         text = re.sub(rf"^(?:\*\*)?{sev}(?:\*\*)?[\s:]+", "", text)
+        if re.match(r"^(?:\*\*)?P[123]\b", text):
+            raise ValueError(f"{p}: review-verdict finding #{i + 1} text starts with a severity other than {sev}")
+        # The location is the file_line field (LUCY-e3opf). A block written before the field existed
+        # gives it as the text's own leading file:line. With neither, the finding has no location: it
+        # pairs with prose only verbatim and can never be graded fixed (both fail closed), and old
+        # files like that still parse (3bm73 r1 sonnet, q2lod11-13 opus-h2h).
+        lead_loc = LEADING_LOC.match(text)
+        fl = f.get("file_line")
+        if fl is not None:
+            if not isinstance(fl, str) or not LOC.fullmatch(fl.strip()):
+                raise ValueError(f"{p}: review-verdict finding #{i + 1} file_line {fl!r} is not <file>:<line>")
+            fl = fl.strip()
+            if lead_loc and lead_loc.group(1) != fl:
+                raise ValueError(f"{p}: review-verdict finding #{i + 1} file_line {fl} contradicts its text "
+                                 f"({lead_loc.group(1)})")
+            if not lead_loc:
+                text = f"{fl} — {text}"
         mine.append(clean(f"{sev} {text}"))
     if data["verdict"] == "FAIL" and not mine:
         raise ValueError(f"{p}: review-verdict is FAIL but lists no findings")
+    structured_prior(p, data)
     return mine
+
+
+# A finding's leading location in block text, past optional `code` / **bold** markup.
+LEADING_LOC = re.compile(r"^[`*]*(" + LOC.pattern + r")")
+PRIOR_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(" + LOC.pattern + r")$")
+
+
+def structured_prior(p, data):
+    """{(round, severity, file:line): "closed"|"open"} from a block's `prior` array (LUCY-e3opf).
+    Absent means the review claims no closures. Anything malformed refuses the file, never skipped."""
+    prior = data.get("prior", [])
+    if not isinstance(prior, list):
+        raise ValueError(f"{p}: review-verdict \"prior\" must be a list")
+    out = {}
+    for i, e in enumerate(prior):
+        ref = norm(e.get("ref")) if isinstance(e, dict) and isinstance(e.get("ref"), str) else ""
+        m = PRIOR_REF.match(ref)
+        if not m:
+            raise ValueError(f"{p}: review-verdict prior #{i + 1} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>'")
+        status, ev = e.get("status"), e.get("evidence")
+        if status not in ("closed", "open"):
+            raise ValueError(f"{p}: review-verdict prior #{i + 1} status {status!r} is not \"closed\" or \"open\"")
+        if not isinstance(ev, str) or (status == "closed" and len(norm(ev)) < 8):
+            raise ValueError(f"{p}: review-verdict prior #{i + 1} needs evidence (how it was checked)")
+        key = (int(m.group(1)), m.group(2), m.group(3))
+        if out.get(key, status) != status:
+            raise ValueError(f"{p}: review-verdict prior marks {ref} both closed and open")
+        out[key] = status
+    return out
+
+
+def file_prior(p, text):
+    """The prior entries of a file's last review-verdict block; {} for a file without one."""
+    blocks = list(STRUCTURED.finditer(text))
+    return structured_prior(p, json.loads(blocks[-1].group(1))) if blocks else {}
 
 
 def check_summary_counts(p, lines, mine):
@@ -618,12 +684,23 @@ def routed_out(f, scope_lock):
 ECHO_SHA = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
 
 
+def echo_of(text):
+    m = ECHO_SHA.search(text)
+    return m.group(1).lower() if m else ""
+
+
+def same_commit(a, b):
+    return bool(a and b) and (a.startswith(b) or b.startswith(a))
+
+
 def fixed_errors(tag, f, src, files):
-    """A finding graded `fixed` resolves only when a later independent review of another commit
-    confirms it (LUCY-p4pjf): `fixed_by` is one of the --verdict files, newer than the file that
-    raised the finding and echoing a different commit; it does not raise the same severity at the
-    same file:line again; and its VERIFIED OK section has "- r<N> <sev> <file:line> closed: ...",
-    N being the round in the raising file's name (_r<N>_)."""
+    """A finding graded `fixed` resolves only when a later independent review of the CURRENT tip
+    confirms it (LUCY-p4pjf, LUCY-e3opf): `fixed_by` is one of the --verdict files, newer than the
+    file that raised the finding and echoing a different commit, and it reviewed the commit the
+    newest review reviewed. No review at that tip raises the same severity at the same file:line
+    again, and fixed_by's review-verdict block has a prior entry {"ref": "r<N> <sev> <file:line>",
+    "status": "closed"}, N being a round that raised it (_r<N>_ in the name). Prose is never graded.
+    Another review at the tip marking it "open" makes it disputed: set on f["_disputed"], escalated."""
     if not files:
         return [f"{tag}: fixed needs the reviewer files (run through main)"]
     by = (f.get("fixed_by") or "").strip()
@@ -653,23 +730,43 @@ def fixed_errors(tag, f, src, files):
         if r_later < r_x or (r_later == r_x and Path(later[0]).stat().st_mtime <= Path(x[0]).stat().st_mtime):
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
-    rnd = str(round_of(source[0]))
-    loc = LOC.search(src)
+    loc, sev = leading_loc(src), src[:2]
     if not loc:
-        return [f"{tag}: fixed needs a file:line in the finding"]
-    sev = src[:2]
-    for other in later[1]:
-        o = LOC.search(other)
-        if other[:2] == sev and o and o.group(0) == loc.group(0):
-            return [f"{tag}: {Path(later[0]).name} raises {sev} at {loc.group(0)} again: not fixed"]
-    lines = later[2].splitlines()
-    for i in verified_lines(lines):
-        m = CONFIRM_FIXED.match(lines[i])
-        if (m and is_confirmation(lines[i]) and m.group(1) == rnd and m.group(2).upper() == sev
-                and m.group(3) == loc.group(0)):
-            return []
-    return [f"{tag}: {Path(later[0]).name} has no VERIFIED OK line '- r{rnd} {sev} {loc.group(0)} "
-            "closed: ...' confirming the fix"]
+        return [f"{tag}: fixed needs the finding to start with its file:line"]
+    # The current tip is what the newest review (by round, then mtime) reviewed. A confirmation of an
+    # older commit says nothing about the code that would land.
+    newest = max(files, key=lambda x: (round_of(x[0]), Path(x[0]).stat().st_mtime))
+    tip = echo_of(newest[2])
+    if not tip:
+        return [f"{tag}: the newest review {Path(newest[0]).name} has no REVIEWING echo: the current tip is unknown"]
+    if not same_commit(b_, tip):
+        return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
+                f"(newest review {Path(newest[0]).name})"]
+    at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
+    for x in at_tip:
+        for other in x[1]:
+            if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
+                return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
+    rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
+    status = {}
+    for x in at_tip:
+        prior = file_prior(x[0], x[2])
+        got = {prior[k] for k in ((r, sev, loc) for r in rounds) if k in prior}
+        if len(got) > 1:
+            return [f"{tag}: {Path(x[0]).name} marks {sev} {loc} both closed and open across rounds"]
+        if got:
+            status[x[0]] = got.pop()
+    ref = f"r{rounds[0]} {sev} {loc}"
+    if status.get(later[0]) != "closed":
+        return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry "
+                f"{{\"ref\": \"{ref}\", \"status\": \"closed\"}}"
+                + (" (it says open)" if status.get(later[0]) == "open" else "")
+                + ": not fixed. Prose 'closed:' lines are not graded"]
+    disagree = sorted(Path(k).name for k, v in status.items() if v == "open")
+    if disagree:
+        f["_disputed"] = (f"seats disagree at {tip[:10]}: {Path(later[0]).name} closes {ref}, "
+                          f"{', '.join(disagree)} mark(s) it open")
+    return []
 
 
 def check(lead, reviewer_lines, round_no, scope_lock, files=None):
@@ -814,8 +911,10 @@ def main(argv=None):
     # So does an unresolved H-D0 the branch added: a P2 duplicate path blocks landing (LUCY-fuu2h).
     def must_escalate(f):
         return f.get("_protected") or (f.get("_duplicate_path") and f.get("pre_existing") is not True)
+    # A fix one seat closes and another marks open at the same tip is the orchestrator's call (LUCY-e3opf).
+    disputed = [f for f in items if f["verdict"] == "fixed" and f.get("_disputed")]
     escalate = [f for f in consider if must_escalate(f)] + \
-               [f for f in out_of_scope if must_escalate(f)]
+               [f for f in out_of_scope if must_escalate(f)] + disputed
     cleared = {}
     if a.cleared_escalation:
         try:
@@ -840,8 +939,8 @@ def main(argv=None):
     n = a.round
     (out / f"lead-actions-round-{n}.txt").write_text("".join(action_entry(f) for f in blocking))
     (out / f"lead-escalate-round-{n}.txt").write_text(
-        "".join(f"{f['source_line']}\n  why not fixed here: {f.get('reason') or f.get('follow_up')}\n"
-                for f in escalate))
+        "".join(f"{f['source_line']}\n  why not fixed here: "
+                f"{f.get('_disputed') or f.get('reason') or f.get('follow_up')}\n" for f in escalate))
     (out / f"lead-cleared-round-{n}.txt").write_text(
         "".join(f"{cid}\t{line}\t{f['source_line']}\n" for f in items
                 for cid, line in cleared.items() if f.get("id") == cid))
@@ -860,7 +959,9 @@ def main(argv=None):
                         f"no re-review): {f['source_line']}\n  - reason: {f.get('reason') or 'ordinary-use test'}")
             continue
         if f["verdict"] == "fixed":
-            rows.append(f"- **fixed**: {f['source_line']}\n  - confirmed by: {f.get('fixed_by')}")
+            label = "fixed, DISPUTED (escalated)" if f.get("_disputed") else "fixed"
+            rows.append(f"- **{label}**: {f['source_line']}\n  - confirmed by: {f.get('fixed_by')}"
+                        + (f"\n  - {f['_disputed']}" if f.get("_disputed") else ""))
             continue
         if f["verdict"] == "act_on":
             label = "act_on (pre-existing)" if f.get("pre_existing") is True else "act_on (out of scope)"
@@ -877,7 +978,8 @@ def main(argv=None):
             rows.append(f"- **verified note** (reviewer's own, outside its finding): {nt.get('line')}\n"
                         f"  - reason: {nt.get('reason')}")
     (out / f"lead-dismissals-round-{n}.md").write_text("\n".join(rows) + "\n")
-    counts = {k: sum(1 for f in items if f["verdict"] == k) for k in ("dismissed", "noted", "fixed")}
+    counts = {k: sum(1 for f in items if f["verdict"] == k and not f.get("_disputed"))
+              for k in ("dismissed", "noted", "fixed")}
     print(f"BLOCKING={len(blocking)} ESCALATE={len(escalate)} FOLLOWUPS={len(follow)} "
           f"DISMISSED={counts['dismissed']} NOTED={counts['noted']} P4={len(demoted)} CLEARED={len(cleared)} "
           f"FIXED={counts['fixed']}")

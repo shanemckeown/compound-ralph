@@ -453,6 +453,12 @@ class ReviewGateFixedLater(_GateCase):
         body = self.verdict.read_text().replace(
             "VERIFIED OK\n\n", "VERIFIED OK\n\n- r9 P3 lib/concierge/erase-client-meta-concierge.ts:37 closed: "
             "the IG cell deletes the state rows (10/10)\n", 1)
+        # LUCY-e3opf: only the block's prior array grades the r9 finding fixed; the prose line above doesn't.
+        p2 = next(ln for ln in body.splitlines() if ln.startswith("P2 "))
+        body += "```review-verdict\n" + json.dumps({
+            "verdict": "FAIL", "findings": [{"severity": "P2", "text": p2[3:]}],
+            "prior": [{"ref": "r9 P3 lib/concierge/erase-client-meta-concierge.ts:37", "status": "closed",
+                       "evidence": "the IG cell deletes the state rows (10/10)"}]}) + "\n```\n"
         self.verdict.write_text(body)
         os.utime(self.verdict, (R10_MTIME, R10_MTIME))
         (self.out / "review-file.md5").write_text("".join(
