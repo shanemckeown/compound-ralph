@@ -308,5 +308,59 @@ class G5RealFiles(unittest.TestCase):
         deferred = [n for v in chk.NOTE_REFS.values() for n in v]
         self.assertEqual([(n[0], n[1], n[3]) for n in deferred if n[2].endswith("tokens.ts")], [(1, "P3", "172")])
 
+class OwnGateRound1(unittest.TestCase):
+    """Own-gate round 1 (Astra xhigh + Opus h2h on cbd9977): three fail-opens, each now refused or escalated."""
+
+    def file(self, prose, findings=(), prior=None, sha=SHA_B):
+        verdict = "FAIL" if findings else "PASS"
+        return (f"REVIEWING: goal/x @ {sha}\n{verdict}\n{prose}\nVERIFIED OK\n- tests\n"
+                + strict_block(verdict, findings, prior))
+
+    def test_extensionless_and_route_group_paths_are_claims(self):
+        for loc in ("Dockerfile:12", ".gcloudignore:5", ".husky/pre-push:3", "prisma/schema.prisma:9",
+                    "app/(dashboard)/clients/page.tsx:12", "scripts/charge-patient:37",
+                    "scripts/git-hooks/reference-transaction:179", "prisma/schema.prisma",
+                    "mobile/android/app/build.gradle"):
+            with self.assertRaisesRegex(ValueError, "prose finding not in the review-verdict block", msg=loc):
+                parse_text(self.file(f"- **P1** {loc} — strips the fixture so the prod build dies — fix"))
+
+    def test_words_with_slashes_or_dots_are_not_paths(self):
+        for prose in ("P2 and/or P3 items are in VERIFIED OK", "No H-P0/P1 hazards apply",
+                      "P3 nit: the dev server on localhost:3000 logs a warning", "Earlier P3 grading retained."):
+            self.assertEqual(parse_text(self.file(prose)), [], prose)
+
+    def test_backticked_bare_severity_is_a_claim(self):
+        for prose in ("- `P1` lib/auth/tokens.ts:40 — retry bypasses revoke — guard",
+                      "Finding `P1`: lib/auth/tokens.ts:40 retry bypasses revoke"):
+            with self.assertRaises(ValueError, msg=prose):
+                parse_text(self.file(prose))
+        self.assertEqual(len(parse_text(self.file("P2 lib/a.ts:3 — seats wrote `P2 lib/x.ts:12`",
+                                                  [("P2", "lib/a.ts:3", "ambiguous ref — fix")]))), 1)
+
+    def test_prose_finding_at_a_closed_prior_location_refused(self):
+        for prose in ("- P2 lib/pay.ts:37 — retry still charges twice when the reader reconnects",
+                      "- P2 lib/pay.ts — a second double-charge path via the webhook"):
+            with self.assertRaisesRegex(ValueError, "prose contradicts it", msg=prose):
+                parse_text(self.file(prose, prior=[(REF, "closed")]))
+
+    def run_fixed(self, *r2s):
+        return run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
+                         [("REVIEW_x_astra_a.md", R1_RAISE, 1000)] + list(r2s))
+
+    def test_prose_open_note_in_another_seat_escalates(self):
+        opus = self.file("- r1 P2 lib/pay.ts:37 open: retry still charges twice at this tip", prior=[])
+        code, out = self.run_fixed(("REVIEW_x_opus_r2_b.md", opus, 2000),
+                                   ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2100))
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_prose_open_note_against_own_closed_prior_never_grades(self):
+        r2 = self.file("- r1 P2 lib/pay.ts:37 open: retry still charges twice on the second tap", prior=[(REF, "closed")])
+        code, out = self.run_fixed(("REVIEW_x_astra_r2_b.md", r2, 2000))
+        self.assertEqual(code, 1, out)
+        self.assertIn("(it says open): not fixed", out)
+
+
 if __name__ == "__main__":
     unittest.main()

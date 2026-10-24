@@ -298,6 +298,9 @@ UNBOUND_NOTES = {}
 # {review path: {(round, severity, path, line, raw)}}: earlier-round "open" notes a review-verdict file's
 # block does not carry; orphan_open_priors requires their raising review as an input (LUCY-e3opf G5).
 NOTE_REFS = {}
+# {review path: {(round, sev, loc)}}: prose "- rN Px <loc> open:" notes. A seat that keeps a finding open
+# in prose vetoes another seat's closed prior (escalates), so prose can never help grade fixed.
+OPEN_NOTES = {}
 
 
 def tolerated_note(line, mine):
@@ -618,12 +621,22 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
         raise ValueError(f"{p}: verdicts {sorted(words)} in the file disagree with the final {verdict}")
 
 
-# A repo path in prose (LUCY-e3opf G5): a file name with a code extension, optional directories, optional
-# :line or :line-line. "tokens.ts", "lib/x.ts:12", "lib/x.ts:12-20"; never "and/or" or "H-P0/P1".
+# A repo path in prose (LUCY-e3opf G5), optional :line or :line-line: a bare file name with a code
+# extension ("tokens.ts"); any path with a directory whose file has an extension or a line
+# ("lib/x.ts", "prisma/schema.prisma", ".husky/pre-push:3", "app/(dashboard)/page.tsx:12"); or a
+# dotfile or capitalised extensionless file with a line ("Dockerfile:12", ".gcloudignore:5"). Never
+# "and/or", "H-P0/P1", "Next.js" or "localhost:3000".
 CODE_EXT = ("tsx|ts|jsx|js|mjs|cjs|py|sql|jsonl|json|mdx|md|sh|ya?ml|toml|css|scss|html|txt|swift|kt|java"
             "|go|rb|plist|xml|csv|tsv|lock")
-PATH_TOKEN = re.compile(rf"(?<![\w./\[\]@-])((?:[\w.\[\]@-]+/)*[\w\[\]@-][\w.\[\]@-]*\.(?:{CODE_EXT}))"
-                        rf"(?::(\d+(?:-\d+)?))?(?![\w/-])")
+_SEG = r"(?:\([\w.-]+\)|[\w.\[\]@+-]+)"
+_LINE = r":(\d+(?:-\d+)?)"
+PATH_TOKEN = re.compile(
+    r"(?<![\w./\[\]()@+-])("
+    rf"(?:{_SEG}/)+[\w\[\]@+-][\w.\[\]@+-]*\.[A-Za-z][A-Za-z0-9]{{0,9}}(?={_LINE}|(?![\w./\[\]@+-]))"
+    rf"|(?:{_SEG}/)+[\w.\[\]@+-]+(?={_LINE})"
+    rf"|[\w\[\]@-][\w.\[\]@-]*\.(?:{CODE_EXT})"
+    rf"|(?:\.[\w-][\w.-]*|[A-Z][\w.-]*)(?={_LINE})"
+    rf")(?:{_LINE})?(?![\w/-])")
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
 CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
@@ -638,7 +651,7 @@ def path_parts(loc):
 
 def claim_sevs(line):
     """Standalone severity tokens; one inside a `code span` is quoted (an example, a test name)."""
-    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line)]
+    spans = [m.span() for m in re.finditer(r"`[^`\n]*`", line) if not re.fullmatch(r"`\s*P[123]\s*`", m.group(0))]
     return [s for s in CLAIM_SEV.finditer(line) if not any(a < s.start() < b for a, b in spans)]
 
 
@@ -674,6 +687,9 @@ def claim_error(sev, path, line, targets):
         return f"{where} is ambiguous: it matches {', '.join(sorted({f'{t[0]} {t[1]}' for t in cands}))}"
     if sev not in {t[0] for t in cands}:
         return f"severity mismatch: the block has {'/'.join(sorted({t[0] for t in cands}))} at {where}, not {sev}"
+    if all(t[3:] == ("closed",) for t in cands if t[0] == sev):
+        return (f"this review's prior closes {sev} {where}, so the prose contradicts it: raise it under "
+                "findings, or mark it open")
     return None
 
 
@@ -689,10 +705,11 @@ def prose_claim_errors(p, lines, meta, prior):
     by orphan_open_priors), so the lead covers it. A severity in the note's own text with a path of its
     own is a claim like any other; one without ("Earlier P3 grading retained.", "same as the P2") names
     a finding at the note's location and is checked the same way as an open note."""
-    targets = [(f["sev"],) + f["target"] for f in meta if f["target"]]
-    targets += [(sev,) + path_parts(loc) for (_r, sev, loc) in prior]
+    targets = [(f["sev"],) + f["target"] + ("finding",) for f in meta if f["target"]]
+    targets += [(sev,) + path_parts(loc) + (st,) for (_r, sev, loc), st in prior.items()]
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
+    OPEN_NOTES[str(p)] = set()
     for line in lines:
         if clean(line) in verbatim:
             continue
@@ -705,6 +722,8 @@ def prose_claim_errors(p, lines, meta, prior):
             refs = []
             if ref and note.group(4).lower() not in ("closed", "fixed", "resolved"):
                 refs.append(note.group(2))
+                OPEN_NOTES[str(p)].add((int(note.group(1)), note.group(2),
+                                        ref.group(1) + (f":{ref.group(2)}" if ref.group(2) else "")))
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
             for sev in refs:
@@ -853,6 +872,7 @@ def tip_statuses(files, tip, rounds, sev, loc):
             continue
         prior = file_prior(x[0], x[2])
         got = {r: prior[(r, sev, loc)] for r in rounds if (r, sev, loc) in prior}
+        got.update({r: "open" for r in rounds if (r, sev, loc) in OPEN_NOTES.get(str(x[0]), ())})
         if got:
             out[x[0]] = got
     return out
@@ -1130,6 +1150,7 @@ def main(argv=None):
         return 1
     UNBOUND_NOTES.clear()
     NOTE_REFS.clear()
+    OPEN_NOTES.clear()
     try:
         lead = json.loads(Path(a.lead).read_text())
         reviewer_lines = reviewer_findings(a.verdict)
