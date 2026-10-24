@@ -1047,7 +1047,7 @@ class OrchestratorGapFixedLater(unittest.TestCase):
                               [("REVIEW_x_astra_r9_a.md", self.R9, 1000),
                                ("REVIEW_x_sonnet_r9_b.md", self.r10(), 500)])
         self.assertEqual(code, 1, out)
-        self.assertIn("not newer", out)
+        self.assertIn("echoes different commits", out)
 
     def test_fixed_by_same_commit_refused(self):
         code, out = self.run_pair(self.r10().replace(SHA_B, SHA_A))
@@ -1206,10 +1206,19 @@ Z0_R2 = ["REVIEW_z0ote_opus-fresh_r2_2026-10-24.md", "REVIEW_z0ote_opus-h2h_r2_2
          "REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md"]
 
 
+def as_round_one(name):
+    """LUCY-e3opf C3: a round is never guessed. The real 23 Oct round-1 files carry no _r1_, so a run gets them
+    under a _r1_ name (byte copies), as a real run must: REVIEW_x_seat_2026-10-23.md -> REVIEW_x_seat_r1_2026-10-23.md."""
+    if chk.round_of(name) is not None:
+        return name
+    head, _, date = name.rpartition("_")
+    return f"{head}_r1_{date}"
+
+
 def fixture_named(fix, names, mtimes=None):
     m = json.loads((fix / "mtimes.json").read_text())
     m.update(mtimes or {})
-    return [(n, (fix / n).read_text(), m[n]) for n in names]
+    return [(as_round_one(n), (fix / n).read_text(), m[n]) for n in names]
 
 
 def parse_text(text, name="v.md"):
@@ -1287,23 +1296,27 @@ def r2_confirm(confirm, prior=None):
 
 
 class L1s6gB_RoundOneWithoutSuffix(unittest.TestCase):
-    """(b) a review file with no _rN_ in its name is round 1."""
+    """(b) was: a review file with no _rN_ in its name is round 1. LUCY-e3opf C3: no round is ever guessed."""
 
     def test_round_of(self):
-        self.assertEqual(chk.round_of("REVIEW_z0ote_sonnet-fresh_2026-10-23.md"), 1)
+        self.assertIsNone(chk.round_of("REVIEW_z0ote_sonnet-fresh_2026-10-23.md"))
         self.assertEqual(chk.round_of("REVIEW_z0ote_sonnet-fresh_r2_2026-10-24.md"), 2)
         self.assertEqual(chk.round_of("REVIEW_x_astra_r10.md"), 10)
+        self.assertEqual(chk.round_of("astra-verdict-round-2.log"), 2)
+        self.assertEqual(chk.round_of("opus-h2h-round-3.md"), 3)
+        with self.assertRaisesRegex(ValueError, "one round per file"):
+            chk.round_of("REVIEW_x_r2_round-3.md")
 
     def test_unsuffixed_round_one_graded_fixed(self):
         code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
-                              [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                              [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                                ("REVIEW_x_astra_r2_b.md", r2_confirm("- tests", [("r1 P2 lib/pay.ts:37", "closed")]), 2000)])
         self.assertEqual(code, 0, out)
         self.assertIn("FIXED=1", out)
 
     def test_wrong_round_in_the_confirmation_still_refused(self):
         code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md"),
-                              [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                              [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                                ("REVIEW_x_astra_r2_b.md", r2_confirm("- tests", [("r2 P2 lib/pay.ts:37", "closed")]), 2000)])
         self.assertEqual(code, 1, out)
 
@@ -1315,7 +1328,7 @@ class L1s6gC_LineRanges(unittest.TestCase):
 
     def run_confirm(self, ref):
         return run_named(fixed_lead(self.SRC, "@D@/REVIEW_x_r2_b.md"),
-                         [("REVIEW_x_a.md", self.RAISE, 1000),
+                         [("REVIEW_x_r1_a.md", self.RAISE, 1000),
                           ("REVIEW_x_r2_b.md", r2_confirm("- tests", [(ref, "closed")]), 2000)])
 
     def test_range_confirmation(self):
@@ -1398,12 +1411,12 @@ class L1s6gF_EarlierRoundReferenceInVerifiedOk(unittest.TestCase):
             r2 = (f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n{bad}\nUNVERIFIED\n- live\n"
                   + prior_block("PASS"))
             self.reference(bad)
-            code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_a.md", r1, 1000), ("REVIEW_x_r2_b.md", r2, 2000)])
+            code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_r1_a.md", r1, 1000), ("REVIEW_x_r2_b.md", r2, 2000)])
             self.assertEqual(code, 1, out)
             self.assertIn("matches no round-1 finding", out)
         ok = (f"REVIEWING: goal/x @ {SHA_B}\nPASS\nVERIFIED OK\n- r1 P2 lib/a.ts:5 closed: cleared; the open P2 "
               f"still drops rows\nUNVERIFIED\n- live\n" + prior_block("PASS"))
-        code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_a.md", r1, 1000), ("REVIEW_x_r2_b.md", ok, 2000)])
+        code, out = run_named(copy.deepcopy(lead), [("REVIEW_x_r1_a.md", r1, 1000), ("REVIEW_x_r2_b.md", ok, 2000)])
         self.assertEqual(code, 0, out)
         self.assertIn("FIXED=0", out)
 
@@ -1438,11 +1451,12 @@ class L1s6gG_Freshness(unittest.TestCase):
         self.assertIn("not newer", out)
 
     def test_same_round_older_on_disk_refused(self):
-        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_sonnet_b.md"),
-                              [("REVIEW_x_astra_a.md", R1_RAISE, 2000),
-                               ("REVIEW_x_sonnet_b.md", r2_confirm("- r1 P2 lib/pay.ts:37 closed: red test now green"), 1000)])
+        # LUCY-e3opf C3: one round reviewing two commits is refused before any grade; mtime never orders.
+        code, out = run_named(fixed_lead(R1_SRC, "@D@/REVIEW_x_sonnet_r1_b.md"),
+                              [("REVIEW_x_astra_r1_a.md", R1_RAISE, 2000),
+                               ("REVIEW_x_sonnet_r1_b.md", r2_confirm("- r1 P2 lib/pay.ts:37 closed: red test now green"), 1000)])
         self.assertEqual(code, 1, out)
-        self.assertIn("not newer", out)
+        self.assertIn("echoes different commits", out)
 
 
 class L1s6gH_QuotedCellNames(unittest.TestCase):
@@ -1561,7 +1575,7 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
         code, out = self.run_lead(self.lead(), seats=(0, 1, 2))
         self.assertEqual(code, 0, out)
         self.assertIn("BLOCKING=0 ESCALATE=6 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=4", out)
-        r1 = [(str(FIX_Z0 / n), chk.reviewer_findings([str(FIX_Z0 / n)])) for n in (Z0_R1_SONNET, Z0_R1_OPUS)]
+        r1 = [(str(FIX_Z0 / as_round_one(n)), chk.reviewer_findings([str(FIX_Z0 / n)])) for n in (Z0_R1_SONNET, Z0_R1_OPUS)]
         self.assertEqual(len(chk.ref_ambiguity(r1, 1, "P2", "lib/agent-core/thread-find-or-create.ts:78")), 2)
 
     def test_prose_closures_alone_grade_nothing(self):
@@ -1616,7 +1630,7 @@ def r2_file(prior=None, verdict="PASS", findings=(), sha=SHA_B, confirm="- tests
 
 def run_r2(*r2s, lead=None):
     """R1_RAISE at SHA_A, then (name, text, mtime) round-2 files."""
-    return run_named(lead or copy.deepcopy(LEAD_R2), [("REVIEW_x_astra_a.md", R1_RAISE, 1000), *r2s])
+    return run_named(lead or copy.deepcopy(LEAD_R2), [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000), *r2s])
 
 
 class E3opfStructuredPrior(unittest.TestCase):
@@ -1657,7 +1671,7 @@ class E3opfStructuredPrior(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as d:
             out_dir = Path(d) / "out"
             code, out = run_named(copy.deepcopy(LEAD_R2), [
-                ("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+                ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                 ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
                 ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(R1_REF, "open")], evidence="still charges twice"), 2100)],
                 extra=["--out-dir", str(out_dir)])
@@ -1669,7 +1683,7 @@ class E3opfStructuredPrior(unittest.TestCase):
         # fixed_by being the seat that says open is not a fix at all.
         lead = fixed_lead(R1_SRC, "@D@/REVIEW_x_sonnet_r2_b.md")
         code, out = run_named(lead, [
-            ("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+            ("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(R1_REF, "closed")]), 2000),
             ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(R1_REF, "open")], evidence="still charges twice"), 2100)])
         self.assertEqual(code, 1, out)
@@ -1785,7 +1799,7 @@ class E3opfBlockFindingFields(unittest.TestCase):
         raise_r1 = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n" + src + "\n```review-verdict\n"
                     + json.dumps({"verdict": "FAIL", "findings": [{"severity": "P3", "text": src[3:]}]}) + "\n```\n")
         code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"),
-                              [("REVIEW_x_astra_a.md", raise_r1, 1000),
+                              [("REVIEW_x_astra_r1_a.md", raise_r1, 1000),
                                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[]), 2000)])
         self.assertEqual(code, 1, out)
         self.assertIn("start with its file:line", out)
@@ -1868,7 +1882,7 @@ class E3opfOwnGateRound1(unittest.TestCase):
     def test_raised_in_two_rounds_needs_both_closed(self):
         lead = fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r3_c.md")
         lead["findings"].append(dict(lead["findings"][0], id="F2"))
-        named = [("REVIEW_x_astra_a.md", R1_RAISE, 1000),
+        named = [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
                  ("REVIEW_x_astra_r2_b.md", r2_file(prior=[], verdict="FAIL", findings=[self.RAISE_R2]), 2000)]
         code, out = run_named(copy.deepcopy(lead), named + [
             ("REVIEW_x_astra_r3_c.md", r2_file(prior=[(R1_REF, "closed")], sha=SHA_C), 3000)])
@@ -1904,7 +1918,7 @@ class E3opfOwnGateRound1(unittest.TestCase):
                                         "ordinary_use": "reception opens the bill on the desk PC",
                                         "carve_out": True}, **grade)
             code, out = run_named(lead, [
-                ("REVIEW_x_astra_a.md", r1, 1000),
+                ("REVIEW_x_astra_r1_a.md", r1, 1000),
                 ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(ref, "closed")]), 2000),
                 ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(ref, "open")], evidence="total still wrong"), 2100)])
             self.assertEqual(code, 0, out)
@@ -1930,7 +1944,7 @@ class E3opfOwnGateRound2(unittest.TestCase):
                                     "demonstrated": "seat reproduced"}, **grade)
         lead["scope_lock"] = "--scope-lock" in extra
         return run_named(lead, [
-            ("REVIEW_x_astra_a.md", f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{self.SRC}\n", 1000),
+            ("REVIEW_x_astra_r1_a.md", f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{self.SRC}\n", 1000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(self.REF, "closed")]), 2000),
             ("REVIEW_x_sonnet_r2_b.md", r2_file(prior=[(self.REF, "open")], evidence="total still wrong"), 2100)],
             extra=list(extra))

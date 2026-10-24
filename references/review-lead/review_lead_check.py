@@ -35,8 +35,16 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
     Lines that start like a finding but name no file may not outnumber the block's findings + prior
     refs of that severity. Frozen: LEAD.md "Declared prose limits".
-A `fixed` grade counts only when EVERY review of the current tip closes it in its prior array. One that
-marks it "open" escalates it; one with no entry leaves it not fixed (blocking). Prose never grades.
+A `fixed` grade counts only when EVERY review of the newest round (at the current tip) closes it in its prior
+array (C5). Any review of the tip marking it "open" escalates it; a newest-round one with no entry leaves it not
+fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
+  - C1: lines split on "\n" only, never str.splitlines();
+  - C2: a review-verdict block in a builder-evidence file (mutants-round-N.txt, qa-*-round-N.log); builder
+    evidence is never a seat and never fixed_by;
+  - C3: with 2+ inputs, a file whose name states no round (_r<N>_ or round-<N>), or a newest round on two
+    commits. The mtime never orders reviews.
+  - C4: an ambiguous ref escalates whatever the grade, act_on included. C6: an earlier (non-tip) review's
+    unmatched prose note is printed as NOTE, not refused.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
     whatever severity the reviewer wrote, so it can never be Noted;
@@ -147,8 +155,22 @@ HTML_ENDS = ((re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:[ \t>]|$)", re
              (re.compile(r" {0,3}<![A-Za-z]"), re.compile(r">")))
 HTML_START = re.compile(r"^ {0,3}<[A-Za-z/]")
 BLANK_ENDS = re.compile(r"^[ \t]*$")
-# The builder's mutants file (/goal Phase 4 Step 3): not a review seat under B1.
-MUTANTS_FILE = re.compile(r"mutants-round-\d+\.txt")
+# Builder evidence (/goal Phase 4): the mutants file and QA logs. Its findings (surviving mutants) are covered
+# like any other, but it is never a review seat under B1 and never fixed_by, and it may not carry a review-verdict
+# block: a review under a builder-evidence name is refused, so a name can't take a seat out of the roster
+# (LUCY-e3opf C2).
+BUILDER_EVIDENCE = re.compile(r"(?:mutants|qa-[\w-]+)-round-\d+\.(?:txt|log)")
+
+
+def is_builder_evidence(name):
+    return bool(BUILDER_EVIDENCE.fullmatch(Path(str(name)).name))
+
+
+def builder_evidence_errors(files):
+    """A file named like builder evidence that carries a review-verdict block is a review in disguise: refused."""
+    return [f"{Path(x[0]).name}: review content in a builder-evidence file (a review-verdict block in a file named "
+            "like the mutants file or a QA log): pass the review under its own review name"
+            for x in files if is_builder_evidence(x[0]) and one_block(x[0], x[2])]
 # A review-verdict opener behind any indent or container marker (list item, blockquote). Only one at column 0,
 # outside HTML, is the reviewer's answer; any other is refused, never silently dropped (A1).
 VERDICT_OPENER = re.compile(r"^[ \t>*+\-.)\d]*(?:<(?:!--|[A-Za-z][^>]*>)[ \t]*)*(?:`{3,}|~{3,})[ \t]*review-verdict\b",
@@ -158,6 +180,18 @@ TOP_KEYS, TOP_OPTIONAL = ("verdict", "findings"), ("prior",)
 FINDING_KEYS = ("severity", "file_line", "text")
 LEGACY_FINDING_KEYS = ("severity", "text")  # written before file_line existed: raising reviews only
 PRIOR_KEYS = ("ref", "status", "evidence")
+
+
+def lines_of(text, keepends=False):
+    """The file's lines, split on "\\n" only, one trailing "\\r" dropped (LUCY-e3opf C1). Never str.splitlines(),
+    which also breaks on VT, FF, U+0085, U+2028 and U+2029: CommonMark does not, so a fence after one of
+    those is not at a line start."""
+    parts = text.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if keepends:
+        return [p + "\n" for p in parts[:-1]] + ([parts[-1] + ("\n" if text.endswith("\n") else "")] if parts else [])
+    return [p[:-1] if p.endswith("\r") else p for p in parts]
 
 
 class Block:
@@ -185,7 +219,7 @@ def verdict_blocks(p, text):
     A1). An unclosed review-verdict fence, an unclosed fence that swallows one, or a file whose only
     review-verdict blocks sit inside another fence, refuses the file."""
     out, fence, pos, html, nested = [], None, 0, None, False
-    for line in text.splitlines(keepends=True):
+    for line in lines_of(text, keepends=True):
         start, pos = pos, pos + len(line)
         s = line.rstrip("\r\n")
         if fence is None and VERDICT_OPENER.match(s) and (html or not re.match(r"`{3,}|~{3,}", s)):
@@ -322,12 +356,36 @@ def is_confirmation(line):
 
 
 ROUND_IN_NAME = re.compile(r"_r(\d+)(?=[_.])")
+# The /goal workflow's own names: astra-verdict-round-2.log, opus-h2h-round-3.md, mutants-round-2.txt.
+ROUND_NATIVE = re.compile(r"(?:^|[_.-])round-(\d+)(?=[_.-]|$)")
 
 
 def round_of(name):
-    """The review round a file's name states (`_r<N>_`); a name without one is round 1 (LUCY-l1s6g b)."""
-    m = ROUND_IN_NAME.search(Path(str(name)).name)
-    return int(m.group(1)) if m else 1
+    """The review round a file's name states: `_r<N>_` / `_r<N>.`, or `round-<N>` in a workflow-native name;
+    None when it states neither (LUCY-e3opf C3, folds LUCY-888ru). Never a default, never the mtime: a copy
+    resets the mtime, and every unnamed file used to be round 1. Two different rounds in one name refuse."""
+    base = Path(str(name)).name
+    got = {int(m.group(1)) for rx in (ROUND_IN_NAME, ROUND_NATIVE) for m in rx.finditer(base)}
+    if len(got) > 1:
+        raise ValueError(f"{base}: the name states rounds {sorted(got)}; one round per file")
+    return got.pop() if got else None
+
+
+def check_rounds(files):
+    """Refusals for a run whose inputs can't be ordered (LUCY-e3opf C3). With more than one input, every file
+    names its round, and the newest round reviewed one commit: no mtime tie-break picks between two tips."""
+    if len(files) < 2:
+        return []
+    unnamed = [Path(x[0]).name for x in files if round_of(x[0]) is None]
+    if unnamed:
+        return [f"{n}: the file name states no round (_r<N>_ or round-<N>): pass it under a name with its round "
+                "(a copy is fine, e.g. REVIEW_<bead>_<seat>_r1_<date>.md); the round is never guessed" for n in unnamed]
+    top = max(round_of(x[0]) for x in files)
+    shas = {echo_of(x[2]) for x in files if round_of(x[0]) == top} - {""}
+    if any(not same_commit(a, b) for a in shas for b in shas):
+        return [f"the newest round {top} echoes different commits ({', '.join(sorted(s[:10] for s in shas))}): the "
+                "current tip is ambiguous; give each re-review of a new commit its own round"]
+    return []
 
 
 # A later round's line about an earlier round's finding: "- r1 P2 <file:line>[ and ...] closed: ...".
@@ -356,6 +414,8 @@ UNBOUND_NOTES = {}
 # {review path: {(round, severity, path, line, raw)}}: earlier-round "open" notes a review-verdict file's
 # block does not carry; orphan_open_priors requires their raising review as an input (LUCY-e3opf G5).
 NOTE_REFS = {}
+# Printed after the counts: things the run ignored on purpose, so the lead and orchestrator still see them.
+RUN_NOTES = []
 
 
 def tolerated_note(line, mine):
@@ -574,7 +634,7 @@ def reviewer_findings(paths):
         if block:
             # The block is the final answer. A verdict or finding after it means the reviewer
             # changed its mind (or the block is a stale template): refuse, never pick one.
-            trailing = text[block.end:].splitlines()
+            trailing = lines_of(text[block.end:])
             for line in trailing:
                 if VERDICT_HEAD.match(line) or VERDICT_DECL.search(line) or finding_shaped(line):
                     raise ValueError(f"{p}: verdict content after the last review-verdict block: "
@@ -588,11 +648,11 @@ def reviewer_findings(paths):
             echo = list(re.finditer(r"(?m)^\s*REVIEWING:.*$", head))
             final = head[echo[-1].end():] if echo else head
             verdict = load_block(block.body)["verdict"]
-            words = decl_words(final.splitlines())
+            words = decl_words(lines_of(final))
             if words - {verdict}:
                 raise ValueError(f"{p}: prose verdict {sorted(words)} contradicts the review-verdict block "
                                  f"({verdict})")
-            check_summary_counts(p, final.splitlines(), mine)
+            check_summary_counts(p, lines_of(final), mine)
             sweep_whole_response(p, text, mine, verdict, block, meta)
             found += mine
             continue
@@ -604,7 +664,7 @@ def reviewer_findings(paths):
         # different verdict line there (quoted test output, a changed mind) is refused, never picked.
         echo = list(re.finditer(r"(?m)^\s*REVIEWING:.*$", text))
         final_from = echo[-1].end() if echo else 0
-        words = decl_words(text[final_from:].splitlines())
+        words = decl_words(lines_of(text[final_from:]))
         if len(words) > 1:
             raise ValueError(f"{p}: conflicting verdict lines in the final response ({sorted(words)})")
         # With an echo, parse from the FIRST verdict line of the final response, so a later quoted
@@ -614,7 +674,7 @@ def reviewer_findings(paths):
         last = final_heads[0] if echo and final_heads else heads[-1]
         body = text[last.end():]
         stop = re.search(r"(?m)^\s*(?:#+\s*)?(?:\*\*)?(HAZARDS|VERIFIED OK|UNVERIFIED)\b", body)
-        lines = (body[:stop.start()] if stop else body).splitlines()
+        lines = lines_of(body[:stop.start()] if stop else body)
         mine = []
         for line in lines:
             if FINDING.match(line):
@@ -623,7 +683,7 @@ def reviewer_findings(paths):
                 raise ValueError(f"{p}: unrecognised finding format: {line.strip()[:100]}")
         # Past the trailer, evidence prose may cite hazard ids (H-P1) and file:line freely, but a
         # finding-shaped line there is one the parser would drop: refuse. Counts must agree too.
-        after = body[stop.start():].splitlines() if stop else []
+        after = lines_of(body[stop.start():]) if stop else []
         ver = verified_lines(after)
         for i, line in enumerate(after):
             if i in ver and tolerated_note(line, mine):
@@ -647,7 +707,7 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
     is one the parser kept (verbatim) and no other finding-shaped line appears. With one, the block is
     the single source of findings and the prose is checked by location only (prose_claim_errors)."""
     region = text[:block.start] + text[block.end:] if block else text
-    plines = region.splitlines()
+    plines = lines_of(region)
     if block:
         prose_claim_errors(p, plines, meta, file_prior(p, text))
         kept = plines
@@ -833,7 +893,7 @@ def bead_comments_text(bead):
 def parse_comments(text):
     """[(utc datetime, body)] from `bd comments` output, oldest first."""
     records, cur = [], None
-    for line in (text or "").splitlines():
+    for line in lines_of(text or ""):
         m = COMMENT_HEADER.match(line)
         if m:
             cur = [datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc), []]
@@ -879,7 +939,7 @@ def verify_clearances(cleared_ids, escalate, comments, not_before):
         follow_id = follow.group(0)
         match = None
         for ts, body in comments:
-            first = body.splitlines()[0].strip() if body else ""
+            first = lines_of(body)[0].strip() if body else ""
             if (first.upper().startswith("ORCHESTRATOR CLEARED") and token_in(cid, first)
                     and token_in(follow_id, first) and ts >= not_before):
                 match = first
@@ -930,14 +990,15 @@ ECHO_SHA = re.compile(r"[ \t]*REVIEWING:[ \t]*\S+[ \t]*@[ \t]*([0-9a-fA-F]{7,40}
 def echo_of(text):
     """The commit a review echoes; "" unless the file has exactly ONE REVIEWING line, of the form
     "<branch> @ <bare sha>" (LUCY-e3opf G4, A2). Two lines, even identical ones, are two responses."""
-    lines = [ln for ln in text.splitlines() if re.match(r"[ \t]*REVIEWING:", ln)]
+    lines = [ln for ln in lines_of(text) if re.match(r"[ \t]*REVIEWING:", ln)]
     m = ECHO_SHA.fullmatch(lines[0]) if len(lines) == 1 else None  # one physical line
     return m.group(1).lower() if m else ""
 
 
 def current_tip(files):
-    """(sha, file) of the newest review, by the round in its name, then mtime."""
-    newest = max(files, key=lambda x: (round_of(x[0]), Path(x[0]).stat().st_mtime))
+    """(sha, file) of the newest review, by the round in its name only (LUCY-e3opf C3: never the mtime;
+    check_rounds refuses a run whose newest round echoes two commits)."""
+    newest = max(files, key=lambda x: round_of(x[0]) or 0)
     return echo_of(newest[2]), newest
 
 
@@ -1002,9 +1063,14 @@ def orphan_open_priors(files, items=()):
         for r, sev, path, line, raw in sorted(NOTE_REFS.get(str(x[0]), ())):
             raised = [t for y in files if round_of(y[0]) == r for t in finding_targets(y)]
             if claim_error(sev, path, line, raised):
-                errs.append(f"{Path(x[0]).name}: note on r{r} {sev} {path}{':' + line if line else ''} matches no "
-                            f"round-{r} finding in the --verdict reviews, and its review-verdict block does not "
-                            f"carry it: pass the review that raised it, or list it in the block: {raw}")
+                why = (f"{Path(x[0]).name}: note on r{r} {sev} {path}{':' + line if line else ''} matches no "
+                       f"round-{r} finding in the --verdict reviews, and its review-verdict block does not carry it")
+                # An earlier review's prose note grades nothing and its code is gone (LUCY-e3opf C6): printed, not
+                # refused. A review of the current tip is what the lead grades from, so there it still refuses.
+                if same_commit(echo_of(x[2]), tip):
+                    errs.append(f"{why}: pass the review that raised it, or list it in the block: {raw}")
+                else:
+                    RUN_NOTES.append(f"{why} (earlier review, not the current tip: ignored): {raw}")
     return errs
 
 
@@ -1060,6 +1126,9 @@ def fixed_errors(tag, f, src, files):
     later = next((x for x in files if str(Path(x[0]).resolve()) == str(Path(by).expanduser().resolve())), None)
     if later is None:
         return [f"{tag}: fixed_by {by} is not one of the --verdict files"]
+    if is_builder_evidence(later[0]):
+        return [f"{tag}: fixed_by {Path(later[0]).name} is builder evidence (mutants file or QA log), not an "
+                "independent review: it can never confirm a finding fixed"]
     source = next((x for x in files if src in x[1]), None)
     if source is None or source is later:
         return [f"{tag}: fixed_by must be a different review from the one that raised the finding"]
@@ -1073,16 +1142,16 @@ def fixed_errors(tag, f, src, files):
         a_ = echo_of(x[2])
         if x is later or not a_ or a_.startswith(b_) or b_.startswith(a_):
             return [f"{tag}: {Path(x[0]).name} raises it at the commit fixed_by reviewed (REVIEWING echoes): not fixed"]
-        # Order by the round each name states (no _rN_ = round 1); mtime only breaks a tie, because
-        # a copy or checkout resets it (LUCY-l1s6g g). An earlier round never confirms a later one.
+        # Order by the round each name states, never the mtime: a copy or checkout resets it (LUCY-l1s6g g,
+        # LUCY-e3opf C3). Only a later round confirms an earlier one.
         r_later, r_x = round_of(later[0]), round_of(x[0])
-        if r_later < r_x or (r_later == r_x and Path(later[0]).stat().st_mtime <= Path(x[0]).stat().st_mtime):
+        if r_later is None or r_x is None or r_later <= r_x:
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
     loc, sev = leading_loc(src), src[:2]
     if not loc:
         return [f"{tag}: fixed needs the finding to start with its file:line"]
-    # The current tip is what the newest review (by round, then mtime) reviewed. A confirmation of an
+    # The current tip is what the newest review (by round) reviewed. A confirmation of an
     # older commit says nothing about the code that would land.
     tip, newest = current_tip(files)
     if not tip:
@@ -1110,9 +1179,12 @@ def fixed_errors(tag, f, src, files):
     # Every seat (LUCY-e3opf B1): each review of the tip must itself close every raising round. One that
     # says nothing about it leaves it not fixed (blocking), without refusing the run; one that keeps it
     # open is a dispute (above). A seat's block is authoritative over its own prose.
-    # Every tip review is a seat, a block-less one included (it closes nothing). Only the builder's mutants
-    # file (mutants-round-N.txt) is not: it lists mutants, not findings, and has no prior array to carry.
-    silent = [Path(x[0]).name for x in at_tip if not MUTANTS_FILE.fullmatch(Path(x[0]).name)
+    # The seats are the NEWEST round's reviews (C5), a block-less one included (it closes nothing). An earlier
+    # round at the same tip vetoes only by an explicit open entry (dispute, above) or by raising the finding
+    # again (the at_tip check above): its silence doesn't, because it reviewed before the finding was re-checked.
+    # Builder evidence (C2) is never a seat.
+    top = round_of(newest[0])
+    silent = [Path(x[0]).name for x in at_tip if round_of(x[0]) == top and not is_builder_evidence(x[0])
               and any(st.get(x[0], {}).get(r) != "closed" for r in rounds)]
     if silent and not f["_disputed"]:
         refs = " and ".join(f"r{r} {sev} {loc}" for r in rounds)
@@ -1247,12 +1319,19 @@ def main(argv=None):
         return 1
     UNBOUND_NOTES.clear()
     NOTE_REFS.clear()
+    RUN_NOTES.clear()
     try:
         lead = json.loads(Path(a.lead).read_text())
         reviewer_lines = reviewer_findings(a.verdict)
         files = [(v, reviewer_findings([v]), Path(v).read_text(errors="ignore")) for v in a.verdict]
+        pre = check_rounds(files) + builder_evidence_errors(files)
     except Exception as e:
         print(f"review-lead: REFUSED: cannot read inputs ({e})", file=sys.stderr)
+        return 1
+    if pre:
+        print("review-lead: REFUSED, fix the inputs:", file=sys.stderr)
+        for e in pre:
+            print(f"  - {e}", file=sys.stderr)
         return 1
     if not isinstance(lead, dict):
         print("review-lead: REFUSED: lead JSON is not an object", file=sys.stderr)
@@ -1278,7 +1357,8 @@ def main(argv=None):
     def must_escalate(f):
         return (f.get("_protected") or f.get("_disputed")
                 or (f.get("_duplicate_path") and f.get("pre_existing") is not True))
-    disputed = [f for f in items if f["verdict"] in ("fixed", "noted", "dismissed") and f.get("_disputed")]
+    # Whatever the grade (LUCY-e3opf C4): an in-scope act_on that is disputed stays blocking AND escalates.
+    disputed = [f for f in items if f.get("_disputed") and f not in consider and f not in out_of_scope]
     escalate = [f for f in consider if must_escalate(f)] + \
                [f for f in out_of_scope if must_escalate(f)] + disputed
     cleared = {}
@@ -1353,6 +1433,8 @@ def main(argv=None):
           f"FIXED={counts['fixed']}")
     for cid, line in cleared.items():
         print(f"CLEARED {cid}: {line}")
+    for nt in RUN_NOTES:
+        print(f"NOTE {nt}")
     return 0
 
 
