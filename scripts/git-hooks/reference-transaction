@@ -2,25 +2,36 @@
 """reference-transaction hook: only the orchestrator moves main onto a gate-path change (LUCY-wqn96).
 
 Git runs this for every ref update, whatever the route: commit (with or without
---no-verify), merge/fast-forward, cherry-pick, reset, update-ref, from any linked
-worktree. In state "prepared" a non-zero exit aborts the whole transaction, so the
-ref is left where it was.
+--no-verify), merge/fast-forward, cherry-pick, reset, update-ref, local push, from any
+linked worktree. In state "prepared" a non-zero exit aborts the whole transaction, so
+the ref is left where it was.
 
-Rule: an update of refs/heads/main whose old..new diff touches a GATE_PATHS entry is
-refused unless the caller is the fleet orchestrator. Identity comes from
-scripts/fleet-role.py (exit 0 ORCHESTRATOR, 1 SUB) run on $CLAUDE_CODE_SESSION_ID or
-$CODEX_THREAD_ID. No agent id at all = a human terminal = allowed (Shane's escape
-hatch). fleet-role failing or hanging with an agent id set = refused (fail closed).
-A FLEET_ROLE env var is never trusted.
+Rule: an update of refs/heads/main whose old..new diff touches a GATE_PATHS entry, and
+any deletion or creation of main, is refused unless the caller is the fleet orchestrator.
+Identity comes from scripts/fleet-role.py (exit 0 + "ORCHESTRATOR", else SUB) run on
+$CLAUDE_CODE_SESSION_ID and $CODEX_THREAD_ID. Both variables absent = a human terminal =
+allowed (Shane's escape hatch). Present but empty or malformed, or the checker failing or
+hanging = refused (fail closed). A FLEET_ROLE env var is never trusted.
 
-Installed by the orchestrator, never by a worker. Prefer a copy in .git/hooks over a
-symlink into the working tree: a symlinked hook (and fleet-role.py, which is read from
-the working tree either way) runs whatever uncommitted edit sits there, so a buggy
-in-progress edit to the guard could pass its own commit.
+The checker is never run from the working tree, which a merge has already rewritten by
+the time this hook runs: its blobs are read from main's current (pre-update) commit into
+a fresh temp dir and run with python3 -I. Every git inspection uses --no-replace-objects.
+
+Install with scripts/git-hooks/install.sh (orchestrator only): it copies this file into
+the absolute common hooks dir and points core.hooksPath there, so linked worktrees and
+local pushes run it too. A relative core.hooksPath resolves per worktree and skips it.
+
+Residual routes no ref hook sees (tracked in LUCY-4oxj3): `git branch -C/-M` onto main,
+`git -c core.hooksPath=...` overrides, and direct writes to packed-refs or ref files.
+The committed fleet-role.py only knows Claude sessions, so a Codex orchestrator is
+refused here (fails closed) until a provider-aware checker lands on main.
 """
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 MAIN_REF = "refs/heads/main"
 ZERO = "0" * 40
@@ -46,8 +57,18 @@ GATE_PATHS = (
     "settings.json",
 )
 
-FLEET_ROLE_BIN = os.environ.get("FLEET_ROLE_BIN") or os.path.expanduser("~/.claude/scripts/fleet-role.py")
-FLEET_ROLE_TIMEOUT_S = 5
+# The checker and the sibling module it may import, read from main's committed tree.
+CHECKER = "scripts/fleet-role.py"
+CHECKER_SIBLINGS = ("scripts/fleet_codex_rpc.py",)
+
+# Longer than fleet-role's own 30 s registry probe. Tests may lower it, never raise it.
+TIMEOUT_MAX_S = 45.0
+TIMEOUT_TEST_ENV = "WQN96_TEST_TIMEOUT_S"
+
+# Claude session ids and Codex thread ids are both UUIDs. A leading hex digit also keeps
+# the id from being read as a flag: the checker treats any "--x" argument as an option.
+AGENT_ID_RE = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{7,63}")
+AGENT_ID_VARS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
 
 RULE = (
     "Gate changes go on a branch: commit there, get the independent Astra fail-open "
@@ -59,65 +80,107 @@ def is_gate_path(path):
     return any(path.startswith(g) if g.endswith("/") else path == g for g in GATE_PATHS)
 
 
-def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True)
+def git(*args, text=True):
+    return subprocess.run(["git", "--no-replace-objects", *args], capture_output=True, text=text)
+
+
+def main_tip():
+    cur = git("rev-parse", "--verify", "-q", MAIN_REF + "^{commit}")
+    return cur.stdout.strip() if cur.returncode == 0 else None
 
 
 def changed_paths(old, new):
     """Paths that differ between old and new. None when that can't be worked out."""
-    if old == ZERO:
-        # update-ref without an expected value sends a zero old: use main's current tip.
-        cur = git("rev-parse", "--verify", "-q", MAIN_REF + "^{commit}")
-        old = cur.stdout.strip() if cur.returncode == 0 else ZERO
-    if old == ZERO:
-        out = git("ls-tree", "-r", "-z", "--name-only", new)
-    else:
-        out = git("diff", "-z", "--name-only", "--no-renames", old, new)
+    out = git("diff", "-z", "--name-only", "--no-renames", old, new)
     if out.returncode != 0:
         return None
     # -z: unquoted names, so "hooks/résumé.py" still starts with "hooks/".
     return [p for p in out.stdout.split("\0") if p]
 
 
-def is_orchestrator(agent_id):
-    # No --provider: the committed fleet-role.py does not accept it (exit 2).
+def timeout_s():
+    try:
+        wanted = float(os.environ.get(TIMEOUT_TEST_ENV, TIMEOUT_MAX_S))
+    except ValueError:
+        return TIMEOUT_MAX_S
+    return min(wanted, TIMEOUT_MAX_S) if wanted > 0 else TIMEOUT_MAX_S
+
+
+def materialise_checker(tip, dest):
+    """Write the checker blobs from commit `tip` into dest. Returns the checker path or None."""
+    for rel in (CHECKER,) + CHECKER_SIBLINGS:
+        blob = git("show", "%s:%s" % (tip, rel), text=False)
+        if blob.returncode != 0 or not blob.stdout.strip():
+            if rel == CHECKER:
+                return None
+            continue
+        path = os.path.join(dest, os.path.basename(rel))
+        with open(path, "wb") as fh:
+            fh.write(blob.stdout)
+    return os.path.join(dest, os.path.basename(CHECKER))
+
+
+def is_orchestrator(agent_id, checker):
+    # The bare id only: the committed fleet-role.py exits 2 on any unknown flag.
     try:
         res = subprocess.run(
-            [sys.executable, FLEET_ROLE_BIN, agent_id],
-            capture_output=True, text=True, timeout=FLEET_ROLE_TIMEOUT_S,
+            [sys.executable, "-I", checker, agent_id],
+            capture_output=True, text=True, timeout=timeout_s(),
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return res.returncode == 0
+    lines = res.stdout.splitlines()
+    return res.returncode == 0 and bool(lines) and lines[0].strip() == "ORCHESTRATOR"
 
 
-def caller_role():
+def caller_role(trusted_tip):
     """'human', 'orchestrator', or 'sub' (any doubt is 'sub').
 
-    Every agent id in the environment must be the orchestrator: a Codex worker launched
-    from the Claude orchestrator inherits its CLAUDE_CODE_SESSION_ID, and must not pass
-    as it. Only one session holds the role, so carrying both ids means 'sub'.
+    Every agent id variable present must hold a well-formed id that is the orchestrator:
+    a Codex worker launched from the Claude orchestrator inherits its
+    CLAUDE_CODE_SESSION_ID and must not pass as it. Only one session holds the role, so
+    carrying both ids means 'sub'. A variable that is set but empty is not a human.
     """
-    ids = [os.environ.get(v) for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")]
-    ids = [agent_id for agent_id in ids if agent_id]
-    if not ids:
+    present = [os.environ[v] for v in AGENT_ID_VARS if v in os.environ]
+    if not present:
         return "human"
-    if all(is_orchestrator(agent_id) for agent_id in ids):
-        return "orchestrator"
-    return "sub"
+    if not all(AGENT_ID_RE.fullmatch(agent_id) for agent_id in present):
+        return "sub"
+    if trusted_tip is None:
+        return "sub"
+    tmp = tempfile.mkdtemp(prefix="wqn96-checker-")
+    try:
+        checker = materialise_checker(trusted_tip, tmp)
+        if checker is None:
+            return "sub"
+        if all(is_orchestrator(agent_id, checker) for agent_id in present):
+            return "orchestrator"
+        return "sub"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] != "prepared":
         return 0
     blocked = []
+    tip = main_tip()
     for line in sys.stdin.read().splitlines():
         parts = line.split(" ", 2)
         # Case-folded: on macOS refs/heads/MAIN is the same loose ref file as main.
         if len(parts) != 3 or parts[2].lower() != MAIN_REF:
             continue
         old, new, _ = parts
-        if new == ZERO or old == new:
+        if old == ZERO:
+            # update-ref without an expected value sends a zero old: use main's current tip.
+            old = tip or ZERO
+        if old == new:
+            continue
+        if old == ZERO:
+            blocked.append("(creates main)")
+            continue
+        if new == ZERO:
+            blocked.append("(deletes main)")
             continue
         paths = changed_paths(old, new)
         if paths is None:
@@ -126,11 +189,11 @@ def main():
         blocked.extend(p for p in paths if is_gate_path(p))
     if not blocked:
         return 0
-    if caller_role() in ("human", "orchestrator"):
+    if caller_role(tip) in ("human", "orchestrator"):
         return 0
     sys.stderr.write(
         "REFUSED (LUCY-wqn96): this session is not the orchestrator, so it cannot move "
-        "main onto a change to gate paths:\n"
+        "main onto a change to gate paths, or create or delete main:\n"
         + "".join("  %s\n" % p for p in sorted(set(blocked)))
         + RULE + "\n"
     )
