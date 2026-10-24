@@ -10,8 +10,11 @@ origin/main and whose last commit is within --days, decide whether it is REALLY 
 status. Also scans recent closeout fragments for "not landed" lines and flags any that git says are
 still unlanded.
 
+It also lists non-closed beads whose work is already on main (`landed_open`); --close-landed closes
+the PUSHED ones `LANDED @<sha>` (LUCY-g1u0e; land-batch runs it after every push).
+
 Exit 0 only when nothing is LAND-READY / NEEDS-REVIEW / UNKNOWN and no fragment is flagged.
-Usage: unlanded-sweep.py [--json] [--days N] [--no-fetch]
+Usage: unlanded-sweep.py [--json] [--days N] [--no-fetch] [--close-landed]
 """
 import glob
 import json
@@ -299,6 +302,120 @@ def sweep(days, fetch=True):
     return out
 
 
+# --- landed but not closed (LUCY-g1u0e) ---------------------------------------------------------
+# A branch that IS on main never reaches sweep(), so its PUSHED bead sat open for weeks (24 Oct: 21 of
+# 134 PUSHED beads had a land commit on main). Only PUSHED beads auto-close: a long-goal epic lands one
+# child at a time and stays open on purpose, and in_progress means a session may be re-working it.
+LAND_SUBJ_RE = re.compile(r"^land:\s+(\S+)\s+@\s+([0-9a-f]{7,40})", re.I)
+EXACT_KEY_RE = re.compile(r"(?:^|[/-])aestheticcnext-([a-z0-9]+(?:\.\d+)*)(?:-r\d+)?$", re.I)
+REDISPATCH_RE = re.compile(r"^\s*(?:started /goal|started /long-goal|RESUME:)", re.I)
+
+
+def exact_key(branch):
+    """Bead key a branch carries exactly: goal/aestheticcnext-x, ...-x-r2, worktree-goal-..., auto/AestheticcNext-x.
+    None for long-goal child branches (aestheticcnext-1b6a3-32): those name a child, not the epic."""
+    m = EXACT_KEY_RE.search(branch or "")
+    return m.group(1).lower() if m else None
+
+
+def landed_index(land):
+    """key -> newest (land sha, commit time, subject) among `land: <branch> @ <tip>` commits on main."""
+    idx = {}
+    for sha, ct, subj in land:
+        m = LAND_SUBJ_RE.match(subj)
+        k = exact_key(m.group(1)) if m else None
+        if k and (k not in idx or ct > idx[k][1]):
+            idx[k] = (sha, ct, subj)
+    return idx
+
+
+def _ts(s):
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def decide_landed(d, land_hit, refs):
+    """What to do with one non-closed bead. land_hit: (sha, ct, subject) or None. refs: [{branch, tip, ct,
+    on_main, names_bead}] for remote branches carrying this bead's exact key. Returns None (no landing
+    evidence) or {action: close|report|skip, sha, ct, evidence, why}."""
+    ev = None
+    if land_hit:
+        ev = {"sha": land_hit[0], "ct": land_hit[1], "evidence": land_hit[2][:140]}
+    else:  # no land commit, but the bead's own branch tip is on main (fast-forward / manual land)
+        on = [r for r in refs if r["on_main"] and r["names_bead"]]
+        if on:
+            r = max(on, key=lambda x: x["ct"])
+            ev = {"sha": r["tip"], "ct": r["ct"], "evidence": f"branch {r['branch']} tip is an ancestor of origin/main"}
+    if not ev:
+        return None
+    newer = [r for r in refs if not r["on_main"] and r["ct"] > ev["ct"]]
+    if newer:
+        return dict(ev, action="skip", why=f"unlanded branch {newer[0]['branch']} is newer than the land")
+    for c in d.get("comments") or []:
+        t = _ts(c.get("created_at")) if isinstance(c, dict) else None
+        if t and t > ev["ct"] and REDISPATCH_RE.search(str(c.get("text") or "")):
+            return dict(ev, action="skip", why="re-dispatched after the land (a newer started /goal or RESUME: comment)")
+    if d.get("status") != "pushed":
+        return dict(ev, action="report", why=f"status {d.get('status')}: only PUSHED beads auto-close; check by hand")
+    return dict(ev, action="close", why="PUSHED and its land is on origin/main")
+
+
+def landed_open(env, land):
+    """Non-closed AestheticcNext- beads whose work is already on origin/main."""
+    rc, out = sh(["bd", "list", "--json", "--limit", "0"], 120, env)
+    if rc != 0:
+        raise RuntimeError("bd list failed")
+    rows = [b for b in json.loads(out or "[]") if str(b.get("id", "")).startswith("AestheticcNext-")
+            and b.get("status") != "closed"]
+    idx = landed_index(land)
+    rc, refs_out = git("for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(committerdate:unix)",
+                       "refs/remotes/origin")
+    by_key = {}
+    for line in refs_out.splitlines():
+        p = line.split("\t")
+        if len(p) == 3 and p[0].startswith("origin/"):
+            k = exact_key(p[0][len("origin/"):])
+            if k:
+                by_key.setdefault(k, []).append((p[0][len("origin/"):], p[1], int(p[2])))
+    res = []
+    for b in rows:
+        k = b["id"].split("-", 1)[1].lower()
+        if k not in idx and k not in by_key:
+            continue
+        refs = []
+        for br, tip, ct in by_key.get(k, []):
+            _, msg = git("log", "-1", "--format=%s%n%b", tip)
+            refs.append({"branch": br, "tip": tip, "ct": ct, "names_bead": has_key(msg, k),
+                         "on_main": git("merge-base", "--is-ancestor", tip, "origin/main")[0] == 0})
+        if k not in idx and not any(r["on_main"] for r in refs):
+            continue
+        d = bead(k, env) or b
+        r = decide_landed(d, idx.get(k), refs)
+        if r:
+            res.append({"bead": b["id"], "status": b.get("status"), "priority": b.get("priority"),
+                        "title": (b.get("title") or "")[:90], "sha": r["sha"][:10], "evidence": r["evidence"],
+                        "action": r["action"], "why": r["why"]})
+    return res
+
+
+def close_landed(items, env):
+    """bd close every action=close item, re-verifying ancestry first. Sets item['closed'] True/False."""
+    for it in items:
+        if it["action"] != "close":
+            continue
+        if git("merge-base", "--is-ancestor", it["sha"], "origin/main")[0] != 0:
+            it["closed"], it["why"] = False, "sha no longer an ancestor of origin/main; not closed"
+            continue
+        rc, _ = sh(["bd", "close", it["bead"], "--reason",
+                    f"LANDED @{it['sha']}: {it['evidence']} (verified ancestor of origin/main; "
+                    "unlanded-sweep --close-landed, LUCY-g1u0e)"], 60, env)
+        it["closed"] = rc == 0
+    return items
+
+
 def fragments(real):
     """closeout lines saying unlanded; flag those git still says are unlanded."""
     res = []
@@ -335,9 +452,16 @@ def main():
     frags = fragments(real)
     flagged = [f for f in frags if f["flag"]]
     blocking = [r for r in real if r["status"] in BLOCKING]
-    code = 1 if (blocking or flagged) else 0
+    code = 1 if (blocking or flagged) else 0  # landed_open never changes the exit: callers gate on unlanded work
+    env = dict(os.environ, BEADS_DIR=os.path.join(REPO, ".beads"))
+    try:
+        lo = landed_open(env, land_commits())
+        if "--close-landed" in args:
+            close_landed(lo, env)
+    except Exception as e:
+        lo = [{"bead": None, "action": "error", "why": f"landed-open check failed: {e}"}]
     if "--json" in args:
-        print(json.dumps({"days": days, "candidates": real, "fragments": frags,
+        print(json.dumps({"days": days, "candidates": real, "fragments": frags, "landed_open": lo,
                           "blocking": [r["branch"] for r in blocking], "exit": code}, indent=1))
         return code
     order = {"LAND-READY": 0, "NEEDS-REVIEW": 1, "UNKNOWN": 2, "NEEDS-REWORK": 3, "OWNED": 4, "SUPERSEDED/DEAD": 5}
@@ -355,6 +479,13 @@ def main():
     unflagged = [f for f in frags if not f["flag"]]
     if unflagged:
         print(f"({len(unflagged)} other fragment line(s) mention 'not landed' but name work that is landed/not found)")
+    if lo:
+        n = sum(1 for i in lo if i["action"] == "close" and not i.get("closed"))
+        print(f"LANDED BUT NOT CLOSED (work on origin/main, bead still open): {len(lo)} "
+              f"({n} PUSHED to close{'' if '--close-landed' in args else '; run with --close-landed'})")
+        for i in lo:
+            tag = "CLOSED" if i.get("closed") else i["action"].upper()
+            print(f"  [{tag}] {i['bead']} {i.get('status', '')} @ {i.get('sha', '')}  {i['why']}")
     print("RESULT:", "CLEAN" if code == 0 else "BLOCKING (exit 1)")
     return code
 

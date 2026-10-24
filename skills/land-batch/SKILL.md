@@ -798,6 +798,24 @@ fi
 
 This ancestry check is intentionally redundant with `bd-close-guard` (`~/.claude/bin/bd`) — land-batch's own close is expected to always pass it, since the push just happened; if it ever doesn't, that is itself a signal something is wrong (a rejected/rebased push, a stale `$MERGE_SHA`) and the bead correctly stays `pushed`, not closed. A bead already sitting `closed` from before B-1 shipped (or a LUCY- vault bead) is left alone here.
 
+🔴 **Backstop close after the run's last push to main (LUCY-g1u0e).** The per-bead block above misses
+bundles, `-rN` resumes, manual lands and runs where it was skipped: on 24 Oct, 31 PUSHED beads already
+had their work on main and the orchestrator reported several as open P0s. So once the run has pushed
+anything (ordinary loop and migration transaction both done), run this unsandboxed (bd + git fetch):
+
+~~~bash
+python3 ~/.claude/scripts/unlanded-sweep.py --close-landed --json > "$EVIDENCE_DIR/close-landed.json"
+jq -r '.landed_open[] | "\(.action) closed=\(.closed | tostring) \(.bead) @ \(.sha // "") \(.why)"' \
+  "$EVIDENCE_DIR/close-landed.json"
+~~~
+
+It closes every **PUSHED** AestheticcNext- bead whose exact branch has a `land:` commit on origin/main
+(or whose own branch tip is an ancestor of it), with reason `LANDED @<sha>`, re-checking ancestry first.
+It never closes open / in_progress / blocked beads (long-goal epics land one child at a time), nor a bead
+re-dispatched after its land or with a newer unlanded branch: those are listed as `report` / `skip`.
+Put the `close` and `report` lines in the final report. A manual orchestrator land runs the same
+command after its push. Its exit code is the unlanded-branch verdict, not this close: read the JSON.
+
 🔴 **B-2 (AI Fleet Grand Plan, 2026-09-01): post-land goal-state review, a different model family asking a different question than Phase 4 already did.** `/goal` Phase 4 (Codex, or GLM per B-10) already reviewed the DIFF — is this change sound. This is the SECOND, independent check, run only after a real close above, asking the GOAL-STATE question instead: does this bug-shape exist anywhere ELSE in the repo, fixed or not. This is exactly the check that would have caught `AestheticcNext-n708r`'s third unfixed copy at land time instead of three days later as a separately-filed `zrexy`. Only runs for a bead that was actually closed just now (skip entirely on HELD):
 
 ~~~bash
@@ -1358,7 +1376,8 @@ launch-failure, main-baseline-red, and every ratchet HOLD category above.
 Cite each candidate’s ratchet result, baseline summary/diff, command triples,
 and ratchet commit SHA (or explicit no-change), plus the migration final check.
 Add a **SENSITIVE AUTO-LANDED** section: one line per candidate (branch, sensitive
-paths, review evidence from `report_notes`).
+paths, review evidence from `report_notes`). For LAND, add **BEADS CLOSED** from
+`close-landed.json` (closed, and `report` items for a human to check).
 Do not send Slack/Hermes or other proactive notices;
 the report, discovery label, and --status are the brief.
 
