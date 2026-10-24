@@ -559,9 +559,12 @@ def test_s1_per_worktree_hooks_path_refused(repo, tmp_path):
     repo.git("worktree", "add", "-q", "-b", "wtb", str(wt))
     repo.git("config", "extensions.worktreeConfig", "true")
     repo.git("config", "--worktree", "core.hooksPath", str(tmp_path / "elsewhere"), cwd=wt)
+    hooks_path_before = repo.git("config", "--get", "core.hooksPath").stdout
     res = repo.install()
     assert res.returncode == 1
-    assert str(wt) in res.stderr and "core.hooksPath" in res.stderr
+    # Refused up front, naming the worktree, before anything is installed or reconfigured.
+    assert f"worktree {wt} sets its own core.hooksPath" in res.stderr
+    assert repo.git("config", "--get", "core.hooksPath").stdout == hooks_path_before
 
 
 def test_s1_per_worktree_hooks_path_equal_to_common_allowed(repo, tmp_path):
