@@ -936,3 +936,14 @@ class C7Real3bm73R7(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("BLOCKING=0 ESCALATE=1 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=0 FIXED=7", out)
         self.assertIn("NOTE REVIEW_3bm73_astra-xhigh_r3_2026-10-24.md", out)
+
+
+class C3SameRoundNeverConfirms(unittest.TestCase):
+    """C3 below main(): fixed_errors alone never lets a review confirm one of its own round, whatever the mtimes."""
+
+    def test_same_round_fixed_by_refused_in_check(self):
+        raise_f = ("/x/REVIEW_x_astra_r1_a.md", [R1_SRC], R1_RAISE)
+        conf = ("/x/REVIEW_x_opus_r1_b.md", [], closing_r2())
+        lead = fixed_lead(R1_SRC, "/x/REVIEW_x_opus_r1_b.md")
+        errs, _ = chk.check(lead, [R1_SRC], 2, False, [raise_f, conf])
+        self.assertTrue(any("is not newer than" in e for e in errs), errs)
