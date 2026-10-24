@@ -339,8 +339,9 @@ def _ts(s):
 
 def decide_landed(d, land_hit, refs):
     """What to do with one non-closed bead. land_hit: (sha, ct, subject) or None. refs: [{branch, tip, ct,
-    on_main, names_bead}] for remote branches carrying this bead's exact key. Returns None (no landing
-    evidence) or {action: close|report|skip, sha, ct, evidence, why}."""
+    on_main, names_bead, equivalent, descends}] for remote branches carrying this bead's exact key
+    (equivalent: every commit patch-equivalent on main; descends: tip is past the landed tip). Returns None
+    (no landing evidence) or {action: close|report|skip, sha, ct, evidence, why}."""
     ev = None
     if land_hit:
         ev = {"sha": land_hit[0], "ct": land_hit[1], "evidence": land_hit[2][:140]}
@@ -351,9 +352,12 @@ def decide_landed(d, land_hit, refs):
             ev = {"sha": r["tip"], "ct": r["ct"], "evidence": f"branch {r['branch']} tip is an ancestor of origin/main"}
     if not ev:
         return None
-    newer = [r for r in refs if not r["on_main"] and r["ct"] > ev["ct"]]
-    if newer:
-        return dict(ev, action="skip", why=f"unlanded branch {newer[0]['branch']} is newer than the land")
+    # In flight: commits pushed on top of the landed tip (while the train ran, or after), or any newer
+    # unlanded branch. An older -rN sibling the land superseded is not; nor is a patch-equivalent one.
+    busy = [r for r in refs if not r["on_main"] and not r.get("equivalent")
+            and (r.get("descends", True) or r["ct"] > ev["ct"])]
+    if busy:
+        return dict(ev, action="skip", why=f"unlanded work on {busy[0]['branch']} past or newer than the land")
     for c in d.get("comments") or []:
         t = _ts(c.get("created_at")) if isinstance(c, dict) else None
         if t and t > ev["ct"] and REDISPATCH_RE.search(str(c.get("text") or "")):
@@ -392,7 +396,18 @@ def landed_open(env, land):
                          "on_main": git("merge-base", "--is-ancestor", tip, "origin/main")[0] == 0})
         if k not in idx and not any(r["on_main"] for r in refs):
             continue
-        d = bead(k, env) or b
+        m = LAND_SUBJ_RE.match(idx[k][2]) if k in idx else None
+        landed_tip = m.group(2) if m else max((r for r in refs if r["on_main"]), key=lambda x: x["ct"])["tip"]
+        for r in refs:
+            if not r["on_main"]:
+                rc, cherry = git("cherry", "origin/main", r["tip"])
+                r["equivalent"] = rc == 0 and bool(cherry.strip()) and "+" not in cherry
+                r["descends"] = git("merge-base", "--is-ancestor", landed_tip, r["tip"])[0] == 0
+        d = bead(k, env)
+        if not d:  # comments carry the re-dispatch veto: never decide without them
+            res.append({"bead": b["id"], "status": b.get("status"), "action": "skip", "sha": "",
+                        "why": "bd show failed; cannot check for a re-dispatch, not closed"})
+            continue
         r = decide_landed(d, idx.get(k), refs)
         if r:
             res.append({"bead": b["id"], "status": b.get("status"), "priority": b.get("priority"),

@@ -72,11 +72,34 @@ def test_redispatch_after_land_skips():
     assert us.decide_landed(bead(comments=[chatter]), LAND, [])["action"] == "close"
 
 
-def test_newer_unlanded_branch_skips_older_does_not():
-    newer = ref("goal/aestheticcnext-2dp1n-r2", ct=LAND_T + 60, on_main=False)
+def unlanded(branch, ct, descends=False, equivalent=False):
+    return dict(ref(branch, ct=ct, on_main=False), descends=descends, equivalent=equivalent)
+
+
+def test_newer_unlanded_branch_skips_older_superseded_sibling_does_not():
+    newer = unlanded("goal/aestheticcnext-2dp1n-r2", LAND_T + 60)
     assert us.decide_landed(bead(), LAND, [ref(), newer])["action"] == "skip"
-    stale = ref("goal/aestheticcnext-2dp1n-r1", ct=LAND_T - 60, on_main=False)
+    stale = unlanded("goal/aestheticcnext-2dp1n-r1", LAND_T - 60)
     assert us.decide_landed(bead(), LAND, [stale])["action"] == "close"
+
+
+def test_commits_pushed_on_top_of_the_landed_tip_skip_even_if_older_than_the_land():
+    # builder pushed more work while the train tested the pinned tip: committed before the land commit
+    past = unlanded("goal/aestheticcnext-2dp1n", LAND_T - 30, descends=True)
+    assert us.decide_landed(bead(), LAND, [past])["action"] == "skip"
+    same = unlanded("goal/aestheticcnext-2dp1n", LAND_T + 60, equivalent=True)  # rebased copy of landed work
+    assert us.decide_landed(bead(), LAND, [same])["action"] == "close"
+
+
+def test_bead_lookup_failure_never_closes(monkeypatch):
+    rows = '[{"id": "AestheticcNext-2dp1n", "status": "pushed", "title": "t"}]'
+    monkeypatch.setattr(us, "sh", lambda args, *a, **k: (0, rows))
+    monkeypatch.setattr(us, "git", lambda *a, **k: (0, "") if a[0] != "for-each-ref" else (0, ""))
+    monkeypatch.setattr(us, "bead", lambda key, env: None)
+    out = us.landed_open({}, [LAND])
+    assert [(o["bead"], o["action"]) for o in out] == [("AestheticcNext-2dp1n", "skip")]
+    monkeypatch.setattr(us, "bead", lambda key, env: bead())
+    assert us.landed_open({}, [LAND])[0]["action"] == "close"
 
 
 def test_tip_on_main_without_land_commit():
