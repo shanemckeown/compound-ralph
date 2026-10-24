@@ -992,3 +992,25 @@ class OwnGateR1Attempt5(unittest.TestCase):
             mutants])
         self.assertEqual(code, 1, out)
         self.assertIn("the newest round 2 echoes different commits", out)
+
+    def test_native_rounds_from_two_attempt_dirs_refused(self):
+        """Own-gate r2 Astra :398 / Opus :391: attempt-1's round-2 closure vs attempt-2's round-1 re-raise."""
+        import os, tempfile
+        d = base.Path(tempfile.mkdtemp(dir="/private/tmp"))
+        (d / "a1").mkdir(); (d / "a2").mkdir()
+        reraise = closing_r2(strict_block("FAIL", [("P2", "lib/pay.ts:37", "retry charges twice — guard")],
+                                          prior=[(REF, "open")])).replace(SHA_B, SHA_C).replace("\nPASS\n", "\nFAIL\n")
+        files = {d / "a1/astra-verdict-round-1.log": R1_RAISE, d / "a1/astra-verdict-round-2.log": closing_r2(),
+                 d / "a2/opus-h2h-round-1.md": reraise}
+        for p, t in files.items():
+            p.write_text(t)
+        (d / "lead.json").write_text(json.dumps(fixed_lead(R1_SRC, str(d / "a1/astra-verdict-round-2.log"))))
+        argv = ["--lead", str(d / "lead.json"), "--out-dir", str(d / "out"), "--round", "2"]
+        for p in files:
+            argv += ["--verdict", str(p)]
+        err, out = base.io.StringIO(), base.io.StringIO()
+        with base.redirect_stderr(err), base.redirect_stdout(out):
+            code = chk.main(argv)
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("round-<N> files from 2 directories", err.getvalue())
+        self.assertNotIn("FIXED=", out.getvalue())

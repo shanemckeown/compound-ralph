@@ -395,6 +395,13 @@ def check_rounds(files):
                 "renamed to _r<N>_ in bead order)"]
     if not seats:
         return ["no review among the inputs: builder evidence alone can't be graded"]
+    # round-<N> restarts at 1 in every /goal attempt's evidence dir: one run = one round namespace (own-gate r2,
+    # Astra :398, Opus :391). Two attempts' native files can't be ordered by their names.
+    dirs = {str(Path(x[0]).resolve().parent) for x in files if ROUND_NATIVE.search(Path(x[0]).name)}
+    if len(dirs) > 1:
+        return [f"round-<N> files from {len(dirs)} directories ({', '.join(sorted(dirs))}): each /goal attempt "
+                "restarts its rounds at 1, so one run takes one attempt's files; pass the others as _r<N>_ copies in "
+                "bead order"]
     top = max(round_of(x[0]) for x in seats)
     shas = {echo_of(x[2]) for x in seats if round_of(x[0]) == top} - {""}
     if any(not same_commit(a, b) for a in shas for b in shas):
