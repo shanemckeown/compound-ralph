@@ -30,9 +30,8 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
   - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
     distinct one escalates, whatever it is graded. A path-only ref 'r<N> <sev> <path>' names only a
-    finding raised with no line at that path, compared in one canonical form (canon_path); any other
-    finding at that path in any round, lined or not, makes it ambiguous, and a review of the tip that
-    mentions the path anywhere vetoes its closure (both escalate, LUCY-cwpxu);
+    finding raised as '<sev> <path> — ...' with that exact path token (no normalisation); any other finding,
+    any round, that names the path or its file name anywhere makes it ambiguous and escalates (LUCY-cwpxu);
   - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally (builder
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
@@ -538,108 +537,47 @@ def leading_loc(finding):
 
 def ref_loc(finding):
     """What a prior ref names a finding by: its leading file:line, else (raised with no line, LUCY-cwpxu)
-    the canonical path of its whole leading token, else None. A leading token that carries a line once
-    unwrapped (`src/a.ts`:12) is not line-less, so a path-only ref never names it (fail closed)."""
-    loc = leading_loc(finding)
-    if loc:
-        return loc
-    locs = {pl for p in link_pieces(lead_token(finding)) for pl in [token_loc(p)] if pl}
-    return next(iter(locs))[0] if len(locs) == 1 and next(iter(locs))[1] is None else None
+    its exact path token (path_only_token), else None."""
+    return leading_loc(finding) or path_only_token(finding)
 
 
-def link_pieces(word):
-    """A location token as its names: a markdown link [text](target) is its text and its target, not the
-    whole token. A #L12 anchor is a line (:12); any other anchor is dropped. Route brackets and groups
-    ([id], (booking)) are kept whole."""
-    out = [word]
-    if "](" in word:
-        text, _, target = word.partition("](")
-        out = [text.lstrip("["), target]
-    return [re.sub(r"#L(\d+(?:-L?\d+)?)", lambda m: ":" + m.group(1).replace("L", ""), p).split("#", 1)[0]
-            for p in out]
+# Path-only refs (LUCY-cwpxu attempt 3): exact, no normalisation on either side. A finding is eligible only as
+# "<SEV> <TOKEN> — ..." (or " - "), and a ref names it only by that TOKEN, byte for byte. Anything else, from a
+# wrapper to a link, an anchor or a prefix, is not eligible, so its path-only ref refuses (fail closed).
+PATH_ONLY_FINDING = re.compile(r"^(P[123]) (\S+) [—-] ")
+PATH_ONLY_TOKEN = re.compile(r"[A-Za-z0-9._@()\[\]/-]+")
 
 
-# Path-only refs (LUCY-cwpxu): any repo-relative file name, extensionless (Dockerfile) and short (main.c)
-# included. Never the prose-path grammar: a path-only ref names a file, it doesn't find one in prose.
-# A segment is any run of characters a repo file name may hold, less separators and markdown / anchor marks.
-_REF_SEG = re.compile(r"[^\s/:`*\"'<>|\\#?]+")
+def exact_token(tok):
+    """tok if it may be a path-only ref's file, else None: the token grammar, a letter or digit, no '..', no
+    markdown link, no _emphasis_ wrapper, no empty segment, no tally (P1/P2), and no leading ./ a/ b/ or /."""
+    ok = (PATH_ONLY_TOKEN.fullmatch(tok) and re.search(r"[A-Za-z0-9]", tok) and ".." not in tok
+          and not TALLY.fullmatch(tok)
+          and "](" not in tok and "//" not in tok and not tok.endswith("/")
+          and not (tok.startswith("_") and tok.endswith("_")) and not tok.startswith(("./", "a/", "b/", "/")))
+    return tok if ok else None
 
 
-def canon_path(t):
-    """The one canonical form of a repo path, on both sides of a path-only ref: diff prefixes a/ b/ and ./
-    dropped, // collapsed, x/../ resolved (a ref may not use '..': structured_prior). None for an absolute path,
-    a directory, one escaping the repo, a home path (~), a tally or a token with no letter."""
-    t = re.sub(r"/{2,}", "/", t)
-    while t.startswith("./"):
-        t = t[2:]
-    if t.startswith(("a/", "b/")):
-        t = t[2:]
-    segs = []
-    for s in t.split("/"):
-        if s == ".." and segs and segs[-1]:
-            segs.pop()
-        elif s != ".":
-            segs.append(s)
-    if not segs or segs[0].startswith("~") or not all(s and s != ".." and _REF_SEG.fullmatch(s) for s in segs):
-        return None
-    t = "/".join(segs)
-    return None if TALLY.fullmatch(t) or not re.search(r"[A-Za-z]", t) else t
+def path_only_token(finding):
+    """The exact path token of a finding raised with no line ("P3 tests/a.test.ts — ..."), else None."""
+    m = PATH_ONLY_FINDING.match(finding)
+    return exact_token(m.group(2)) if m else None
 
 
-def token_loc(token):
-    """(canonical path, line or None) of one location token as written, else None. Markdown wrappers go
-    first (unwrap), so `src/a.ts`:12 and **src/a.ts:12** keep their line."""
-    m = re.fullmatch(r"(.+?)(?::(\d+(?:-\d+)?))?", unwrap(token))
-    path = canon_path(m.group(1)) if m else None
-    return (path, m.group(2)) if path else None
+def path_needles(tok):
+    """What another finding naming tok would contain: the token and its file name, each also with route marks
+    ()[] dropped and edge punctuation trimmed. Lower-cased; extra needles only add escalations."""
+    out = set()
+    for t in (tok, tok.rsplit("/", 1)[-1]):
+        out |= {t.lower(), re.sub(r"[()\[\]]", "", t).strip(".-_@").lower()}
+    return out
 
 
-def unwrap(token):
-    """A location token less its markdown wrappers: backticks, **, _x_, quotes, unbalanced or enclosing
-    parens, trailing punctuation."""
-    t, prev = token, None
-    while t != prev:
-        prev = t
-        t = t.replace("`", "").replace("**", "").strip("\"'").rstrip(",;.:!?")
-        if t.endswith(")") and t.count(")") > t.count("("):
-            t = t[:-1]
-        if t.startswith("(") and (t.endswith(")") or t.count("(") > t.count(")")):
-            t = t[1:-1] if t.endswith(")") else t[1:]
-        m = re.fullmatch(r"(_{1,2})(.+)\1(:\d+(?:-\d+)?)?", t)
-        if m:
-            t = m.group(2) + (m.group(3) or "")
-    return t
-
-
-def lead_token(finding):
-    """A finding line's whole leading location token, up to a space or a dash."""
-    return (re.split(r"[\s–—]+", finding[3:].strip(), maxsplit=1) or [""])[0]
-
-
-def own_paths(o):
-    """The canonical path a finding line sits at, lined or not (its leading location, however written)."""
-    out = {pl[0] for p in link_pieces(lead_token(o)) for pl in [token_loc(p)] if pl}
-    loc = leading_loc(o)
-    p = canon_path(path_parts(loc)[0]) if loc else None
-    return out | ({p} if p else set())
-
-
-def mentioned_paths(o):
-    """Every canonical path a finding line names, token-bounded (src/a.ts is not src/a.tsx): each word, and
-    each piece of it between markdown link / quote / anchor punctuation ("[x](src/a.ts#L3)"). Extra pieces
-    only add vetoes, never remove one."""
-    words = re.split(r"[\s–—]+", o)
-    toks = words + [p for w in words for p in link_pieces(w)] + [p for w in words for p in re.split(r"[\[\](){}<>\"'`#,;|]+", w)]
-    return {pl[0] for tok in toks for pl in [token_loc(tok)] if pl}
-
-
-def ref_candidates(o, sev, loc):
-    """Finding line o is one a ref 'r<N> <sev> <loc>' could name (G3 ambiguity): a lined loc, the same
-    leading file:line and severity; a path-only loc, any finding at that canonical path, lined or not,
-    whatever its severity (LUCY-cwpxu)."""
-    if path_parts(loc)[1] is not None:
-        return o[:2] == sev and leading_loc(o) == loc
-    return loc in own_paths(o)
+def names_path(o, tok):
+    """Finding line o names tok anywhere (G3, LUCY-cwpxu): a plain substring, case-insensitive, with all
+    whitespace and zero-width characters deleted, so a path split across a line or a URL still counts."""
+    hay = re.sub(r"[\s\u200b-\u200d\u2060\ufeff]+", "", o).lower()
+    return any(n in hay for n in path_needles(tok))
 
 
 def decl_words(lines):
@@ -750,8 +688,7 @@ def structured_findings(p, block):
 # A finding's leading location in block text, past optional `code` / **bold** markup.
 LEADING_LOC = re.compile(r"^[`*]*(" + LOC.pattern + r")")
 PRIOR_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(" + LOC.pattern + r")$")
-# A path-only ref, for a finding raised with no line number (LUCY-cwpxu): the token must be a path with no
-# line once unwrapped, and is keyed by its canonical form (canon_path).
+# A path-only ref, for a finding raised with no line number (LUCY-cwpxu): its token is exact_token's, byte for byte.
 PRIOR_PATH_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(\S+)$")
 
 
@@ -774,11 +711,10 @@ def structured_prior(p, data):
         loc = m.group(3) if m else None
         if not m:
             m = PRIOR_PATH_REF.match(ref)
-            pl = token_loc(m.group(3)) if m else None
-            if not pl or pl[1] is not None or m.group(3).endswith(":") or ".." in unwrap(m.group(3)).split("/"):
+            loc = exact_token(m.group(3)) if m else None
+            if not loc:
                 raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>' (or 'r<N> P<1-3> "
-                                 "<file>' for a finding raised with no line)")
-            loc = pl[0]
+                                 "<file>' for a finding raised with no line, the file exactly as that finding wrote it)")
         status, ev = e["status"], e["evidence"]
         if status not in ("closed", "open"):
             raise ValueError(f"{p}: {what} status {status!r} is not \"closed\" or \"open\"")
@@ -1278,10 +1214,17 @@ def finding_targets(x):
 
 def ref_ambiguity(files, r, sev, loc):
     """The distinct round-r findings a ref 'r<r> <sev> <loc>' could name (LUCY-e3opf G3). The same text
-    in two seats is one finding; two texts are two, and one ref can never close both. A path-only ref
-    could name any finding at that canonical path, in any round, lined or not (LUCY-cwpxu)."""
-    any_round = path_parts(loc)[1] is None
-    return sorted({o for y in files if any_round or round_of(y[0]) == r for o in y[1] if ref_candidates(o, sev, loc)})
+    in two seats is one finding; two texts are two, and one ref can never close both.
+
+    A path-only ref (LUCY-cwpxu) names the one round-r finding raised with exactly that token. Any other finding,
+    in any round, of any severity, that names the token or its file name anywhere (names_path) may be the same
+    defect, so it comes back alongside: fail closed, noise escalations accepted."""
+    if path_parts(loc)[1] is not None:
+        return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
+    named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o) == loc}
+    if len(named) != 1:
+        return sorted(named)
+    return sorted(named | {o for y in files for o in y[1] if names_path(o, loc)})
 
 
 def ambiguous_refs(files):
@@ -1381,16 +1324,10 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} reviewed {b_[:10]}, not the current tip {tip[:10]} "
                 f"(newest review {Path(newest[0]).name})"]
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
-    veto = None
     for x in at_tip + [y for y in files if is_builder_evidence(y[0]) and builder_at_tip(y, files)]:
         for other in x[1]:
-            if path_parts(loc)[1] is None:
-                # Path-only (LUCY-cwpxu): any finding at the tip that sits at or mentions the path, whatever its
-                # severity, may be the same defect raised again. It can't be told apart, so it escalates.
-                if veto is None and loc in own_paths(other) | mentioned_paths(other):
-                    veto = (f"{Path(x[0]).name} names {loc} again at the current tip ({other[:80]}): a path-only "
-                            "closure can't tell it from the same defect raised again")
-            elif other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
+            # A path-only loc (LUCY-cwpxu) never matches here: a tip finding naming it escalates (ref_ambiguity).
+            if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
     # Raised in several rounds: fixed_by must close every one of them.
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
@@ -1402,7 +1339,7 @@ def fixed_errors(tag, f, src, files):
         return [f"{tag}: fixed_by {Path(later[0]).name} has no review-verdict prior entry {refs}"
                 + (" (it says open)" if "open" in mine.values() else "")
                 + ": not fixed. Prose 'closed:' lines are not graded"]
-    f["_disputed"] = dispute(src, files) or veto
+    f["_disputed"] = dispute(src, files)
     # Every seat (LUCY-e3opf B1): each review of the tip must itself close every raising round. One that
     # says nothing about it leaves it not fixed (blocking), without refusing the run; one that keeps it
     # open is a dispute (above). A seat's block is authoritative over its own prose.
