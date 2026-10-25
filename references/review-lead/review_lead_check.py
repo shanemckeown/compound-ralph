@@ -119,6 +119,35 @@ PROTECTED = re.compile(
     r"|H-M\d|H-B\d|H-C\d|H-T\d)\b",
     re.I,
 )
+# The file-length ratchet names the files it counts, and the lander regenerates its baseline, so a credit or
+# cron file name must not make it protected (LUCY-mz6fk). Exempt from the keyword backstop by SHAPE only: a P3
+# declared at the ratchet test whose text, once its "<source file> [is] N/M [lines]" counts and the fixed
+# phrases below are removed, is only punctuation and RATCHET_WORDS. No word bag can say anything about money,
+# booking, sends or tenancy; anything else (a claim, another path, a digit, non-ASCII) keeps the backstop.
+# A protected category still wins.
+RATCHET_TEST = "tests/meta/file-length-ratchet.test.ts"
+# A path, as FILE_LINE writes one. A "(group)/" segment is a Next.js route group: app/(home)/page.tsx:12
+# (LUCY-e3opf). The ratchet counts paths in the same grammar: app/(booking)/page.tsx 588/578 (LUCY-mz6fk).
+PATH = r"(?<![\w./\[\])-])(?=[\w./\[\]-]*[A-Za-z_/])(?:[\w./\[\]-]|\([\w.-]+\)(?=/))+"
+RATCHET_COUNT = re.compile(PATH + r"\.(?:tsx?|jsx?|mjs|cjs|py|sh|sql|css)"
+                           r"\s+(?:is\s+)?\d+\s*/\s*\d+(?:\s+lines?)?(?![\w/])")
+RATCHET_PHRASES = re.compile(r"\bno (?:real )?clinic scenario\b|\bno runtime effect\b|\bbuild[- ]gate failure\b"
+                             r"|\bbuild hygiene\b|\bfile[- ]length ratchet\b"
+                             r"|\bas explicitly assigned in the bead['\u2019]s comments\b", re.I)
+RATCHET_WORDS = frozenset("a an the and of for in is as during ratchet baseline regenerate regenerates regenerated regen "
+                          "lander lander's landing line lines".split())
+
+
+def ratchet_only(src):
+    loc = leading_loc(src)
+    if not src.startswith("P3") or not loc or loc.rsplit(":", 1)[0] != RATCHET_TEST:
+        return False
+    rest = RATCHET_PHRASES.sub(" ", RATCHET_COUNT.sub(" ", src[3:].replace(loc, " ", 1)))
+    if not re.fullmatch(r"[A-Za-z'\u2019\s,;:.()`*_\u2013\u2014-]*", rest):
+        return False
+    return all(w in RATCHET_WORDS for w in re.findall(r"[a-z]+(?:['\u2019][a-z]+)?", rest.lower().replace("\u2019", "'")))
+
+
 FINDING = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?(P[123])(?:\*\*)?[\s:]+\S+.*$")
 # A line that STARTS like a finding (after bullets, numbering, bold, brackets) but isn't one in
 # the FINDING shape is refused, because it could hide a finding; so is any line with a severity
@@ -132,8 +161,7 @@ SEVERITY_TOKEN = re.compile(r"(?<![\w-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # "Finding (P1): Retry charges twice", "[P2] ...", "Issue P1 - ...".
 EXPLICIT_LABEL = re.compile(r"\b(?:finding|issue|bug|defect|blocker)s?\b\W{0,4}[\[(]?P[123]\b"
                             r"|[\[(]P[123][\])]|(?<![\w-])P[123]\s*:\s", re.I)
-# A "(group)/" segment is a Next.js route group: app/(home)/page.tsx:12 (LUCY-e3opf).
-FILE_LINE = re.compile(r"(?<![\w./\[\])-])(?=[\w./\[\]-]*[A-Za-z_/])(?:[\w./\[\]-]|\([\w.-]+\)(?=/))+:\d+")
+FILE_LINE = re.compile(PATH + r":\d+")
 # A finding's location as written, keeping a line range ("lib/t.ts:78-83"); compared exactly (LUCY-l1s6g c).
 LOC = re.compile(FILE_LINE.pattern + r"(?:-\d+)?(?![\w-])")
 # A count is a number standing alone: "1 P1", "(0 P1", never the 1 in "Round-1 P1" (LUCY-l1s6g e).
@@ -1346,7 +1374,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
             continue
         if files:
             f["_disputed"] = amb.get(src) or dispute(src, files)
-        protected = cat in PROTECTED_CATEGORIES or bool(PROTECTED.search(src))
+        protected = cat in PROTECTED_CATEGORIES or (bool(PROTECTED.search(src)) and not ratchet_only(src))
         f["_protected"] = protected
         dup = f["_duplicate_path"] = is_duplicate_path(f, src)
         if triage_ordinary_use(f, protected):
