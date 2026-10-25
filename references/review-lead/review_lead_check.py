@@ -1232,10 +1232,11 @@ def ambiguous_refs(files):
 def every_seat_closes(src, files):
     """True when a `fixed` grade may skip the G3/A5 ambiguity escalation (LUCY-unykv, Orchestrator23 25 Oct):
     every review of the newest round at the current tip has a closed prior entry (structured_prior already
-    refuses one without evidence) at src's severity + location for every round that raised it, no review of
-    the tip marks it open, and nothing at the tip raises it again. One entry then speaks for every finding at
-    that location, because every seat closed the location. A missing, open, mixed or re-raised one keeps the
-    escalation. The roster and statuses are fixed_errors' (B1, C5)."""
+    refuses one without evidence) at src's severity + location for every round that raised it. One entry then
+    speaks for every finding at that location, because every seat closed the location. A missing, open or
+    mixed one keeps the escalation. fixed_errors still runs first: any review of the tip (an earlier round's
+    included) marking it open is a dispute (escalated), and one raising it again refuses the run. The roster
+    and statuses are fixed_errors' (B1, C5)."""
     loc, sev = leading_loc(src), src[:2]
     tip, newest = current_tip(files) if files else ("", None)
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
@@ -1244,15 +1245,7 @@ def every_seat_closes(src, files):
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
     roster = [x for x in at_tip if round_of(x[0]) == round_of(newest[0]) and not is_builder_evidence(x[0])]
     st = tip_statuses(files, tip, rounds, sev, loc)
-    if not roster or any("open" in v.values() for v in st.values()):
-        return False
-    if any(st.get(x[0], {}).get(r) != "closed" for x in roster for r in rounds):
-        return False
-    for x in at_tip + [y for y in files if is_builder_evidence(y[0]) and builder_at_tip(y, files)]:
-        for other in x[1]:
-            if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
-                return False
-    return True
+    return bool(roster) and all(st.get(x[0], {}).get(r) == "closed" for x in roster for r in rounds)
 
 
 def same_commit(a, b):

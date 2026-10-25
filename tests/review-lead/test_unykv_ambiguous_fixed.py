@@ -52,6 +52,21 @@ class EverySeatClosesTheAmbiguousRef(unittest.TestCase):
         self.assertIn("again at the current tip: not fixed", out)
         self.assertNotIn("FIXED=", out)
 
+    def test_earlier_round_open_at_the_same_tip_escalates(self):
+        # r2 reviewed the tip and kept it open; both r3 seats re-reviewed the same tip and closed it: mixed.
+        lead = G3RefIdentity().lead([A, B])
+        for f in lead["findings"]:
+            f["fixed_by"] = "@D@/REVIEW_x_astra_r3_c.md"
+        code, out = run_named(lead, [
+            ("REVIEW_x_astra_r1_a.md", r1_seat(A), 1000),
+            ("REVIEW_x_opus_r1_a.md", r1_seat(B), 1100),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "open")]), 2000),
+            ("REVIEW_x_astra_r3_c.md", r2_file(prior=[(REF, "closed")]), 3000),
+            ("REVIEW_x_opus_r3_c.md", r2_file(prior=[(REF, "closed")]), 3100)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+
     def test_only_a_fixed_grade_is_relieved(self):
         code, out = run([(REF, "closed")], [(REF, "closed")], grade="consider")
         self.assertEqual(code, 0, out)
