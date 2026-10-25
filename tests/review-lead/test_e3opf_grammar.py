@@ -1389,7 +1389,8 @@ class CwpxuExactToken(unittest.TestCase):
                      "P3 a/src/a.ts — x", "P3 b/src/a.ts — x", "P3 /src/a.ts — x", "P3 src/../a.ts — x",
                      "P3 src/a.ts#L12 — x", "P3 [src/a.ts](src/a.ts) — x", "P3 https://x.io/src/a.ts — x",
                      "P3 src/my test.ts — x", "P3 `src/my test.ts` — x", "P3 src/a.ts – x", "P3 src/a.ts —x",
-                     "P3 src/ — x", "P3 src//a.ts — x", "P3 P1/P2 — x", "P3 src/$id.tsx — x", "P3 R&D.md — x"]:
+                     "P3 src/ — x", "P3 src//a.ts — x", "P3 P1/P2 — x", "P3 src/$id.tsx — x", "P3 R&D.md — x",
+                     "P3 @ — x", "P3 () — x", "P3 [] — x", "P3 - — x"]:
             self.assertIsNone(chk.path_only_token(line), line)
         self.assertEqual(chk.ref_loc("P2 lib/a.ts:12 — x"), "lib/a.ts:12")
 
@@ -1452,6 +1453,21 @@ class CwpxuExactToken(unittest.TestCase):
             again = f"P3 lib/b.ts:5 — {mention} still lacks the failed-fetch assertion — add it"
             with self.subTest(mention=mention):
                 self.assert_escalated(self.tip_mention(again))
+
+    def test_split_file_name_mention_escalates(self):
+        """Whitespace and zero-width characters inside the file name itself are deleted before matching."""
+        for mention in ("tests/a.\ntest.ts", "tests/a. test.ts", "tests/a.\u200btest.ts", "tests/a.\u2060test.ts"):
+            again = f"P3 lib/b.ts:5 — {mention} still lacks the failed-fetch assertion — add it"
+            with self.subTest(mention=mention):
+                self.assert_escalated(self.tip_mention(again))
+
+    def test_trimmed_and_unbracketed_needles_escalate(self):
+        """A token with route marks or edge punctuation is also matched without them (more escalations only)."""
+        for src_tok, mention in (("app/[id].tsx", "app/id.tsx"), ("lib/x/a.ts.", "lib/x/a.ts")):
+            src = f"P3 {src_tok} — the contraindication read has no failed-fetch cell — add one"
+            again = f"P3 lib/b.ts:5 — {mention} still lacks it — add it"
+            with self.subTest(src_tok=src_tok):
+                self.assert_escalated(self.tip_mention(again, src, src_tok))
 
     def test_route_path_mention_escalates(self):
         src = "P3 pages/api/clients/[id]/medical-history.ts — the contraindication read has no failed-fetch cell"
