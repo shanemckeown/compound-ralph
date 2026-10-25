@@ -443,6 +443,13 @@ def test_txfbf_descriptive_no_echo_file_and_hidden_bead_echoes_still_veto(tmp_pa
     # An unparseable echo beside a parseable other-branch one keeps the veto.
     body = f"REVIEWING: e3opf-structured @ 5acadb10c8\nREVIEWING: the 3bm73 branch tip\n3bm73 {TX_TIP[:8]} FAIL\n"
     assert len(_vetoes(tmp_path / "u", "REVIEW_e3opf_r9.md", body)) == 1
+    # So does an echo of the bead with its colon missing (own-gate r1).
+    body = (f"REVIEWING goal/aestheticcnext-3bm73 @ {TX_TIP}\nFAIL\n"
+            "```\nREVIEWING: e3opf-structured @ 5acadb10c8\n```\n")
+    assert len(_vetoes(tmp_path / "c", "REVIEW_allure_followup_r9.md", body)) == 1
+    ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=tmp_path / "c" / "reviews",
+                                     comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
+    assert ok is False
 
 
 def test_txfbf_lander_is_not_held_by_a_harness_review_quoting_the_bead(tmp_path):

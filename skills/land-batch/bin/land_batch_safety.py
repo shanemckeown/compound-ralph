@@ -344,9 +344,10 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
     return out
 
 
-# A line that claims to be a REVIEWING echo, and one that parses as ``<branch> @ <sha>``. Lenient on
-# markdown (``**REVIEWING:**``, ``> - REVIEWING:``, backticks) and on any trailing text.
-_ECHO_CLAIM_RE = re.compile(r"^[ \t>*_`-]*REVIEWING[*_`]*\s*:", re.I)
+# A line that claims to be a REVIEWING echo (any line-start REVIEWING word, colon or not), and one
+# that parses as ``<branch> @ <sha>``. Lenient on markdown (``**REVIEWING:**``, ``> - REVIEWING:``,
+# backticks) and on any trailing text.
+_ECHO_CLAIM_RE = re.compile(r"^[ \t>*_`-]*REVIEWING\b", re.I)
 _ECHO_PARSE_RE = re.compile(r"^[ \t>*_`-]*REVIEWING[*_`]*\s*:[*_`]*\s*`?([^\s`@]+?)`?\s*@\s*`?"
                             r"([0-9a-fA-F]{7,40})(?![0-9a-fA-F])", re.I)
 _HEADER_FIELD_RE = re.compile(r"^[ \t>*_`-]*(?:Bead|Branch)[*_`]*\s*:", re.I)
