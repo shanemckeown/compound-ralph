@@ -209,6 +209,13 @@ class P1P2LinesBindAsMain(unittest.TestCase):
             parse_text(strict_file("- r1 P3 reports/summary closed: P3 exports/archive naming; P3 team/member naming",
                                    prior=[("r1 P3 reports/summary:10", "closed")]))
 
+    def test_a_note_severity_counts_once_whatever_the_spacing(self):
+        # own-gate a2 r3 Astra: with two spaces CLAIM_SEV reads the note's own P3 too; it must count once.
+        p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
+        for prose in ("- r1 P3 user/owned/member open: still a gap", "- r1  P3 user/owned/member open: still a gap",
+                      "- r1\tP3 user/owned/member open: still a gap"):
+            self.assertEqual(len(parse_text(strict_file(prose, p3))), 1, prose)
+
     def test_m5lm7_shape_is_p3_and_passes(self):
         p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
         self.assertEqual(len(parse_text(strict_file("P3 lib/auth/request-memo.ts:70 — H-D1 test gap\n" + M5LM7_17,

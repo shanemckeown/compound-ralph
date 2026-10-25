@@ -969,7 +969,7 @@ def prose_claim_errors(p, lines, meta, prior):
     for line in lines:
         if clean(line) in verbatim:
             continue
-        claims = []
+        claims, own = [], None
         note = EARLIER_NOTE.match(line)
         # LUCY-16n7i W2: on an all-P3 line (p3_relief) a weak slash-word is never a note's reference: the note
         # is read as a plain prose line, so every severity on it (its own "rN P3" included, which CLAIM_SEV
@@ -977,7 +977,7 @@ def prose_claim_errors(p, lines, meta, prior):
         # P2 is read exactly as on main.
         if note and repo_paths(note.group(3)) and p3_relief(line, note.group(2)):
             weak_claims[note.group(2)].append(line.strip()[:100])
-            note = None
+            own, note = note.start(2), None  # counted once here, skipped below ("r1  P3": CLAIM_SEV reads it)
         if note:
             ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
@@ -999,7 +999,7 @@ def prose_claim_errors(p, lines, meta, prior):
                 if claim_error(sev, ref.group(1), ref.group(2), carried):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
-            claims, weak = line_claims(line)
+            claims, weak = line_claims(line, skip=own)
             start = FINDING_START.match(line) or EXPLICIT_LABEL.match(line.lstrip(" -*•#>"))
             # A P3 whose only path is a weak slash-word ("P3 user/owned/member gap") is a weak claim: counted
             # against the block's findings below, never ignored (LUCY-16n7i). The line's starting severity is
