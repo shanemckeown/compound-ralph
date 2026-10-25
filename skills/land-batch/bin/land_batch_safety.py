@@ -319,11 +319,13 @@ _LEAD_ESCALATION_RE = re.compile(r"^needs input: (?P<bead>\S+) escalated \d+ pro
 _VERDICT_SHAPE_RES = (
     re.compile(r"\bfail(?:ed)?\s*[@:]"),                       # FAIL @<sha>, FAILED: <sha>
     re.compile(r"\bfail(?:ed)?[^\w\n]{0,4}[0-9a-f]{7,40}\b"),  # FAIL — <sha>
-    re.compile(r"\bverdict\s*:\s*fail"),
-    re.compile(r"(?m)^reviewing\s*:"),
+    re.compile(r"(?m)^\W*fail(?:ed)?\b"),                      # a review's own FAIL line
+    re.compile(r"\bverdict\W{0,4}fail"),                       # Verdict: FAIL, "verdict": "FAIL"
+    re.compile(r"(?m)^\W*reviewing\s*:"),
     re.compile(r"\bblocking\s*=\s*[1-9]"),
-    # a finding line: P1/P2 then a path-like token (lib/x.ts, x.ts:9)
-    re.compile(r"(?<![\w-])p[12](?![\w-])[^\S\n]*[:|—–-]?[^\S\n]*[^\s,;()]*(?:/|\.[a-z]\w*:\d)"),
+    # a finding line: P1/P2 then a path-like token (lib/x.ts, x.ts:9, review_gate.py)
+    re.compile(r"(?<![\w-])p[12](?![\w-])[^\S\n]*[:|—–-]?[^\S\n]*[^\s,;()]*"
+               r"(?:/|\.[a-z][a-z0-9]{0,5}\b|:\d)"),
 )
 EVIDENCE_ROOT = Path("~/.claude/evidence").expanduser()
 
@@ -371,9 +373,10 @@ def mentions_bead(body: str, bead_id: str) -> bool:
 
 
 def _normalise(body: str) -> str:
-    """A copy for the verdict-shape scan: markdown emphasis/code marks gone, whitespace inside
-    each line collapsed, casefolded. Line breaks stay (``reviewing:`` is a line start)."""
-    text = re.sub(r"[*_`]", "", body)
+    """A copy for the verdict-shape scan: markdown emphasis/code/heading/quote marks and quotes
+    gone, whitespace inside each line collapsed, casefolded. Line breaks stay (a line that opens
+    with ``fail`` or ``reviewing:`` is a verdict)."""
+    text = re.sub(r"[*_`#>\"']", "", body)
     return "\n".join(" ".join(ln.split()) for ln in text.splitlines()).casefold()
 
 

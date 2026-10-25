@@ -89,6 +89,17 @@ def test_cases_2_4_5_6_7_still_veto(body):
     f"{REAL_0110}\nAstra FAIL — {TIP[:10]}",
     f"{REAL_0110}\nastra failed: one P2, see the review file",
     f"{REAL_0110}\nAstra FAIL @ the tip above",
+    # own-gate r2: a standalone FAIL line, a structured verdict, a markdown REVIEWING heading
+    f"{REAL_0110}\n**FAIL**",
+    f"{REAL_0110}\nFAIL\n- one P2 in the gate",
+    f'{REAL_0110}\n{{"verdict": "FAIL", "findings": []}}',
+    f'{REAL_0110}\n{{\n  "verdict" : "FAIL"\n}}',
+    f"{REAL_0110}\nVerdict — FAIL",
+    f"{REAL_0110}\n## REVIEWING: b7pqo-status-not-veto @ {TIP[:10]}",
+    f"{REAL_0110}\n> reviewing: goal/aestheticcnext-9kwlw",
+    # own-gate r2: a severity before a bare file name
+    f"{REAL_0110}\nP2 review_gate.py — status line exempted",
+    f"{REAL_0110}\n- P1 `land_batch_safety.py` — y",
 ])
 def test_careless_verdict_spellings_still_veto(body):
     assert not lbs.is_lead_escalation_status(body, BEAD)

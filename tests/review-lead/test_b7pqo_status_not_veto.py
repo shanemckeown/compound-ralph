@@ -25,7 +25,8 @@ class StatusCommentIsNotAVeto(_GateCase):
     def test_status_comment_carrying_a_verdict_still_refuses(self):
         for body in (f"{STATUS}\nFAIL @{TIP}", STATUS.replace("BLOCKING=0", "BLOCKING=1"),
                      f"{STATUS}\nWITHDRAWN: wrong brief", STATUS.replace(BEAD, BEAD + "2", 1),
-                     f"needs input: FAIL @{TIP[:10]}"):
+                     f"needs input: FAIL @{TIP[:10]}", f"{STATUS}\n**FAIL** @ **{TIP[:10]}**",
+                     f"{STATUS}\n## REVIEWING: x @ {TIP[:10]}\n**FAIL**\nP2 review_gate.py — y"):
             code, out = self.dry_run(body)
             self.assertEqual(code, 1, body)
             self.assertIn("not among the inputs", out)
