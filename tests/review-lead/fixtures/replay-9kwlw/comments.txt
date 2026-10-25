@@ -1,0 +1,164 @@
+
+Comments on AestheticcNext-9kwlw:
+
+[Encrypted-S] at 2026-09-04 23:43
+  PROD-EVIDENCE (/goal AestheticcNext-o0cu8, 2026-09-05): No fresh query run (audio recording duration distribution not queried this pass — would need a join against the audio/recordings table filtered by duration, out of scope for a spot check). Priority read: current P1 stands; this is an architectural ceiling (Cloud Run's 300s timeout vs a 1-hour UI cap), reachable by construction for any clinical-note recording over ~4 minutes — a common duration for a real consultation note, not an edge case.
+
+[Encrypted-S] at 2026-09-24 09:49
+  REVERIFIED 2026-09-24 (main d403a2ee8): VALID. enhanced-appointment-modal.tsx:1760 still offers 3600s; audio/process.ts:366 transcribes synchronously; google-speech.ts:47 4-min wait; process.ts:41 50MB upload cap. But prod: all 12 recordings >60s completed, incl. an 1101s one in 12s; '~4 min never works' is overstated. Repro: Record a ~45-60 min clinical note in the appointment modal: upload/transcription exceeds the request limits and no transcript is saved. [LUCY-57agm sweep]
+
+[Encrypted-S] at 2026-10-16 19:19
+  Promised to Owen Thomas (Infinity Aesthetics, client:infinity-aesthetics) on 16 Oct demo; deadline = his go-live (TBD, trial ends ~30 Oct). Vault: Clients/PROMISE_TRACKER.md rows 2026-10-16.
+
+[Encrypted-S] at 2026-10-16 19:33
+  SHANE (16 Oct, session f462cc4b): "make that a P1… I have been telling everyone since the beginning of time that that does 60 minutes." Raised P2→P1. Promised 60 min to every prospect, incl. Owen Thomas (Infinity). Direction: option 1/2 (async transcription + reconcile), not option 3.
+
+[Encrypted-S] at 2026-10-24 16:12
+  24 Oct go-live Zoom (Dr Anita Dhunna): Shane told her the clinical recorder records "up to 60 minutes" of a session [1127-1129]. Code cap is 270 s (use-appointment-recorder.ts:16). Promise now attached to this bug.
+
+[Encrypted-S] at 2026-10-24 16:41
+  SHANE YES (2026-10-24 ~17:50, Anita Manager tab): "that session recording up to sixty minutes that definitely needs a priority like yeah make that number one". Decision implied: Option 1 (background transcription job), because the promise is 60 minutes working; Option 3 (lowering the cap) does NOT meet it.
+  Outcome: a practitioner records up to 60 minutes in a clinical note and gets the transcript and playback in the note.
+  Premise: cap 270s in components/appointments/use-appointment-recorder.ts:16; transcription synchronous in pages/api/audio/process.ts under a 300s Cloud Run timeout.
+  Reuses: audio_recordings table (lib/schema.ts:1917), lib/utils/google-speech.ts long-running recognition, components/appointments/clinical-note-workspace-tabs.tsx playback.
+  Check: on prod Demo Clinic, record a 20-minute and a 55-minute clinical note; both show a transcript within 10 min of stopping and play back; a 3-minute note still transcribes as before.
+
+[Encrypted-S] at 2026-10-24 16:43
+  Premise verified: (1) origin/main 7634c9a6 components/appointments/use-appointment-recorder.ts:16 APPOINTMENT_RECORDING_MAX_SECONDS = 270, so the UI now stops at 4.5 min; (2) prod read 24 Oct 18:00 BST, audio_recordings: 108 completed + 2 failed at <=4 min, 1 completed >10 min (historic, before the cap), 0 between 4 and 10 min. A 60-minute recording cannot be made today. Triage: no rule refuses it; promised by Shane on the Dr Anita Dhunna go-live Zoom 24 Oct 2026 (transcript lines cited in the description) and ranked by Shane the same evening; no existing setting or workflow gives the outcome; benefits every clinic.
+
+[Encrypted-S] at 2026-10-24 16:44
+  Triage: promise — Shane promised it on the Dr Anita Dhunna go-live Zoom 24 Oct 2026 (lines cited above), ranked it the same evening; no existing setting gives the outcome; benefits every clinic.
+
+[Encrypted-S] at 2026-10-24 17:57
+  PLAN (Manager aestheticc-89, Opus, 24 Oct, from origin/main 240eb08a12)
+  
+  Outcome: a practitioner presses record in a clinical note, talks for up to 60 minutes, presses stop, and within 10 minutes the transcript appears in the note and the recording plays back. A recording under 4.5 minutes behaves exactly as today.
+  
+  Premise (verified on origin/main 240eb08a12):
+  - UI cap 270s: components/appointments/use-appointment-recorder.ts:12-16.
+  - Sync transcription inside the upload request: pages/api/audio/process.ts:406-461; 240s wait in lib/utils/google-speech.ts:33, batchRecognize at :215-231; operation name never stored.
+  - Cloud Run request timeout 300s (cloudbuild.yaml, no --timeout).
+  - 60 min webm at browser default bitrate (~128-256 kbps) = 58-115 MB > 50 MB cap (process.ts:50). No audioBitsPerSecond set (hooks/useVoiceInput.ts:241-245).
+  - Client never polls; useVoiceInput.ts:469-528 reads the transcript from the upload response.
+  
+  Reuses:
+  - lib/utils/google-speech.ts:215-231 batchRecognize + readBatchResults (split "start" from "wait"; no second STT path).
+  - audio_recordings.metadata jsonb (lib/schema.ts:1917-1957) for the operation name: NO migration.
+  - transcription_status 'processing' (already documented in the schema comment).
+  - GET /api/voice-notes/[id] (pages/api/voice-notes/[id]/index.ts:29-71) as the status endpoint the client polls.
+  - Existing 5-min Cloud Scheduler cron pages/api/cron/stale-attempt-sweeper.ts (CRON_SECRET) as the sweep host: NO new scheduler job, NO infra.
+  - SKIP LOCKED claim idiom from lib/webhooks/delivery-worker.ts:72,104.
+  - correctSpellingOrKeepRaw + the completed-row write in process.ts:437-461 (extract into one shared finaliser; both paths call it).
+  
+  Design:
+  1. Server, upload (process.ts): if duration <= 270s keep the current synchronous path byte-for-byte. If longer: start batchRecognize, write metadata.transcriptionOperation = {name, startedAt}, set transcription_status='processing', respond 200 with transcriptionStatus:'processing', transcription:null. Requires the gs:// URI (GCS); if none (S3 fallback), mark failed with a stated reason.
+  2. Shared reconciler lib/audio/transcription-reconcile.ts: reconcileRecording(id, businessId) checks the operation (v2 operations client getOperation / checkBatchRecognizeProgress); on done → readBatchResults → shared finaliser → 'completed'; on error → 'failed' with reason; still running and > 45 min since start → 'failed' (timeout). Idempotent: conditional UPDATE ... WHERE transcription_status='processing'.
+  3. Lazy reconcile on read: GET /api/voice-notes/[id] calls reconcileRecording when the row is 'processing' (business-scoped, already).
+  4. Sweep: stale-attempt-sweeper cron additionally claims up to N 'processing' rows with an operation name (FOR UPDATE SKIP LOCKED) and reconciles each, so a closed tab still gets its transcript within ~5 min of Google finishing.
+  5. Client: useVoiceInput sets audioBitsPerSecond 32000 (60 min ≈ 14 MB; well inside 50 MB). On transcriptionStatus 'processing', show "Transcribing…" and poll GET /api/voice-notes/[id] every 10s (stop on completed/failed/unmount, give up at 20 min) then call the existing onComplete/onTranscript with the text. If the modal closed, use-clinical-note-fill.ts:91-109 already picks the newest completed row later.
+  6. Raise APPOINTMENT_RECORDING_MAX_SECONDS to 3600 and fix the comment.
+  
+  Not in scope (list, don't fix): recordings lost if the tab crashes mid-hour (single blob, no timeslice); in-flight operations started before this ship cannot be recovered (their names were never stored); maxDuration:60 in process.ts is a Vercel no-op.
+  
+  Check (runnable): unit tests for the routing threshold, reconciler (done / error / running / timeout / idempotent double-call), the sweeper claim, and the client polling hook; full pg lane; npm run build. Acceptance on prod Demo Clinic (a4cc955f-7859-4dcc-bfb2-c0b28c0bba17) after deploy: 20- and 55-min clinical notes show the transcript within 10 min of stop and play back; a 3-min note still transcribes synchronously; rows read 'completed'.
+  Patient data: transcripts and audio stay in Claude seats + Google STT; Codex review reads code only.
+
+[Encrypted-S] at 2026-10-24 17:58
+  REVIEW FOCUS (Orchestrator23 via Manager aestheticc-89, 24 Oct): the reconciler has two triggers (client poll on GET /api/voice-notes/[id] + the 5-min stale-attempt-sweeper). Reviewers verify: (1) the completed/failed write is a compare-and-set (UPDATE ... WHERE id=? AND business_id=? AND transcription_status='processing' RETURNING), so the second trigger is a no-op; finaliser side effects (spelling correction, metadata) only run for the trigger that won the CAS; (2) no double-bill: credits stay charged once at upload (process.ts:287 trackVoiceUsage), and neither reconcile path calls CreditService; (3) the sweeper claims with FOR UPDATE SKIP LOCKED. Patient-data path: second read is a fresh Opus head-to-head; Codex reviews code and diffs only, never transcript text, audio or prod rows.
+
+[Encrypted-S] at 2026-10-24 17:58
+  started /goal 2026-10-24T18:58:55+01:00 (via /long-goal, singleton) in worktree .claude/worktrees/goal-aestheticcnext-9kwlw
+
+[Encrypted-S] at 2026-10-24 19:07
+  needs input: escalated 7 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/lead-escalate-round-2.txt — branch goal/aestheticcnext-9kwlw @ 60300197fb pushed. Round 2: BLOCKING=0. Of the 7: three are round-1 fixes confirmed by Opus r2 + killed mutants (F1-r1 sweep order, F2-r1 shared batch request, F5-r1 sweep/check timeouts) that the checker's closed:-line parser refused to grade fixed; two are the file-length ratchet (VoiceRecorderHero.tsx 247/245, stale-attempt-sweeper.ts 109/105, lander regen); one is credits metering (AestheticcNext-grnqj, Shane decision, needed before 60-min notes are used for real); one is the rare >20-min Transcript-tab copy (follow-up AestheticcNext-nqa6v). Change note: .goal/CHANGE-NOTE.md in the worktree.
+
+[Encrypted-S] at 2026-10-24 19:08
+  REFLECTION (Manager aestheticc-89, 24 Oct, after round 2 @60300197fb): Astra r2 verdict FAIL on a user-facing P2 (useVoiceInput.ts:574: after the 20-min client wait the session recording stores '' and the Transcript tab says 'saved but not transcribed' and never refreshes). Manager ruling: fix it on this branch, do not park it. It breaks the bead's own outcome (transcript appears in the note), and a 55-min note is exactly where Google may be slow. Fold AestheticcNext-nqa6v in: keep the session recording's pending status and refresh it from GET /api/voice-notes/[id] until completed/failed; the Transcript tab says the transcript is on its way while pending.
+  Second slice on this branch (same programme, same file process.ts), from AestheticcNext-grnqj code fixes 1+2 ONLY: (1) a credit refusal never discards an uploaded recording: store the audio, mark transcription_status='failed' with metadata.transcriptionError and a clear message, return the playable recording; (2) roll back voice_seconds on refusal in credit-service.ts trackVoiceUsage. Do NOT change metering (DEFAULT_CREDITS / VOICE_SECONDS_PER_CREDIT / context exemptions): that is Shane's pricing call and is with the orchestrator.
+  Leave alone: the ratchet baseline (lander regen) and the three r1 fixes the confirmation parser refused (orchestrator clears).
+  Check: unit + pg tests for pending-refresh on the tab, store-on-402 and the rollback; full pg lane; npm run build; then a re-review (Astra xhigh + fresh Opus h2h, code only).
+
+[Encrypted-S] at 2026-10-24 19:12
+  RESUME: goal/aestheticcnext-9kwlw — fleet-dispatch check 1: newest unlanded branch, no live session. Check out and push this exact branch; never a -rN sibling.
+
+[Encrypted-S] at 2026-10-24 19:14
+  CORRECTION to REFLECTION (Manager aestheticc-89, after Orchestrator23 19:4x): the orchestrator will NOT clear the three branch-owned r1 fixes (sweep order; shared startBatchRecognition; sweep/check timeouts). Round-3 Opus h2h must write format-clean confirmation lines for each at the new tip: '- r1 <sev> <file>:<line> closed: <evidence>' with an evidence tail that cites no file:line and avoids 'no longer'/'still' (the parser rejects those). Route used successfully by q2lod R6. Ratchet remains the lander's regen.
+
+[Encrypted-S] at 2026-10-24 19:57
+  RE-PLAN (Manager aestheticc-89, after round 4; Opus r4 PASS, Astra r4 FAIL P2 use-pending-session-transcripts.ts:61 'recorder permanently says transcript still on its way'). Rounds 2, 3 and 4 each found one more copy of the pending state left stale after the client's 20-minute give-up (tab, session recording/cache, now the recorder done line). Stop patching copies; remove the cause.
+  Ruling: the client never gives up on its own. Delete the 20-minute TRANSCRIPT_WAIT_MS 'waiting' outcome. The server already guarantees a terminal state: the reconciler marks the row failed at 45 min. So while the note is open, the recording stays 'Transcribing…' until the server answers completed or failed. ONE source of truth: the reconciled recording row (via the existing business-scoped poll route / react-query key). The recorder done line, the Transcript tab, the session recording and the Fill-from-recording state all DERIVE from it, and none keeps its own pending flag. Both terminal states covered (completed → words; failed → the stated reason).
+  Also fold in Opus r4's open note: a 404 from the poll route (recording deleted) is terminal, never 'still processing'.
+  Before pushing: list every consumer of the pending/transcript state with grep (useVoiceInput, use-appointment-recording-session, use-pending-session-transcripts, session-recording-transcript, VoiceRecorderHero, use-clinical-note-fill, the appointment recording query) and show each derives from the row. Tests: completed and failed after more than 20 min with the modal open, each consumer updated; 404 stops polling. Do not grow files further than needed; ratchet stays the lander's regen.
+
+[Encrypted-S] at 2026-10-24 20:08
+  needs input: escalated 1 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/lead-escalate-round-4.txt — branch goal/aestheticcnext-9kwlw @ 6e78bd42cd pushed. F1 (round 4, Astra P2, lead Consider): recorder done line stays 'transcript still on its way' after a late (>20 min) transcript settles; follow-up filed AestheticcNext-uavks, orchestrator to clear as ORCHESTRATOR CLEARED F1 (AestheticcNext-uavks). Still open from round 2: ratchet baseline regen for the lander (use-appointment-recorder.ts 165/164, use-appointment-recording-session.ts 128/125, VoiceRecorderHero.tsx 247/245, credit-service.ts 588/578, stale-attempt-sweeper.ts 109/105) and the metering decision (AestheticcNext-grnqj). Round-3 work per REFLECTION: nqa6v folded in (Transcript tab pending refresh, late words reach Fill from recording), grnqj fixes 1+2 (credit refusal stores the audio; voice seconds given back). npm test: only the ratchet suite red (the 5 files above). Change note: .goal/CHANGE-NOTE.md in the worktree.
+
+[Encrypted-S] at 2026-10-24 20:09
+  RESUME: goal/aestheticcnext-9kwlw — fleet-dispatch check 1: newest unlanded branch, no live session. Check out and push this exact branch; never a -rN sibling.
+
+[Encrypted-S] at 2026-10-24 20:45
+  MANAGER NOTE after round 6 (Opus PASS, Astra FAIL 2xP2 + P3), for the builder or any re-dispatch: (1) use-clinical-note-fill.ts:99 / Transcript tab: finish the RE-PLAN single source. The Transcript tab and its player read the appointment's persisted audio_recordings rows (the same business-scoped query Fill uses), and transient session recordings only add rows not yet fetched. A refresh or reopen must show words + player with no session state. (2) google-speech-batch.ts:78: bound the start RPC well below the 300 s request deadline (e.g. 30 s, no SDK retry past it). On timeout or error, return the saved, playable recording with transcription_status='failed' and a stated reason; never an unresolved request or a 'processing' row with no operation. (3) P3 test: assert the 10 s check timeout against a fixed elapsed boundary, not the imported constant.
+
+[Encrypted-S] at 2026-10-24 20:59
+  Own-gate rounds 5-7 (/long-goal resume, 2026-10-24T21:59:24+01:00): RE-PLAN executed at 3717c360ee (client never gives up; one source of truth; 404 terminal; nqa6v/uavks superseded). r5 fixes 35c9043de8 (reopened note refetches while 'processing'; failed long note warns). r6/r7 fixes 31cb6dcac2, 4a6f8cb436 (start RPC bounded at 60 s by race AND gax total retry budget). DISMISSED (pre-existing, not this bead): Transcript tab lists only this modal session's recordings, so after a refresh the reopened recording's player/words are absent from that tab. TranscriptList is byte-identical to origin/main and a 3-min note behaves the same on main; the note itself gets the words via Fill from recording. Follow-up AestheticcNext-zhhb9 (P3). Opus r7 concurred.
+
+[Encrypted-S] at 2026-10-24 21:26
+  needs input: escalated 1 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/lead-escalate-round-8.txt — branch goal/aestheticcnext-9kwlw @ 4a6f8cb436 pushed. Round 8: Astra PASS, Opus h2h PASS, mutants 27/27 killed, lead BLOCKING=0 ESCALATE=1. The one escalation is the file-length ratchet (use-clinical-note-fill.ts 358/356, credit-service.ts 588/578, stale-attempt-sweeper.ts 109/105): lander regen, same item as r1 F3 / r2 F2. Full npm test: only the ratchet suite red (two other reds were a poisoned jest transform cache, green after --clearCache). RE-PLAN done: client never gives up; the settled row drives every consumer; 404 terminal. Still open: metering decision (AestheticcNext-grnqj), follow-up AestheticcNext-zhhb9 (Transcript tab lists persisted recordings), prod acceptance (20/55-min notes on Demo Clinic) after deploy.
+
+[Encrypted-S] at 2026-10-24 21:44
+  HOLD @4a6f8cb436 (Orchestrator23, 24 Oct): Astra r8 + Opus r8 PASS, lead BLOCKING=0 ESCALATE=1 (F1 file-length ratchet, lander regen). The gate cannot clear a branch-owned ratchet escalation, so it waits for LUCY-mz6fk (checker: lander-regenerated ratchet is a non-escalating Note). Once LUCY-mz6fk merges: re-run the lead and review-gate.sh at this same tip, no new seats. Not tonight's train; due 7 Nov.
+
+[Encrypted-S] at 2026-10-24 21:47
+  HOLD update (aestheticc-4c, 24 Oct): LUCY-mz6fk is queued behind LUCY-e3opf (attempt 6, rewrites review_lead_check.py). Order: e3opf → review → merge → mz6fk on fresh ~/.claude main → review → merge → aestheticc-4c pings aestheticc-89. mz6fk adds a ratchet-only shape guard (file_line = ratchet test; other paths only as '<path> <N>/<M>'; no other claim). Risk: the round-8 review files may refuse under e3opf's stricter grammar (newline split, one-echo, round naming); if so the seats may need a re-run in the new block format. That would contradict 'no new seats', so it goes to Orchestrator23 first.
+
+[Encrypted-S] at 2026-10-24 23:30
+  Metering resolved (Shane via Orchestrator23, 25 Oct): no AI credits; epic AestheticcNext-3187h. 9kwlw lands as is, gated at 4a6f8cb436 once LUCY-mz6fk merges. Prod acceptance: top up Demo Clinic (a4cc955f-…) voice credits first so the 20+55-min run (75 credits) is not refused; restore after.
+
+[Encrypted-S] at 2026-10-24 23:58
+  FAIL @4a6f8cb436d1e937b4774623821c05d113fa50b2
+  /Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_astra-xhigh_r1_2026-10-25.md
+  ASTRA XHIGH REVIEW 2026-10-25 (tip 4a6f8cb436): FAIL — 0 P1, 2 P2, 1 P3. P2 hooks/useVoiceInput.ts:545 — H-U0, UI-07, COM-06: after a practitioner stops a 55-minute consultation on an iPad, a Google start timeout or S3 fallback returns an already-failed transcription. backgroundFailed stays false, and the saved reason is omitted from the response, so the practitioner receives only a success toast — handle failed upload status explicitly and return a safe, explanatory failure reason.
+  P2 pages/api/voice-notes/[id]/transcription.ts:38 — H-D0, DR-05: the new endpoint duplicates the existing business-scoped single-recording GET’s status/transcript read. The supplied plan explicitly proposed extending that GET and records no refused-extend reason — add reconciliation to the existing endpoint and poll it.
+  P3 lib/voice-notes/transcription-reconcile.ts:207 — DR-01: overlapping scheduler attempts select the same recordings without FOR UPDATE SKIP LOCKED; concurrent finishers also load the catalogue and correct spelling before knowing the CAS winner. Persisted results are protected, but preparation is not exclusive — implement the required locked sweep claim and exclusive finalisation claim.
+
+[Encrypted-S] at 2026-10-25 00:03
+  OPUS HEAD-TO-HEAD REVIEW 2026-10-25 (independent, tip 4a6f8cb436d1e937b4774623821c05d113fa50b2): PASS — 0 P1, 0 P2, 1 P3. P3 lib/voice-notes/transcription-reconcile.ts:207 sweep reads waiting rows with a plain SELECT, not FOR UPDATE SKIP LOCKED (CAS still lands once). File: /Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_opus-h2h_r1_2026-10-25.md. UNVERIFIED (prod acceptance must cover): real SDK decode + inline result size for a 55-60 min note; whether iPad Safari honours 32 kbps (if not, ~58 MB > Cloud Run 32 MiB request limit).
+
+[Encrypted-S] at 2026-10-25 00:06
+  REFLECTION 2026-10-25: attempt 4 (tip 4a6f8cb436d1e937b4774623821c05d113fa50b2), after the INDEPENDENT round 1 (Astra xhigh FAIL 2xP2+P3, Opus h2h PASS 1xP3; lead BLOCKING=0 ESCALATE=1; evidence /Users/shane/.claude/evidence/review/9kwlw-independent-r1).
+  Preserve: everything at 4a6f8cb436. Opus proved on real pg that the CAS lands once (4/4 races) and that every guard is non-vacuous (10 mutants). Lead DISMISSED the H-D0 (the branch PLAN.md:26 records why the poll route is separate). Do not touch the poll route.
+  Change (exactly two items, nothing else):
+  1. F3/F4 (escalated; branch-owned, so it must be fixed, not cleared) lib/voice-notes/transcription-reconcile.ts:207: the sweep claims 'processing' rows with SELECT ... FOR UPDATE SKIP LOCKED in a short transaction (lib/webhooks/delivery-worker.ts:72,104 idiom) before any Google call, so an overlapping cron run skips rows another holds. The poll route stays CAS-protected. Test: two overlapping sweeps on real pg never both process one row; reverting SKIP LOCKED turns it red.
+  2. F1 (lead follow-up, folded in by Manager: the bead's own path, H-U0) hooks/useVoiceInput.ts:545: when the upload response already says transcription failed (Google start timeout or S3 fallback), the practitioner gets the same 'could not be transcribed' warning as a later failure, and the upload response carries the saved safe reason. Test: start-timeout upload → warning toast with the reason, no success-only toast.
+  Why: (1) the plan and review focus 3 specified SKIP LOCKED; (2) a practitioner finishing a 55-min consult must learn the transcript failed.
+  Shane decisions: none. Ratchet stays the lander's. After the push, the Manager runs independent round 2 (Astra xhigh + Opus h2h, prior entries for r1), then lead, then review-gate.sh.
+
+[Encrypted-S] at 2026-10-25 00:46
+  Routing (Anita Manager, 25 Oct): separate programme (clinical-note recording, transcription pipeline). area:product replaced by area:ai.
+
+[Encrypted-S] at 2026-10-25 00:46
+  RESUME: goal/aestheticcnext-9kwlw — fleet-dispatch check 1: newest unlanded branch, no live session. Check out and push this exact branch; never a -rN sibling.
+
+[Encrypted-S] at 2026-10-25 00:48
+  Routing correction: check 14 allows only coarse areas, so area:platform-reliability (300s Cloud Run request timeout vs 1-hour UI cap).
+
+[Encrypted-S] at 2026-10-25 00:56
+  REFLECTION attempt 4 done (/long-goal resume, 2026-10-25T01:56:11+01:00): branch goal/aestheticcnext-9kwlw pushed @ 5f45b3c9d2 (4a6f8cb436..5f45b3c9d2, two commits). (1) c47344d82f F3/F4: sweep claims rows in one UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) stamping metadata.transcriptionSweepClaimedAt (4-min lease < 5-min cadence) before any Google call; poll route unchanged, CAS-protected. Real-pg tests: overlapping tick checks nothing the first holds; a locked row is skipped without waiting; expired claim is re-picked. Mutants: no SKIP LOCKED -> red; no lease -> red. (2) 5f45b3c9d2 F1: upload response carries a plain reason on a failed background start (Google text stays on the row); useVoiceInput treats any 'failed' upload as a warning, never a success-only toast. Tests + mutant killed. Gates: tsc clean; lint clean on changed files (2 pre-existing exhaustive-deps warnings); related jest 7718 pass, only red = ratchet (use-clinical-note-fill.ts 358/356, credit-service.ts 588/578, stale-attempt-sweeper.ts 109/105, lander regen, unchanged). Ready for Manager independent round 2. Bead left open: prod acceptance pending.
+
+[Encrypted-S] at 2026-10-25 01:08
+  FAIL @5f45b3c9d2812c0ba70556c3279fbbff8ab3f6db
+  /Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_astra-xhigh_r2_2026-10-25.md
+  ASTRA XHIGH REVIEW 2026-10-25 (tip 5f45b3c9d2): FAIL — 0 P1, 1 P2, 0 P3. P2 lib/utils/google-speech.ts:219 — DR-08, H-U0: a practitioner finishing a three-minute note on an iPad during Google unavailability can exceed Cloud Run’s 300-second deadline. The inherited short path starts batch recognition without timeout options; its 240-second timer starts only after that RPC returns. Reproduced still pending after 300001 ms, leaving a pending recording outside reconciliation — enforce an overall speech deadline below 300 seconds, including startup, inline recognition and SDK retries.
+
+[Encrypted-S] at 2026-10-25 01:08
+  OPUS HEAD-TO-HEAD REVIEW 2026-10-25 independent round 2 (tip 5f45b3c9d2812c0ba70556c3279fbbff8ab3f6db): PASS — 0 P1, 0 P2, 0 P3. Priors: all three r1 items closed (failed-start warning: 3 mutants red; H-D0: agrees with PLAN.md:26 refused-extend reason; SKIP LOCKED + 4-min lease: real-pg 5/5 scratch + builder 6/6, 4 mutants red). File: /Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md. Still UNVERIFIED for prod acceptance: real Google decode/result size; iPad Safari bitrate for a 60-min note.
+
+[Encrypted-S] at 2026-10-25 01:10
+  needs input: AestheticcNext-9kwlw escalated 2 protected item(s): /Users/shane/.claude/evidence/review/9kwlw-independent-r2/lead-escalate-round-2.txt — independent r2 @5f45b3c9d2: Opus PASS, Astra FAIL (1 P2, pre-existing → follow-up AestheticcNext-4rr06). Lead BLOCKING=0 ESCALATE=2 FIXED=2. Both escalations are the r1 SKIP LOCKED P3 (raised by both r1 seats at one sev/file:line), closed by both r2 seats with real-pg proof. The checker's G3/A5 ref-ambiguity rule escalates them, and they are branch-owned so not clearable. With Orchestrator23 for a ruling. HOLD at 5f45b3c9d2.
+
+[Encrypted-S] at 2026-10-25 01:11
+  HOLD @5f45b3c9d2 (Orchestrator23, 25 Oct): approved route (c'). The r1 SKIP LOCKED escalations clear through checker fix LUCY-unykv (an ambiguous ref is fixed when every newest seat marks it closed), owned by aestheticc-4c. Once LUCY-unykv merges: re-run lead + review-gate.sh at 5f45b3c9d2 on the four existing Ops/reviews r1/r2 files, NO new seats, then PASS to Orchestrator23. The short-path deadline P2 is accepted as follow-up AestheticcNext-4rr06 (pre-existing, identical on main).
+
+[Encrypted-S] at 2026-10-25 02:06
+  HOLD @5f45b3c9d2 (25 Oct): lead re-run clean after LUCY-unykv (BLOCKING=0 ESCALATE=0 FIXED=4; md5s recorded). review-gate.sh dry-run refused: the Manager's own 01:10 status comment carries a veto word beside the tip. bd cannot delete comments and the DB is not edited (Orchestrator23). Clears via checker fix LUCY-b7pqo (an exact lead-escalation status line is never a veto). Then gate at this tip, no new seats.
+
