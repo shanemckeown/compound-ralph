@@ -71,6 +71,78 @@ def test_cases_2_4_5_6_7_still_veto(body):
     assert len(_vetoes(body)) == 1, body
 
 
+@pytest.mark.parametrize("body", [
+    # independent r1 P2 (1): a review pasted under the status line
+    f"{HEAD}\nREVIEWING: goal/aestheticcnext-9kwlw @ {TIP}\nVerdict: FAIL\nP2 lib/x.ts:9 — y — z",
+    f"{REAL_0110}\nreviewing: goal/aestheticcnext-9kwlw @ {TIP[:10]}",
+    f"{REAL_0110}\n**Verdict:** **FAIL**",
+    f"{REAL_0110}\n- **P2** `lib/voice/process.ts:74` — y",
+    f"{REAL_0110}\nP1: pages/api/x.ts — y",
+    # independent r1 P2 (2): markdown and case variants of FAIL @<sha>
+    f"{REAL_0110}\n**FAIL** @ **{TIP[:10]}**",
+    f"{REAL_0110}\nfail @{TIP[:10]}",
+    f"{REAL_0110}\nastra failed: {TIP[:10]}",
+    f"{REAL_0110}\n`FAIL`  @  `{TIP[:10]}`",
+    f"{REAL_0110}\nblocking = 1",
+    f"{REAL_0110}\n**Void**: superseded by r3",
+    f"{REAL_0110}\n_VOID_: superseded by r3",
+    f"{REAL_0110}\nAstra FAIL — {TIP[:10]}",
+    f"{REAL_0110}\nastra failed: one P2, see the review file",
+    f"{REAL_0110}\nAstra FAIL @ the tip above",
+])
+def test_careless_verdict_spellings_still_veto(body):
+    assert not lbs.is_lead_escalation_status(body, BEAD)
+    assert len(_vetoes(body)) == 1, body
+
+
+def test_symlink_out_of_the_evidence_root_still_vetoes(tmp_path, monkeypatch):
+    root = tmp_path / "evidence"
+    (root / "review").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (root / "link").symlink_to(tmp_path / "outside")
+    monkeypatch.setattr(lbs, "EVIDENCE_ROOT", root)
+    inside = REAL_0110.replace(EVIDENCE, str(root / "review/lead-escalate-round-2.txt"), 1)
+    assert lbs.is_lead_escalation_status(inside, BEAD)
+    escaped = REAL_0110.replace(EVIDENCE, str(root / "link/lead-escalate-round-2.txt"), 1)
+    assert not lbs.is_lead_escalation_status(escaped, BEAD)
+
+
+# The earlier AestheticcNext-9kwlw status comments (24 Oct), verbatim apart from the bead id they
+# omitted: the exact format's prose tail stays exempt once it names the bead.
+EARLIER_9KWLW = [
+    ("60300197fb", "escalated 7 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/"
+     "lead-escalate-round-2.txt — branch goal/aestheticcnext-9kwlw @ 60300197fb pushed. Round 2: BLOCKING=0. "
+     "Of the 7: three are round-1 fixes confirmed by Opus r2 + killed mutants (F1-r1 sweep order, F2-r1 shared "
+     "batch request, F5-r1 sweep/check timeouts) that the checker's closed:-line parser refused to grade fixed; "
+     "two are the file-length ratchet (VoiceRecorderHero.tsx 247/245, stale-attempt-sweeper.ts 109/105, lander "
+     "regen); one is credits metering (AestheticcNext-grnqj, Shane decision, needed before 60-min notes are used "
+     "for real); one is the rare >20-min Transcript-tab copy (follow-up AestheticcNext-nqa6v). Change note: "
+     ".goal/CHANGE-NOTE.md in the worktree."),
+    ("6e78bd42cd", "escalated 1 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/"
+     "lead-escalate-round-4.txt — branch goal/aestheticcnext-9kwlw @ 6e78bd42cd pushed. F1 (round 4, Astra P2, "
+     "lead Consider): recorder done line stays 'transcript still on its way' after a late (>20 min) transcript "
+     "settles; follow-up filed AestheticcNext-uavks, orchestrator to clear as ORCHESTRATOR CLEARED F1 "
+     "(AestheticcNext-uavks). Still open from round 2: ratchet baseline regen for the lander "
+     "(use-appointment-recorder.ts 165/164, use-appointment-recording-session.ts 128/125, VoiceRecorderHero.tsx "
+     "247/245, credit-service.ts 588/578, stale-attempt-sweeper.ts 109/105) and the metering decision "
+     "(AestheticcNext-grnqj). npm test: only the ratchet suite red (the 5 files above)."),
+    ("4a6f8cb436", "escalated 1 protected item(s): /Users/shane/.claude/evidence/goal/9kwlw-20261024/"
+     "lead-escalate-round-8.txt — branch goal/aestheticcnext-9kwlw @ 4a6f8cb436 pushed. Round 8: Astra PASS, "
+     "Opus h2h PASS, mutants 27/27 killed, lead BLOCKING=0 ESCALATE=1. The one escalation is the file-length "
+     "ratchet (use-clinical-note-fill.ts 358/356, credit-service.ts 588/578, stale-attempt-sweeper.ts 109/105): "
+     "lander regen, same item as r1 F3 / r2 F2. Full npm test: only the ratchet suite red."),
+]
+
+
+@pytest.mark.parametrize("sha,tail", EARLIER_9KWLW)
+def test_earlier_9kwlw_status_forms(sha, tail):
+    assert lbs.comment_vetoes(_comment("2026-10-24 18:00", f"needs input: {tail}"), sha, BEAD) == []
+    named = f"needs input: {BEAD} {tail} Astra FAIL (prose)."
+    assert lbs.is_lead_escalation_status(named, BEAD)
+    assert lbs.comment_vetoes(_comment("2026-10-24 18:00", named), sha, BEAD) == []
+    assert len(lbs.comment_vetoes(_comment("2026-10-24 18:00", f"{named}\nfail @{sha}"), sha, BEAD)) == 1
+
+
 def test_case3_real_fail_mirror_still_vetoes_beside_the_status_line():
     text = (_comment("2026-10-25 01:10", REAL_0110)
             + _comment("2026-10-25 01:20", f"FAIL @{TIP}\n/some/REVIEW_9kwlw_astra_r3.md\nP2 lib/x.ts:9 — y — z"))

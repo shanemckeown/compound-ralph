@@ -313,9 +313,18 @@ WITHDRAWAL_RE = re.compile(r"(?mi)^\W*(VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\
 # goal.md's lead-escalation status line (LUCY-b7pqo). Starts-with, not fullmatch: the Manager
 # writes a summary after the path on the same line.
 _LEAD_ESCALATION_RE = re.compile(r"^needs input: (?P<bead>\S+) escalated \d+ protected item\(s\): (?P<path>/\S+)")
-# "FAIL @<sha>" and its markdown/punctuated variants ("**FAIL** @<sha>", "FAIL: <sha>").
-_FAIL_AT_SHA_RE = re.compile(r"\bFAIL(?:ED)?\b[^\w\n]{0,4}@?[^\w\n]{0,2}[0-9a-fA-F]{7,40}\b")
-_BLOCKING_RE = re.compile(r"\bBLOCKING=[1-9]")
+# Verdict shapes that keep a status-shaped comment a veto. Matched on _normalise(body), so they
+# catch what a careless writer produces ("**FAIL** @ **<sha>**", "fail @<sha>"), not only the
+# canonical spelling (LUCY-b7pqo r1).
+_VERDICT_SHAPE_RES = (
+    re.compile(r"\bfail(?:ed)?\s*[@:]"),                       # FAIL @<sha>, FAILED: <sha>
+    re.compile(r"\bfail(?:ed)?[^\w\n]{0,4}[0-9a-f]{7,40}\b"),  # FAIL — <sha>
+    re.compile(r"\bverdict\s*:\s*fail"),
+    re.compile(r"(?m)^reviewing\s*:"),
+    re.compile(r"\bblocking\s*=\s*[1-9]"),
+    # a finding line: P1/P2 then a path-like token (lib/x.ts, x.ts:9)
+    re.compile(r"(?<![\w-])p[12](?![\w-])[^\S\n]*[:|—–-]?[^\S\n]*[^\s,;()]*(?:/|\.[a-z]\w*:\d)"),
+)
 EVIDENCE_ROOT = Path("~/.claude/evidence").expanduser()
 
 
@@ -361,20 +370,32 @@ def mentions_bead(body: str, bead_id: str) -> bool:
                for t in (bead_id, suffix))
 
 
+def _normalise(body: str) -> str:
+    """A copy for the verdict-shape scan: markdown emphasis/code marks gone, whitespace inside
+    each line collapsed, casefolded. Line breaks stay (``reviewing:`` is a line start)."""
+    text = re.sub(r"[*_`]", "", body)
+    return "\n".join(" ".join(ln.split()) for ln in text.splitlines()).casefold()
+
+
 def is_lead_escalation_status(body: str, bead_id: str) -> bool:
     """The review lead's escalation status comment for this bead (goal.md Phase 4 Step 4): line 1
     starts ``needs input: <bead_id> escalated <N> protected item(s): <path under ~/.claude/evidence/>``
-    and nowhere does the comment carry a verdict-shaped veto (``FAIL @<sha>``, a withdrawal line,
-    ``BLOCKING>=1``) or any veto token other than the bare prose word FAIL. A real review verdict
+    and nowhere does the comment carry a verdict-shaped veto (``FAIL @<sha>``, ``Verdict: FAIL``,
+    a ``REVIEWING:`` line, a P1/P2 finding line, a withdrawal line, ``BLOCKING>=1``, in any case or
+    markdown) or any upper-case veto token other than the bare prose word FAIL. A real review verdict
     always reaches the bead as review-gate.sh's ``FAIL @<tip>`` mirror, which still vetoes."""
     lines = body.strip().splitlines()
     m = _LEAD_ESCALATION_RE.match(lines[0].strip()) if lines else None
     if not m or m.group("bead") != bead_id:
         return False
     path = Path(m.group("path"))
-    if ".." in path.parts or EVIDENCE_ROOT not in Path(os.path.normpath(path)).parents:
+    # realpath on both sides: a symlink under the root that leaves it is outside it.
+    root = Path(os.path.realpath(EVIDENCE_ROOT))
+    if ".." in path.parts or root not in Path(os.path.realpath(path)).parents:
         return False
-    if _FAIL_AT_SHA_RE.search(body) or WITHDRAWAL_RE.search(body) or _BLOCKING_RE.search(body):
+    norm = _normalise(body)
+    if any(r.search(norm) for r in _VERDICT_SHAPE_RES) or any(
+            WITHDRAWAL_RE.search(t) for t in (body, norm)):
         return False
     # Any veto word other than a bare FAIL (FAILED, VOID, ...) keeps it a veto; BLOCKING is above.
     return all(t.group(1) in (None, "FAIL") for t in _VETO_RE.finditer(body))
