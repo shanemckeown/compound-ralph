@@ -52,8 +52,9 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 # prose; the checker keeps prose tolerance for leads and own-gate triage, which write no PASS.
 PROSE_GATE_CUTOFF = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc).timestamp()
 # The whole revision token is a bare sha: "<tip>^", "<tip>~1" or "<a>..<b>" never match.
-# A withdrawal line: one definition, in the lander module (land_batch_safety.WITHDRAWAL_RE).
-WITHDRAWAL = lbs.WITHDRAWAL_RE
+# A review withdrawn by its author says so on a line of its own ("VOID: superseded by r11"); the
+# word inside a finding ("VOID invoices can still charge") is never a withdrawal (Astra r14, r22).
+WITHDRAWAL = re.compile(r"(?mi)^\W*(VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\b(?:\W*[:—–-]|\W*$)")
 
 
 def withdrawal(body):

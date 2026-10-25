@@ -72,36 +72,45 @@ def test_cases_2_4_5_6_7_still_veto(body):
 
 
 @pytest.mark.parametrize("body", [
-    # independent r1 P2 (1): a review pasted under the status line
+    # independent r1 P2 (2), own-gate r2-r3: careless spellings of a verdict ON the status line
+    f"{REAL_0110} **FAIL** @ **{TIP[:10]}**",
+    f"{REAL_0110} fail @{TIP[:10]}",
+    f"{REAL_0110} `FAIL`  @  `{TIP[:10]}`",
+    f'{REAL_0110} Astra "FAIL" @ "{TIP[:10]}"',
+    f"{REAL_0110} Astra FAIL @ the tip above",
+    f"{REAL_0110} astra failed: one P2, see the review file",
+    f"{REAL_0110} Astra FAIL — {TIP[:10]}",
+    f"{REAL_0110} **Verdict:** **FAIL**",
+    f'{REAL_0110} {{"verdict" : "FAIL"}}',
+    f"{REAL_0110} Verdict — FAIL",
+    f"{REAL_0110} Verdict for {TIP[:10]}: FAIL",
+    f"{REAL_0110} lead re-run blocking = 1",
+    f"{REAL_0110} - **P2** `lib/voice/process.ts:74` — y",
+    f"{REAL_0110} P1: pages/api/x.ts — y",
+    f"{REAL_0110} P2 review_gate.py — status line exempted",
+    f"{REAL_0110} [P2] review_gate.py:319 — y",
+    f"{REAL_0110} - P1 `land_batch_safety.py` — y",
+])
+def test_careless_verdict_spellings_on_the_line_still_veto(body):
+    assert "\n" not in body
+    assert not lbs.is_lead_escalation_status(body, BEAD)
+    assert len(_vetoes(body)) == 1, body
+
+
+@pytest.mark.parametrize("body", [
+    # independent r1 P2 (1), own-gate r2-r3: a review or verdict pasted under the status line
     f"{HEAD}\nREVIEWING: goal/aestheticcnext-9kwlw @ {TIP}\nVerdict: FAIL\nP2 lib/x.ts:9 — y — z",
-    f"{REAL_0110}\nreviewing: goal/aestheticcnext-9kwlw @ {TIP[:10]}",
-    f"{REAL_0110}\n**Verdict:** **FAIL**",
-    f"{REAL_0110}\n- **P2** `lib/voice/process.ts:74` — y",
-    f"{REAL_0110}\nP1: pages/api/x.ts — y",
-    # independent r1 P2 (2): markdown and case variants of FAIL @<sha>
-    f"{REAL_0110}\n**FAIL** @ **{TIP[:10]}**",
-    f"{REAL_0110}\nfail @{TIP[:10]}",
-    f"{REAL_0110}\nastra failed: {TIP[:10]}",
-    f"{REAL_0110}\n`FAIL`  @  `{TIP[:10]}`",
-    f"{REAL_0110}\nblocking = 1",
-    f"{REAL_0110}\n**Void**: superseded by r3",
-    f"{REAL_0110}\n_VOID_: superseded by r3",
-    f"{REAL_0110}\nAstra FAIL — {TIP[:10]}",
-    f"{REAL_0110}\nastra failed: one P2, see the review file",
-    f"{REAL_0110}\nAstra FAIL @ the tip above",
-    # own-gate r2: a standalone FAIL line, a structured verdict, a markdown REVIEWING heading
-    f"{REAL_0110}\n**FAIL**",
-    f"{REAL_0110}\nFAIL\n- one P2 in the gate",
-    f'{REAL_0110}\n{{"verdict": "FAIL", "findings": []}}',
-    f'{REAL_0110}\n{{\n  "verdict" : "FAIL"\n}}',
-    f"{REAL_0110}\nVerdict — FAIL",
     f"{REAL_0110}\n## REVIEWING: b7pqo-status-not-veto @ {TIP[:10]}",
     f"{REAL_0110}\n> reviewing: goal/aestheticcnext-9kwlw",
-    # own-gate r2: a severity before a bare file name
-    f"{REAL_0110}\nP2 review_gate.py — status line exempted",
-    f"{REAL_0110}\n- P1 `land_batch_safety.py` — y",
+    f"{REAL_0110}\n**FAIL**",
+    f"{REAL_0110}\nFAIL\n- one P2 in the gate",
+    f'{REAL_0110}\n{{\n  "verdict" : "FAIL"\n}}',
+    f"{REAL_0110}\nVerdict for {TIP[:10]}: FAIL",
+    f"{REAL_0110}\n[P2] review_gate.py:319 — y",
+    f"{REAL_0110}\n**Void**: superseded by r3",
+    f"{REAL_0110}\n_VOID_: superseded by r3",
 ])
-def test_careless_verdict_spellings_still_veto(body):
+def test_a_review_pasted_under_the_status_line_still_vetoes(body):
     assert not lbs.is_lead_escalation_status(body, BEAD)
     assert len(_vetoes(body)) == 1, body
 
@@ -180,8 +189,3 @@ def test_lander_lands_past_a_later_status_comment_but_not_a_later_mirror(tmp_pat
     ok, ev = lbs.independent_pass_for(BEAD, TIP, reviews_dir=root, comments_text=passed + mirror)
     assert ok is False and "FAIL" in ev, ev
 
-
-def test_withdrawal_is_one_definition_shared_with_review_gate():
-    sys.path.insert(0, str(ROOT.parent.parent / "references" / "review-lead"))
-    import review_gate
-    assert review_gate.WITHDRAWAL is lbs.WITHDRAWAL_RE
