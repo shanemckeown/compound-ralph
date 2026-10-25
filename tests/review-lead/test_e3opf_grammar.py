@@ -1197,3 +1197,147 @@ class D1OwnGateR2BuilderEvidenceTakesItsRoundsCommit(unittest.TestCase):
         code, out = self.run_with(SHA_A)
         self.assertEqual(code, 0, out)
         self.assertIn("FIXED=1", out)
+
+
+# LUCY-cwpxu: a finding raised with no line is closed by a path-only ref 'r<N> <sev> <path>', and only then.
+LL_SRC = "P3 tests/a.test.ts — the failed-fetch guard the contraindication checker relies on has no test — add one"
+LL_REF = "r1 P3 tests/a.test.ts"
+
+
+def lineless_r1(*srcs):
+    """A round-1 raising review in the legacy {severity, text} shape, each finding with no line."""
+    return (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n" + "".join(s + "\n" for s in srcs) + "```review-verdict\n"
+            + json.dumps({"verdict": "FAIL", "findings": [{"severity": s[:2], "text": s[3:]} for s in srcs]})
+            + "\n```\n")
+
+
+def leads_for(srcs, by="@D@/REVIEW_x_astra_r2_b.md"):
+    lead = fixed_lead(srcs[0], by)
+    lead["findings"] = [dict(lead["findings"][0], id=f"F{i + 1}", source_line=s) for i, s in enumerate(srcs)]
+    return lead
+
+
+class CwpxuPathOnlyRef(unittest.TestCase):
+    def test_every_newest_seat_closes_a_line_less_finding_fixed(self):
+        """The 3bm73 shape: line-less, protected wording, every r2 seat closes it by path → FIXED, no escalation."""
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_opus_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2100)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+    def test_one_silent_seat_keeps_it_not_fixed(self):
+        """Every-seat-prior (B1) is unchanged for a path-only ref."""
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_opus_r2_b.md", r2_file(prior=[]), 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2100)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=1", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_open_entry_disputes_a_path_only_close(self):
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_opus_r2_b.md", r2_file(prior=[(LL_REF, "open")]), 2000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2100)])
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_path_only_ref_to_a_finding_with_a_line_refused(self):
+        lead = fixed_lead(R1_SRC, "@D@/REVIEW_x_astra_r2_b.md")
+        code, out = run_named(lead, [("REVIEW_x_astra_r1_a.md", R1_RAISE, 1000),
+                                     ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P2 lib/pay.ts", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("prior ref r1 P2 lib/pay.ts (closed) matches no round-1 finding", out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_path_only_ref_matching_nothing_refused(self):
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed"), ("r1 P3 tests/b.test.ts", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("prior ref r1 P3 tests/b.test.ts (closed) matches no round-1 finding", out)
+
+    def test_wrong_severity_path_only_ref_refused(self):
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P2 tests/a.test.ts", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("matches no round-1 finding", out)
+
+    def test_two_line_less_findings_at_one_path_escalate(self):
+        other = "P3 tests/a.test.ts — the empty-record cache has no test — add one"
+        for named in ([("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC, other), 1000)],
+                      [("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+                       ("REVIEW_x_astra_r1_a.md", lineless_r1(other), 1100)]):
+            code, out = run_named(leads_for([LL_SRC, other]),
+                                  named + [("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+            self.assertEqual(code, 0, out)
+            self.assertIn("BLOCKING=0 ESCALATE=2", out)
+            self.assertIn("FIXED=0", out)
+
+    def test_line_less_and_lined_at_one_path_escalate(self):
+        """'Exactly one round-N finding at that path + severity': a lined sibling makes the path-only ref ambiguous."""
+        lined = "P3 tests/a.test.ts:12 — the 500 cell asserts nothing — assert the blank tokens"
+        raise_r1 = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{LL_SRC}\n{lined}\n" + strict_block(
+            "FAIL", [("P3", "tests/a.test.ts:12", lined[3:])]).replace(
+            '"findings": [', '"findings": [' + json.dumps({"severity": "P3", "text": LL_SRC[3:]}) + ", "))
+        code, out = run_named(leads_for([LL_SRC, lined]), [
+            ("REVIEW_x_sonnet_r1_a.md", raise_r1, 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed"), ("r1 P3 tests/a.test.ts:12", "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_raised_again_at_the_path_at_the_tip_not_fixed(self):
+        again = "P3 tests/a.test.ts:40 — still no failed-fetch cell — add one"
+        lead = fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md",
+                          extra=[{"id": "F2", "source_line": again, "verdict": "noted", "category": "other",
+                                  "reason": "test-only coverage gap, not user-facing"}])
+        code, out = run_named(lead, [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")], verdict="FAIL",
+                                               findings=[("P3", again[3:])]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("raises P3 at tests/a.test.ts again at the current tip: not fixed", out)
+
+
+class CwpxuReal3bm73R7(unittest.TestCase):
+    """The 3bm73 r1-r7 replay (C7's fixture) with both r7 seats also closing the line-less r1 P3 by path, and the
+    lead grading it fixed: nothing left to escalate."""
+    DIR = C7Real3bm73R7.DIR
+    PATH_REF = "r1 P3 tests/components/appointments/workflow-consent-medical-history.test.tsx"
+
+    def named(self, refs):
+        out = []
+        for i, p in enumerate(sorted(self.DIR.glob("REVIEW_*.md"))):
+            text = p.read_text()
+            if "_r7_" in p.name:
+                entries = "".join(f', {{"ref": "{r}", "status": "closed", "evidence": "three failed-read cells; the '
+                                  f'failed_fetch mutant turns them red"}}' for r in refs)
+                text = text.replace('"}]}\n```', '"}' + entries + ']}\n```')
+                self.assertIn(refs[0] if refs else "", text)
+            out.append((p.name, text, 1000 + i))
+        return out
+
+    def lead(self):
+        lead = json.loads((self.DIR / "lead.json").read_text())
+        f8 = next(f for f in lead["findings"] if f["id"] == "F8")
+        for k in ("reason", "follow_up"):
+            f8.pop(k)
+        f8.update(verdict="fixed", category="other", fixed_by="@D@/REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md")
+        return lead
+
+    def test_path_only_prior_clears_the_last_escalation(self):
+        code, out = run_named(self.lead(), self.named([self.PATH_REF]))
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=0 FIXED=8", out)
+
+    def test_without_the_path_only_prior_it_is_refused(self):
+        code, out = run_named(self.lead(), self.named([]))
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'F8: fixed_by REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md has no review-verdict prior entry '
+                      f'{{"ref": "{self.PATH_REF}", "status": "closed"}}', out)

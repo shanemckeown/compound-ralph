@@ -1730,7 +1730,11 @@ class E3opfStructuredPrior(unittest.TestCase):
             None,
             ["r1 P2 lib/pay.ts:37"],
             [dict(good, ref="r1 lib/pay.ts:37")],
-            [dict(good, ref="r1 P2 lib/pay.ts")],
+            # A path-only ref parses since LUCY-cwpxu; a token that is not a bare path never does.
+            [dict(good, ref="r1 P2 pay")],
+            [dict(good, ref="r1 P2 lib/pay.ts:")],
+            [dict(good, ref="r1 P2 lib/pay.ts more")],
+            [dict(good, ref="r1 P2 P1/P2")],
             [dict(good, ref="P2 lib/pay.ts:37")],
             [dict(good, status="fixed")],
             [dict(good, status="Closed")],
@@ -1794,7 +1798,8 @@ class E3opfBlockFindingFields(unittest.TestCase):
         self.parse_block({"severity": "P1", "file_line": "lib/a.ts:3", "text": "label wrong"},
                          prose="P1 (see lib/a.ts:3) refunds go to the wrong card\n")
 
-    def test_line_less_finding_cannot_be_graded_fixed(self):
+    def test_line_less_finding_needs_a_path_only_prior(self):
+        """Raised with no line, it is graded fixed only by a path-only prior entry (LUCY-cwpxu)."""
         src = "P3 tests/a.test.ts — no failed-fetch test — add one"
         raise_r1 = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n" + src + "\n```review-verdict\n"
                     + json.dumps({"verdict": "FAIL", "findings": [{"severity": "P3", "text": src[3:]}]}) + "\n```\n")
@@ -1802,7 +1807,7 @@ class E3opfBlockFindingFields(unittest.TestCase):
                               [("REVIEW_x_astra_r1_a.md", raise_r1, 1000),
                                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[]), 2000)])
         self.assertEqual(code, 1, out)
-        self.assertIn("start with its file:line", out)
+        self.assertIn('no review-verdict prior entry {"ref": "r1 P3 tests/a.test.ts", "status": "closed"}', out)
 
 
 class E3opfReal3bm73(unittest.TestCase):
@@ -1854,10 +1859,11 @@ class E3opfReal3bm73(unittest.TestCase):
     def test_r4_structured_prior_grades_the_four_and_keeps_merge_prefill_open(self):
         lead = self.lead()
         f3 = next(f for f in lead["findings"] if f["id"] == "F3")
-        # The line-less r1 P3 can never be graded fixed; the lead must keep it open.
+        # The line-less r1 P3 is graded fixed only by a path-only prior (LUCY-cwpxu); r4 has none.
         code, out = self.run_r4(copy.deepcopy(lead))
         self.assertEqual(code, 1, out)
-        self.assertIn("F3: fixed needs the finding to start with its file:line", out)
+        self.assertIn('F3: fixed_by REVIEW_3bm73_astra-xhigh_r4_2026-10-24.md has no review-verdict prior entry '
+                      '{"ref": "r1 P3 tests/components/appointments/workflow-consent-medical-history.test.tsx"', out)
         for fid in ("F1", "F2", "F4", "F6"):
             self.assertNotIn(f"{fid}:", out)
         f3.update(verdict="consider", follow_up="AestheticcNext-3bm73 failed-fetch test",

@@ -29,7 +29,9 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     {severity, file_line, text}, a prior entry {ref, status, evidence}. A raising review may use the
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
   - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
-    distinct one escalates, whatever it is graded;
+    distinct one escalates, whatever it is graded. A path-only ref 'r<N> <sev> <path>' names only a
+    finding raised with no line at that path; any other round-N finding at that path + severity, lined
+    or not, makes it ambiguous (LUCY-cwpxu);
   - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally (builder
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
@@ -505,6 +507,27 @@ def leading_loc(finding):
     return m.group(1) if m else None
 
 
+def ref_loc(finding):
+    """What a prior ref names a finding by: its leading file:line, else (raised with no line, LUCY-cwpxu)
+    its leading bare path, else None."""
+    loc = leading_loc(finding)
+    if loc:
+        return loc
+    m = PATH_TOKEN.match(finding[3:].lstrip("`*"))
+    return bare_path(m.group(1)) if m and m.group(2) is None else None
+
+
+def ref_candidates(o, sev, loc):
+    """Finding line o is one a ref 'r<N> <sev> <loc>' could name (G3 ambiguity): a lined loc, the same
+    leading file:line; a path-only loc, any finding at that path and severity, with a line or without."""
+    if o[:2] != sev:
+        return False
+    if path_parts(loc)[1] is not None:
+        return leading_loc(o) == loc
+    own = ref_loc(o)
+    return bool(own) and path_parts(own)[0] == loc
+
+
 def decl_words(lines):
     """Verdict words declared in prose, ignoring a canonical finding's own description."""
     words = set()
@@ -613,6 +636,14 @@ def structured_findings(p, block):
 # A finding's leading location in block text, past optional `code` / **bold** markup.
 LEADING_LOC = re.compile(r"^[`*]*(" + LOC.pattern + r")")
 PRIOR_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(" + LOC.pattern + r")$")
+# A path-only ref, for a finding raised with no line number (LUCY-cwpxu): the token must be a bare path.
+PRIOR_PATH_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(\S+)$")
+
+
+def bare_path(token):
+    """The token if it is a repo path with no :line (PATH_TOKEN, less tallies), else None."""
+    m = PATH_TOKEN.fullmatch(token)
+    return token if m and m.group(2) is None and not TALLY.fullmatch(token) else None
 
 
 def structured_prior(p, data):
@@ -632,7 +663,10 @@ def structured_prior(p, data):
         ref = norm(e["ref"]) if isinstance(e["ref"], str) else ""
         m = PRIOR_REF.match(ref)
         if not m:
-            raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>'")
+            m = PRIOR_PATH_REF.match(ref)
+            if not m or not bare_path(m.group(3)):
+                raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>' (or 'r<N> P<1-3> "
+                                 "<file>' for a finding raised with no line)")
         status, ev = e["status"], e["evidence"]
         if status not in ("closed", "open"):
             raise ValueError(f"{p}: {what} status {status!r} is not \"closed\" or \"open\"")
@@ -1063,7 +1097,7 @@ def tip_statuses(files, tip, rounds, sev, loc):
 def dispute(src, files):
     """Why reviews of the current tip disagree on an earlier finding (one closes a round that raised
     it, one keeps a round open), else None. Checked whatever the lead graded it (LUCY-e3opf)."""
-    loc = leading_loc(src)
+    loc = ref_loc(src)
     tip = current_tip(files)[0] if files else ""
     if not loc or not tip:
         return None
@@ -1102,7 +1136,8 @@ def orphan_open_priors(files, items=()):
                             "file_line (the legacy {severity, text} shape): re-run that seat with the strict "
                             "review-verdict shape")
         for (r, sev, loc), st in priors[x[0]].items():
-            if not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
+            # Exact: a path-only ref names only a finding raised with no line there (LUCY-cwpxu).
+            if not any(round_of(y[0]) == r and any(o[:2] == sev and ref_loc(o) == loc
                                                                     for o in y[1]) for y in files):
                 errs.append(f"{Path(x[0]).name}: prior ref r{r} {sev} {loc} ({st}) matches no round-{r} finding "
                             f"in the --verdict reviews: pass the review that raised it so the lead covers it")
@@ -1131,8 +1166,9 @@ def finding_targets(x):
 
 def ref_ambiguity(files, r, sev, loc):
     """The distinct round-r findings a ref 'r<r> <sev> <loc>' could name (LUCY-e3opf G3). The same text
-    in two seats is one finding; two texts are two, and one ref can never close both."""
-    return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
+    in two seats is one finding; two texts are two, and one ref can never close both. A path-only ref
+    could name any finding at that path and severity, with a line or without (LUCY-cwpxu)."""
+    return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if ref_candidates(o, sev, loc)})
 
 
 def ambiguous_refs(files):
@@ -1219,9 +1255,9 @@ def fixed_errors(tag, f, src, files):
         if r_later is None or r_x is None or r_later <= r_x:
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
-    loc, sev = leading_loc(src), src[:2]
+    loc, sev = ref_loc(src), src[:2]
     if not loc:
-        return [f"{tag}: fixed needs the finding to start with its file:line"]
+        return [f"{tag}: fixed needs the finding to start with its file:line (or, raised with no line, its file)"]
     # The current tip is what the newest review (by round) reviewed. A confirmation of an
     # older commit says nothing about the code that would land.
     tip, newest = current_tip(files)
@@ -1234,7 +1270,10 @@ def fixed_errors(tag, f, src, files):
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
     for x in at_tip + [y for y in files if is_builder_evidence(y[0]) and builder_at_tip(y, files)]:
         for other in x[1]:
-            if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
+            # A path-only loc (LUCY-cwpxu) is raised again by any same-severity finding at, or naming, that path.
+            here = {o.group(0) for o in LOC.finditer(other)}
+            if other[:2] == sev and (loc in {leading_loc(other)} | here or ref_candidates(other, sev, loc)
+                                     or (not path_parts(loc)[1] and loc in {path_parts(h)[0] for h in here})):
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
     # Raised in several rounds: fixed_by must close every one of them.
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
