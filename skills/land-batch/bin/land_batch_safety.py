@@ -306,21 +306,6 @@ _REVIEWING_RE = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[
 # A veto token, deliberately broad: over-holding costs one fresh gate run, under-holding lands
 # unreviewed code. Upper-case words only, so prose like "failed" or "void" doesn't trip it.
 _VETO_RE = re.compile(r"\b(FAIL|FAILED|VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\b|\bBLOCKING=[1-9]")
-# goal.md's lead-escalation status line (LUCY-b7pqo). Starts-with, not fullmatch: the Manager
-# writes a summary after the path on the same line.
-_LEAD_ESCALATION_RE = re.compile(r"^needs input: (?P<bead>\S+) escalated \d+ protected item\(s\): (?P<path>/\S+)")
-# Verdict shapes that keep a status line a veto. Matched on _normalise(line), so they catch what
-# a careless writer produces ("**FAIL** @ **<sha>**", "fail @<sha>", "[P2] x.py:9"), not only the
-# canonical spelling (LUCY-b7pqo independent r1, own-gate r2-r3).
-_VERDICT_SHAPE_RES = (
-    re.compile(r"\bfail(?:ed)?\s*[@:]"),                    # FAIL @<sha>, FAILED: <sha>
-    re.compile(r"\bfail(?:ed)?\W{0,4}[0-9a-f]{7,40}\b"),    # FAIL — <sha>
-    re.compile(r"\bverdict\b.{0,60}?\bfail"),               # Verdict: FAIL, Verdict for <sha>: FAIL
-    re.compile(r"\bblocking\s*=\s*[1-9]"),
-    # a finding: P1/P2 then a path-like token (lib/x.ts, [P2] x.ts:9, P2 review_gate.py)
-    re.compile(r"(?<![\w-])p[12](?![\w-])[^\w\s]*\s*[:|—–-]?\s*[^\s,;()]*(?:/|\.[a-z][a-z0-9]{0,5}\b|:\d)"),
-)
-EVIDENCE_ROOT = Path("~/.claude/evidence").expanduser()
 
 
 def is_gate_record(path, body: str) -> bool:
@@ -365,46 +350,9 @@ def mentions_bead(body: str, bead_id: str) -> bool:
                for t in (bead_id, suffix))
 
 
-def _normalise(line: str) -> str:
-    """A copy for the verdict-shape scan: markdown emphasis/code/heading/quote marks and quotes
-    gone, whitespace collapsed, casefolded."""
-    return " ".join(re.sub(r"[*_`#>\"']", "", line).split()).casefold()
-
-
-def is_lead_escalation_status(body: str, bead_id: str) -> bool:
-    """The review lead's escalation status comment for this bead (goal.md Phase 4 Step 4): ONE line
-    that starts ``needs input: <bead_id> escalated <N> protected item(s): <path under
-    ~/.claude/evidence/>`` and carries no verdict shape (``FAIL @<sha>``, ``Verdict ... FAIL``, a
-    P1/P2 finding, ``BLOCKING>=1``, in any case or markdown) and no upper-case veto token other than
-    the bare prose word FAIL. A second line is never a status line: a pasted review block, verdict
-    line or withdrawal stays a veto. A real review verdict always reaches the bead as
-    review-gate.sh's ``FAIL @<tip>`` mirror, which still vetoes."""
-    lines = body.strip().splitlines()
-    if len(lines) != 1:
-        return False
-    m = _LEAD_ESCALATION_RE.match(lines[0].strip())
-    if not m or m.group("bead") != bead_id:
-        return False
-    path = Path(m.group("path"))
-    # realpath on both sides: a symlink under the root that leaves it is outside it.
-    root = Path(os.path.realpath(EVIDENCE_ROOT))
-    if ".." in path.parts or root not in Path(os.path.realpath(path)).parents:
-        return False
-    if any(r.search(_normalise(lines[0])) for r in _VERDICT_SHAPE_RES):
-        return False
-    # Any veto word other than a bare FAIL (FAILED, VOID, ...) keeps it a veto; BLOCKING is above.
-    return all(t.group(1) in (None, "FAIL") for t in _VETO_RE.finditer(body))
-
-
-def _comment_vetoes_tip(body: str, tip_sha: str, bead_id: str) -> bool:
-    return (_names_tip(body, tip_sha) and bool(_VETO_RE.search(body))
-            and not is_lead_escalation_status(body, bead_id))
-
-
-def comment_vetoes(comments_text, tip_sha, bead_id):
+def comment_vetoes(comments_text, tip_sha):
     """[(utc epoch of the comment's minute, first line, body)] of bead comments that veto this tip:
-    they name it and carry a veto token, and are not a clean exact ``PASS @<tip>`` line nor the
-    lead-escalation status line."""
+    they name it and carry a veto token, and are not a clean exact ``PASS @<tip>`` line."""
     tip_sha = tip_sha.lower()
     out = []
     for ts, body in _parse_comments(comments_text):
@@ -412,7 +360,7 @@ def comment_vetoes(comments_text, tip_sha, bead_id):
             continue
         key = datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
         first = (body.strip().splitlines() or [""])[0].strip()
-        if _comment_vetoes_tip(body, tip_sha, bead_id):
+        if _names_tip(body, tip_sha) and _VETO_RE.search(body):
             out.append((key, first, body))
     return out
 
@@ -450,7 +398,7 @@ def independent_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None)
         exact = _EXACT_PASS_LINE_RE.match(first)
         if exact and tip_sha.startswith(exact.group("sha")) and not _VETO_RE.search(body):
             passes.append((key, seq, first))
-        elif _comment_vetoes_tip(body, tip_sha, bead_id):
+        elif _names_tip(body, tip_sha) and _VETO_RE.search(body):
             vetoes.append(("comment", key, seq, f"bead comment: {first[:120]}"))
     root = Path(reviews_dir or DEFAULT_REVIEWS_DIR)
     file_passes = []

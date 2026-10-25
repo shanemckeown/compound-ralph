@@ -139,7 +139,7 @@ def main(argv=None):
             text = Path(a.comments_file).read_text()
         else:
             text = chk.bead_comments_text(a.bead)
-        for key, first, body in lbs.comment_vetoes(text, tip, a.bead):
+        for key, first, body in lbs.comment_vetoes(text, tip):
             if key + 60 > oldest and not is_mirror(body):
                 found.append(f"bead comment: {first[:100]}")
         return found
