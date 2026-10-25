@@ -1388,7 +1388,7 @@ class CwpxuCanonicalPath(unittest.TestCase):
 
     def test_canon_path(self):
         for raw, want in [("./tests/a.test.ts", "tests/a.test.ts"), ("a/tests/a.test.ts", "tests/a.test.ts"),
-                          ("b/tests//a.test.ts", "tests/a.test.ts"), ("tests/./a.test.ts", "tests/a.test.ts"),
+                          ("b/tests//a.test.ts", "tests/a.test.ts"), ("./b/tests/a.test.ts", "tests/a.test.ts"), ("tests/./a.test.ts", "tests/a.test.ts"),
                           ("Dockerfile", "Dockerfile"), ("main.c", "main.c"),
                           ("app/(booking)/[id].tsx", "app/(booking)/[id].tsx")]:
             self.assertEqual(chk.canon_path(raw), want, raw)
