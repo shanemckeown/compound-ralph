@@ -1,11 +1,14 @@
-"""No exported gate reaches back into the ~/.claude checkout (LUCY-p122j layer-B r7).
+"""Lint: no exported gate reaches back into the ~/.claude checkout (LUCY-p122j layer-B r7/r8).
 
 run-gate executes main's committed export, but a gate that names a helper by absolute path
 (~/.claude/scripts/x.py) still runs the checkout's copy, uncommitted edits included. D1: the
-unlanded sweep, the one gate dependency that did this, now resolves beside its caller, and the
-env vars that name a script for a gate are scrubbed. D2: a sweep over every exported code file
-fails on any ~/.claude reference that isn't data, the installed launcher, or an allow entry
-with a written reason; a reference to a gate file is never allowable.
+unlanded sweep, the one gate dependency that did this, now resolves beside its caller. D2 is a
+LINT, not a guarantee: a regex sweep over every exported code file fails on any ~/.claude
+reference that isn't data, the installed launcher, or an allow entry with a written reason (a
+reference to a gate file is never allowable). It catches the common shapes; it can't prove a
+dependency graph. The guarantee for the environment is structural instead (r8 E1): run-gate
+passes only allowlisted variables, and the env lint below makes every variable an exported
+gate reads a written decision, allowed or dropped.
 Run: ~/.claude/skills/land-batch/.venv/bin/python3 -m pytest scripts/git-hooks/ -q
 """
 import importlib.machinery
@@ -51,8 +54,8 @@ ALLOWED = {
         "logs/ and state/ root; sibling scripts run from SCRIPT_DIR",
     ("hooks/night-batch/sentry-triage.sh", "hooks/night-batch"):
         "logs/ and state/ root; sentry-triage.mjs runs from SCRIPT_DIR",
-    ("hooks/night-batch/sentry-triage.mjs", "hooks/night-batch/sentry-triage-mcp.json"):
-        "MCP config data",
+    ("hooks/night-batch/morning-common.sh", "hooks/night-batch"):
+        "logs/ and state/ root; morning scripts source their siblings from SCRIPT_DIR",
     ("hooks/agentview-name-session.py", "hooks/.av-named"): "marker data dir",
     ("hooks/jev-draft-check/hook.mjs", "hooks/jev-draft-check"): "decisions.log and seen/ data dir",
     ("hooks/jev-stop-verify/hook.mjs", "hooks/jev-stop-verify"): "decisions.log and sessions/ data dir",
@@ -255,24 +258,44 @@ def load_run_gate():
     return mod
 
 
-def exec_env_reads(root=REAL_ROOT):
+# E1 lint: every variable an exported gate reads is a decision, passed or dropped
+ENV_NAME_RE = re.compile(r"[A-Z_]*[A-Z][A-Z0-9_]*")  # env style; lowercase is a shell local
+
+
+def env_reads(root=REAL_ROOT):
     names = {}
     for rel in exported_code_files(root):
+        if os.path.basename(rel).startswith("test"):
+            continue  # a test's own fakes, never run by a gate
         with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
         for r in ENV_READ_RES:
             for name in r.findall(text):
-                if EXEC_ENV_RE.search(name):
+                if ENV_NAME_RE.fullmatch(name):
                     names.setdefault(name, set()).add(rel)
     return names
 
 
-# D2 env: a caller can't name the script a gate runs
-def test_d2_every_script_naming_env_var_is_scrubbed_by_run_gate():
-    names = exec_env_reads()
-    assert {"GATE_WATCH_SWEEP", "GATE_WATCH_ROLE", "LAND_STATE_SCRIPT", "SESSIONS_SCRIPT"} <= set(names)
-    scrub = set(load_run_gate().SCRUB)
-    assert {n: sorted(r) for n, r in names.items() if n not in scrub} == {}
+def test_e1_lint_every_env_var_a_gate_reads_is_allowed_or_dropped():
+    rg = load_run_gate()
+    names = env_reads()
+    assert {"PGLITE_ENTRY", "LAND_BATCH_PGLITE_TARBALL", "LAND_BATCH_REF_SNAPSHOT"} <= set(names)
+    undecided = {n: sorted(r) for n, r in names.items()
+                 if not rg.env_allowed(n) and n not in rg.ENV_DROPPED}
+    assert undecided == {}
+
+
+def test_e1_lint_no_dropped_or_code_naming_var_is_allowed():
+    rg = load_run_gate()
+    assert not [n for n in rg.ENV_DROPPED if rg.env_allowed(n)]
+    code_like = [n for n in rg.ENV_ALLOW
+                 if EXEC_ENV_RE.search(n) or re.search(r"_(?:ENTRY|TARBALL|LIB_DIR|OPTIONS)$", n)
+                 or n.startswith(("PYTHON", "BASH_FUNC_", "NODE_", "LD_", "DYLD_"))
+                 and n != "NODE_EXTRA_CA_CERTS"]
+    assert code_like == []
+    assert not any(rg.env_allowed(n) for n in ("PATH", "PYTHONPATH", "BASH_ENV", "NODE_OPTIONS",
+                                               "BASH_FUNC_node%%", "DYLD_INSERT_LIBRARIES",
+                                               "GIT_EXEC_PATH", "SOME_FUTURE_ENTRY"))
 
 
 # D1: the r6 repro — an uncommitted edit to the checkout's sweep must not run

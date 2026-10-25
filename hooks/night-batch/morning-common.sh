@@ -18,7 +18,9 @@ init_report() {
     esac
     shift
   done
-  ROOT="${NIGHT_BATCH_ROOT:-$SCRIPT_DIR}"
+  # logs/ and state/ stay in the writable runtime dir night-batch.sh and sentry-triage.sh use;
+  # SCRIPT_DIR is the read-only export under run-gate (LUCY-p122j r8 E4).
+  ROOT="${NIGHT_BATCH_ROOT:-$HOME/.claude/hooks/night-batch}"
   STATE="$ROOT/state"
   TODAY=$(date +%Y-%m-%d)
   YESTERDAY=$(python3 -I - "$TODAY" <<'PY'

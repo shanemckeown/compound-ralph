@@ -654,9 +654,13 @@ def test_s3_non_isolated_start_re_execs(repo, tmp_path):
 
 
 def test_s3_shebang_is_isolated():
-    for name in ("reference-transaction", "run-gate"):
-        with open(os.path.join(HOOKS_DIR, name)) as fh:
-            assert fh.readline().strip() == "#!/usr/bin/env -S python3 -I -S"
+    with open(os.path.join(HOOKS_DIR, "reference-transaction")) as fh:
+        assert fh.readline().strip() == "#!/usr/bin/env -S python3 -I -S"
+    # run-gate: python3 from fixed dirs, never the caller's PATH (LUCY-p122j r8 E2)
+    with open(os.path.join(HOOKS_DIR, "run-gate")) as fh:
+        assert [fh.readline().strip() for _ in range(2)] == [
+            "#!/bin/sh",
+            '"exec" "/usr/bin/env" "PATH=/opt/homebrew/bin:/usr/bin:/bin" "python3" "-I" "-S" "$0" "$@"']
 
 
 # S4: main must be a direct ref

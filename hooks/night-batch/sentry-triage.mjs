@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const DRY_RUN = process.env.SENTRY_TRIAGE_DRY_RUN === '1';
@@ -28,7 +29,9 @@ const REPO = '/Users/shane/Documents/GitReBase/AestheticcNext';
 // Scope the sentry fetch to ONLY the aestheticc-ops MCP server so the spawn does not
 // boot (and hang on) the full local MCP stack (chrome/gbrain/etc.). Fixes the 300s
 // ETIMEDOUT that silently broke sentry triage (LUCY-0ecs, 2026-06-27).
-const SENTRY_MCP_CONFIG = path.join(HOME, '.claude', 'hooks', 'night-batch', 'sentry-triage-mcp.json');
+// Beside this file: under run-gate that is main's committed copy, whose mcpServers.command is
+// code (LUCY-p122j r8 E3).
+const SENTRY_MCP_CONFIG = path.join(path.dirname(fileURLToPath(import.meta.url)), 'sentry-triage-mcp.json');
 const MAX_DISPATCH = 3;
 const IDEMPOTENCY_WINDOW_MS = 6 * 60 * 60 * 1000;
 

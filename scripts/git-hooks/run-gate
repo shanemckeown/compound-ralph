@@ -1,4 +1,5 @@
-#!/usr/bin/env -S python3 -I -S
+#!/bin/sh
+"exec" "/usr/bin/env" "PATH=/opt/homebrew/bin:/usr/bin:/bin" "python3" "-I" "-S" "$0" "$@"
 """run-gate: run a gate script from the committed live export, never the checkout (LUCY-wqn96 / p122j).
 
 Usage: <git-common-dir>/live/run-gate [--fail-exit N] <relpath> [args...]
@@ -21,17 +22,38 @@ Claude Code treats a hook exit of 2 as blocking and any other non-zero as a warn
 PreToolUse guard routed through this passes --fail-exit 2 to fail closed. Every refusal,
 including any exception while checking, exits with that code.
 
-Before exec it drops BASH_ENV, ENV, NODE_OPTIONS, NODE_PATH, every PYTHON* variable and every
-exported bash function (BASH_FUNC_*), sets a fixed PATH, and sets CLAUDE_LIVE_ROOT to the
-verified export dir for gates that need a root. PATH is the export's own bin/ first (main's
-committed bd close-guard, so a gate's `bd close` is always checked), then system and Homebrew
-dirs (so no user dir can shadow node, python3, git or bash), then the user dirs.
+The environment is an ALLOWLIST (LUCY-p122j r8): the gate, and every check before it, sees
+only the caller variables named in ENV_ALLOW / ENV_ALLOW_PREFIXES below. Anything else is
+dropped, so a variable that points a gate at other code (PGLITE_ENTRY, a tarball, a script,
+NODE_OPTIONS, PYTHON*, BASH_FUNC_*, a future *_ENTRY) is gone without being named. PATH is
+fixed, and set before the first git call: the export's own bin/ first (main's committed bd
+close-guard, so a gate's `bd close` is always checked), then system and Homebrew dirs (so no
+user dir can shadow node, python3, git or bash), then the user dirs. run-gate itself runs on
+the first python3 in those system dirs. Its first line is /bin/sh, not `env python3`: env would
+search the caller's PATH for python3 before a line of this file ran, so the sh line (a no-op
+string to Python) execs python3 from fixed dirs, and started as `<some python> run-gate` it
+re-execs into that python3. CLAUDE_LIVE_ROOT is set to the verified export dir for gates that need a root.
 """
 import os
 import sys
 
-if __name__ == "__main__" and not (sys.flags.isolated and sys.flags.no_site):
-    os.execv(sys.executable, [sys.executable, "-I", "-S", os.path.abspath(__file__)] + sys.argv[1:])
+# Fixed tool dirs: today's python3/node/git/bash, never a user-dir or checkout lookalike.
+SYSTEM_PATH = ("/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def trusted_python():
+    for d in SYSTEM_PATH:
+        p = os.path.join(d, "python3")
+        if os.access(p, os.X_OK):
+            return p
+    return sys.executable
+
+
+if __name__ == "__main__":
+    _py = trusted_python()
+    if (not (sys.flags.isolated and sys.flags.no_site)
+            or os.path.realpath(sys.executable) != os.path.realpath(_py)):
+        os.execv(_py, [_py, "-I", "-S", os.path.abspath(__file__)] + sys.argv[1:])
 
 import importlib.machinery  # noqa: E402
 import importlib.util  # noqa: E402
@@ -62,24 +84,80 @@ except BaseException:
 
 # The export's bin/ (only bin/bd, the bead close-guard, is a gate path) comes first: Homebrew
 # has a bd too, and a gate must reach the real one only through the wrapper, which finds it as
-# the first other bd on PATH. Then system and Homebrew: today's python3/node/git/bash, never a
-# user-dir lookalike. The user dirs after them hold the tools gates call that live nowhere
-# else: claude (~/.local/bin), the codex wrapper (~/.claude/bin), npx (~/.npm-global/bin).
-SYSTEM_PATH = ("/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+# the first other bd on PATH. Then SYSTEM_PATH. The user dirs after them hold the tools gates
+# call that live nowhere else: claude (~/.local/bin), the codex wrapper (~/.claude/bin), npx
+# (~/.npm-global/bin).
 USER_PATH = (".local/bin", ".claude/bin", ".npm-global/bin")
-# The last four name a script for a gate to run (test seams, discover.sh's own exports): a
-# caller must not point an exported gate back at the checkout or anywhere else (LUCY-p122j r7).
-SCRUB = ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH",
-         "GATE_WATCH_SWEEP", "GATE_WATCH_ROLE", "LAND_STATE_SCRIPT", "SESSIONS_SCRIPT")
-# Bash imports a function from BASH_FUNC_<name>%% (older bash: BASH_FUNC_<name>()), and it
-# overrides a command of that name whatever PATH says.
-SCRUB_PREFIXES = ("PYTHON", "BASH_FUNC_")
+
+# The caller variables a gate may see; everything else is dropped (LUCY-p122j r8 E1). Each
+# value is data (a name, a dir, a flag, a socket, a credential), never code a gate runs.
+# Adding a name: it must not select code. test_gate_boundary_lint.py fails when an exported
+# gate reads a variable that is in neither this list nor ENV_DROPPED.
+ENV_ALLOW = frozenset((
+    # identity, terminal, locale, temp
+    "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERMINFO", "COLORTERM", "TERM_PROGRAM",
+    "NO_COLOR", "FORCE_COLOR", "COLUMNS", "LINES", "TZ", "TMPDIR", "LANG", "LANGUAGE",
+    "__CF_USER_TEXT_ENCODING", "SECURITYSESSIONID",
+    # network: the Claude Code sandbox routes every connection through its proxy, and git's
+    # ssh through GIT_SSH_COMMAND + inline GIT_CONFIG_* (prefixes below). These select code
+    # outside ~/.claude (the sandbox's own), so they stay; dropping them breaks git fetch.
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY", "GRPC_PROXY",
+    "RSYNC_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "ftp_proxy",
+    "grpc_proxy", "DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "SSH_AUTH_SOCK", "SANDBOX_RUNTIME",
+    "SRT_SSH_PROXY_COMMAND", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "DOCKER_HOST",
+    # git: which repo / index / author the caller is working in
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_TERMINAL_PROMPT", "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    # Claude Code / Codex session identity and config (CLAUDE_CODE_* is a prefix below)
+    "CLAUDECODE", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SESSION_ID", "CLAUDE_SESSION_NAME", "CLAUDE_JOB_DIR", "CLAUDE_TMPDIR", "CLAUDE_PID",
+    "CLAUDE_EFFORT", "CODEX_THREAD_ID", "SPAWNED_SESSION", "AI_AGENT",
+    # credentials and cloud project for the CLIs gates call (gh, gcloud, claude, codex)
+    "GH_TOKEN", "GITHUB_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+    # what exported gates read (found by test_gate_boundary_lint.py): data dirs, state files,
+    # flags, limits
+    "BEADS_DIR", "BEAD_ID", "AESTHETICC_REPO", "TARGET_REPO", "REPO", "PROJECT_PATH",
+    "PROJECT_DIR", "WORKTREE_BASE", "ASK_GUARD_SILENCE_HOURS", "PRESENCE_STATE_DIR",
+    "CONDUCTOR_ALLOW_DEPLOY_STAGING", "GATE_LEDGER", "GATE_WATCH_CACHE", "GBRAIN_INGEST_SUBPROCESS",
+    "HEAVY_GATE_DIR", "PG_LANE_LOCK_DIR", "JEV_MODEL", "JEV_BELAY_CHECK", "JEV_BELAY_DEBUG",
+    "LAND_BATCH_BEADS_FILES", "LAND_BATCH_REF_SNAPSHOT", "LAND_BATCH_RETIRED_FILE",
+    "LAND_BATCH_STATE_DIR", "LAND_REVIEWS_DIR", "LAND_SKIP_BEAD_COMMENTS", "RETIRED_FILE",
+    "MORNING_REPORT_LOCK", "NIGHT_BATCH_ROOT", "NIGHT_BATCH_DREAM_ROOT", "NIGHT_BATCH_SLACK_ENV",
+    "NIGHT_BATCH_TODO", "NIGHT_BATCH_WORKTREES", "SHANE_SLACK_USER_ID", "SLACK_BOT_TOKEN",
+    "OBSERVER_DIR", "OBSERVER_REMIND_INTERVAL", "SENTRY_TRIAGE_DRY_RUN", "SENTRY_TRIAGE_FORCE",
+    "STATE_FILE", "OUTPUT_FILE", "SUMMARY", "BLOCKER_COUNT", "ORCH_DISPATCHED",
+    "SMGUARD_CONTEXT_WINDOW", "SMGUARD_DEADLINE_S", "WQN96_TEST_TIMEOUT_S",
+))
+ENV_ALLOW_PREFIXES = ("LC_", "CLAUDE_CODE_", "FLEET_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_",
+                      "CLOUDSDK_PROXY_")
+# Read by an exported gate, deliberately NOT passed: each names code for the gate (or its
+# interpreter) to load. Listed only so the lint can tell "decided" from "forgotten"; any name
+# outside ENV_ALLOW is dropped whether or not it is here. Gates that set one for their own
+# child (migration_batch.py sets PGLITE_ENTRY, discover.sh LAND_BATCH_LIB_DIR) still can.
+ENV_DROPPED = frozenset((
+    "PATH", "PGLITE_ENTRY", "LAND_BATCH_PGLITE_TARBALL", "LAND_BATCH_LIB_DIR",
+    "GATE_WATCH_SWEEP", "GATE_WATCH_ROLE", "LAND_STATE_SCRIPT", "SESSIONS_SCRIPT",
+    "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "JAVA_TOOL_OPTIONS", "GIT_EXEC_PATH",
+))
 
 
-def gate_env(root):
-    env = {k: v for k, v in os.environ.items()
-           if k not in SCRUB and not k.startswith(SCRUB_PREFIXES)}
-    home = os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
+def env_allowed(name):
+    return name in ENV_ALLOW or name.startswith(ENV_ALLOW_PREFIXES)
+
+
+def base_env():
+    """The caller's allowlisted variables, PATH set to SYSTEM_PATH only."""
+    env = {k: v for k, v in os.environ.items() if env_allowed(k)}
+    env["PATH"] = ":".join(SYSTEM_PATH)
+    return env
+
+
+def gate_env(root, base):
+    env = dict(base)
+    home = env.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
     env["PATH"] = ":".join((os.path.join(root, "bin"),) + SYSTEM_PATH
                            + tuple(os.path.join(home, d) for d in USER_PATH))
     env["CLAUDE_LIVE_ROOT"] = root
@@ -147,6 +225,11 @@ def run(argv, fail):
 
     live = os.path.dirname(os.path.abspath(__file__))
     common = os.path.dirname(live)
+    # Before the first git call: from here on, this process and every check it runs see only
+    # the allowlisted variables and the fixed PATH (LUCY-p122j r8 E2).
+    base = base_env()
+    os.environ.clear()
+    os.environ.update(base)
     caller_git_dir = os.environ.get("GIT_DIR")
 
     def own_repo(on):
@@ -208,7 +291,7 @@ def run(argv, fail):
         cmd = ["bash", entry] + args
     else:
         return refuse(fail, "%s is not runnable" % rel)
-    env = gate_env(root)
+    env = gate_env(root, base)
     try:
         os.execvpe(cmd[0], cmd, env)
     except OSError as exc:
