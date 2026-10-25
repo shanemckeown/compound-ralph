@@ -35,8 +35,11 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
-    Lines that start like a finding but name no file may not outnumber the block's findings + prior
-    refs of that severity. Frozen: LEAD.md "Declared prose limits".
+    Lines that start like a finding but name no file, and P3s whose only path is a weak slash-word
+    ("user/owned/member", LUCY-16n7i, on an all-P3 line only), may not outnumber the block's findings + prior
+    refs of that severity; the weak ones alone may not outnumber the block's P3 findings (prior refs never
+    count, W1). On an all-P3 line a weak slash-word is never a note's reference (W2). A line carrying a P1 or
+    P2 binds slash-words as locations, as before. Frozen: LEAD.md "Declared prose limits".
 A `fixed` grade counts only when EVERY review of the newest round (at the current tip) closes it in its prior
 array (C5). Any review of the tip marking it "open" escalates it; a newest-round one with no entry leaves it not
 fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
@@ -808,7 +811,8 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
 
 # A repo path in prose (LUCY-e3opf G5 AMENDED, B2), optional :line or :line-line, after a space or "(":
 #  - any token with a slash: "lib/x.ts", "services/worker", "app/(dashboard)/page.tsx:12", "~/x/lib/pay.ts",
-#    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path too: a false refusal, failing closed. A token whose
+#    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path token too; weak_path then reads it as a slash-word
+#    that locates nothing on an all-P3 line, its severity then a weak claim (LUCY-16n7i W1). A token whose
 #    every segment is a severity, a number or a hazard id ("P1/P2/P3", "9/10", "H-U1/H-U3") is a tally,
 #    never a file (TALLY);
 #  - a name with a 2-10 character extension starting with a letter: "tokens.ts", "schema.prisma",
@@ -834,6 +838,46 @@ def repo_paths(line):
     return [m for m in PATH_TOKEN.finditer(line) if not TALLY.fullmatch(m.group(1))]
 
 
+# Top-level dirs a slash-word may start with and still be a repo path (LUCY-16n7i). The checker never sees
+# the reviewed repo (its inputs live in Ops/reviews), so this is a fixed list: the AestheticcNext and ~/.claude
+# top-level dirs plus common app roots. Matched case-insensitively. A word listed here stays a strong path,
+# so a bigger list only fails closed.
+KNOWN_TOP_DIRS = frozenset("""
+    __tests__ aestheticc-zapier agents app archived attached_assets bin cache clinic-voice-service commands
+    components config content contexts csai docs docs-dev drizzle e2e home-images hooks invariants launchd
+    learning lib mcp-tiers migrations mobile mobile-portal ops pages prisma product prompts public references
+    scheduled-tasks scripts services skills skills-archived src strategy styles supabase templates tests
+    types utils voice-service
+""".split())
+_WORD = re.compile(r"[A-Za-z][A-Za-z-]*")
+# A slash-word must be a whole prose token: whitespace or quoting/bracketing before it, and whitespace,
+# punctuation or a sentence-ending "." after it. Anything else ("reports/patient+export.sql", "x=a/b") means
+# PATH_TOKEN stopped inside a longer token, which stays strong (own-gate r2).
+_WEAK_BEFORE = re.compile(r"(?:^|[\s(\[{\"'`*])$")
+_WEAK_AFTER = re.compile(r"(?:$|[\s,;:!?)\]}\"'`*]|\.(?:$|[\s)\]}\"'`*]))")
+
+
+def weak_path(m):
+    """True when a repo_paths match is a slash-word that may be prose ("user/owned/member", "and/or"), not a
+    file (LUCY-16n7i): no :line, two or more segments, every segment a plain word (letters and hyphens only:
+    no dot, digit, underscore, (group), [param], @, ~, or empty segment from a leading or trailing /), a
+    first segment that is not a known top-level dir, and a whole prose token (_WEAK_BEFORE/_WEAK_AFTER).
+    Anything else is a strong path."""
+    segs = m.group(1).split("/")
+    return (not m.group(2) and len(segs) > 1 and all(_WORD.fullmatch(s) for s in segs)
+            and segs[0].lower() not in KNOWN_TOP_DIRS
+            and bool(_WEAK_BEFORE.search(m.string[:m.start()])) and bool(_WEAK_AFTER.match(m.string, m.end())))
+
+
+def p3_relief(line, *own):
+    """True when a line may get the slash-word relief (LUCY-16n7i attempt 2, own-gate r2 lead): every path on
+    it is a weak slash-word and every severity on it (`own`: an earlier-round note's "rN Px", which CLAIM_SEV
+    reads as a count) is P3. A line carrying a P1 or P2 is bound exactly as on main, slash-words as locations,
+    so a P1/P2 can never fail open relative to main; a P3 never blocks landing (the m5lm7 shape)."""
+    return (all(weak_path(m) for m in repo_paths(line))
+            and all(s == "P3" for s in list(own) + [m.group(0) for m in CLAIM_SEV.finditer(line)]))
+
+
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
 CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
@@ -852,14 +896,21 @@ def claim_sevs(line):
     return list(CLAIM_SEV.finditer(line))
 
 
-def line_claims(line, skip=None):
-    """[(severity, path, line or None)] a prose line claims: each standalone severity with the first
-    path after it (before the next severity), else the nearest path before it. No path, no claim. The
-    severity token starting at `skip` (an earlier-round note's own reference) is not a claim."""
+def line_claims(line, skip=None, relief=True):
+    """([(severity, path, line or None)], [severity]) for a prose line: each standalone severity with the
+    first path after it (before the next severity), else the nearest path before it. No path, no claim.
+    LUCY-16n7i: a line whose every path is a weak slash-word (weak_path) and whose every severity is P3
+    locates nothing, and its severities come back in the second list, as weak claims (W1), never ignored. A line with any strong path is
+    bound exactly as before, slash-words included, so a slash-word there still refuses as a location: no
+    severity on a mixed line borrows or escapes another path (own-gate r1/r2). relief=False (a fragment of a
+    line that has a strong path elsewhere) binds as before too. The severity token starting at `skip` (an
+    earlier-round note's own reference) is not a claim."""
     sevs = claim_sevs(line)
     paths = repo_paths(line)
     if not sevs or not paths:
-        return []
+        return [], []
+    if relief and all(weak_path(m) for m in paths) and all(s.group(0) == "P3" for s in sevs):
+        return [], [s.group(0) for s in sevs if s.start() != skip]
     out = []
     for k, s in enumerate(sevs):
         if s.start() == skip:
@@ -869,7 +920,7 @@ def line_claims(line, skip=None):
         before = [m for m in paths if m.end() <= s.start()]
         m = after[0] if after else (before[-1] if before else paths[0])
         out.append((s.group(0), m.group(1), m.group(2)))
-    return out
+    return out, []
 
 
 def same_file(a, b):
@@ -914,37 +965,70 @@ def prose_claim_errors(p, lines, meta, prior):
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
     unlocated = {"P1": [], "P2": [], "P3": []}
+    weak_claims = {"P1": [], "P2": [], "P3": []}
     for line in lines:
         if clean(line) in verbatim:
             continue
-        claims = []
+        claims, own = [], None
         note = EARLIER_NOTE.match(line)
+        # LUCY-16n7i W2: on an all-P3 line (p3_relief) a weak slash-word is never a note's reference: the note
+        # is read as a plain prose line, so every severity on it (its own "rN P3" included, which CLAIM_SEV
+        # reads as a count) is a weak claim, counted against block findings only (W1). A note carrying a P1 or
+        # P2 is read exactly as on main.
+        if note and repo_paths(note.group(3)) and p3_relief(line, note.group(2)):
+            weak_claims[note.group(2)].append(line.strip()[:100])
+            own, note = note.start(2), None  # counted once here, skipped below ("r1  P3": CLAIM_SEV reads it)
         if note:
             ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
-            claims = line_claims(tail)
+            # LUCY-16n7i: the slash-word relief is per whole line (own-gate r3) and all-P3 only, so a note whose
+            # reference names a strong path, or that carries a P1 or P2, binds its tail exactly as on main.
+            relief = p3_relief(line, note.group(2))
+            claims, weak = line_claims(tail, relief=relief)
             # The note's status word is never read: prose neither grades nor disputes (LUCY-e3opf B1, the
             # block is authoritative). Its reference, and any path-free severity in its text, names round
             # N's finding, so the block carries it or the raising review is an input (orphan_open_priors).
+            # With no reference, a slash-word severity is a weak claim (LUCY-16n7i W1).
             refs = [note.group(2)] if ref else []
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
+            else:
+                for sev in weak:
+                    weak_claims[sev].append(line.strip()[:100])
             for sev in refs:
                 if claim_error(sev, ref.group(1), ref.group(2), carried):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
-            claims = line_claims(line)
+            claims, weak = line_claims(line, skip=own)
             start = FINDING_START.match(line) or EXPLICIT_LABEL.match(line.lstrip(" -*•#>"))
+            # A P3 whose only path is a weak slash-word ("P3 user/owned/member gap") is a weak claim: counted
+            # against the block's findings below, never ignored (LUCY-16n7i). The line's starting severity is
+            # counted once.
+            for sev in weak:
+                weak_claims[sev].append(line.strip()[:100])
             if start and not claims:
-                unlocated[re.search(r"P[123]", start.group(0)).group(0)].append(line.strip()[:100])
+                first = re.search(r"P[123]", start.group(0)).group(0)
+                if first not in weak:
+                    unlocated[first].append(line.strip()[:100])
         for sev, path, ln in claims:
             why = claim_error(sev, path, ln, targets)
             if why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
+    # LUCY-16n7i W1: a weak claim may be a real extensionless path ("workers/billing"), so it needs a block
+    # FINDING of its severity, one each, never a prior ref: an unrelated closed prior must not absorb a new
+    # prose finding. Weak claims also join the lines naming no file in the findings + prior refs count.
+    # Only P3 lines get the relief (line_claims), so only P3 weak claims reach this count.
+    for sev, found in weak_claims.items():
+        have = sum(f["sev"] == sev for f in meta)
+        if len(found) > have:
+            raise ValueError(f"{p}: {len(found)} prose {sev} claim(s) name only a slash-word, not a file, and the "
+                             f"review-verdict block has {have} {sev} finding(s) (prior refs don't count): put "
+                             f"every finding in the block with its file_line: {found[0]}")
     for sev, found in unlocated.items():
         have = sum(f["sev"] == sev for f in meta) + sum(k[1] == sev for k in prior)
+        found = found + weak_claims[sev]
         if len(found) > have:
             raise ValueError(f"{p}: {len(found)} prose line(s) start with {sev} but name no file, and the "
                              f"review-verdict block has {have} {sev} finding(s) or prior ref(s): put every "
