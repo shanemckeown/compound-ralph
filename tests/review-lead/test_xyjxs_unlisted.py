@@ -182,6 +182,35 @@ class Rulings(unittest.TestCase):
             self.assertEqual(code, 1, (bad, out))
             self.assertIn(why, out, bad)
 
+    def test_every_file_line_on_a_prose_line_needs_its_own_ruling(self):
+        """Independent r1 P2 (attempt 2): a severity binds one path, so the second file:line on the line (another
+        file, or another line of the same file) was never registered and one ruling waved it through."""
+        for first, second in (("lib/copy.ts:10", "lib/pay.ts:40"), ("lib/pay.ts:10", "lib/pay.ts:40")):
+            prose = f"P3 {first} has a cosmetic label typo; {second} retries the charge and charges twice."
+            one = [f"UNLISTED {first}: DISMISSED — cosmetic, not a finding"]
+            code, out, _ = run(lead(one), seat(prose))
+            self.assertEqual(code, 1, (second, out))
+            self.assertIn(f"UNLISTED {second}: a prose P3 line cites it", out)
+            # One ruling never covers another location.
+            code, out, _ = run(lead([f"UNLISTED {second}: DISMISSED — cosmetic, not a finding"]), seat(prose))
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"UNLISTED {first}: a prose P3 line cites it", out)
+            code, out, _ = run(lead(one + [f"UNLISTED {second}: FINDING P2"]), seat(prose))
+            self.assertEqual(code, 0, out)
+            self.assertIn("BLOCKING=1 ESCALATE=0", out)
+            self.assertIn("UNLISTED=2", out)
+
+    def test_a_second_location_carried_by_the_block_needs_no_ruling(self):
+        prose = "P3 lib/copy.ts:10 typo; lib/pay.ts:40 double charge, as in the block."
+        code, out, _ = run(lead(["UNLISTED lib/copy.ts:10: DISMISSED — cosmetic, not a finding"],
+                                [{"id": "F1", "source_line": "P2 lib/pay.ts:40 — double charge — guard",
+                                  "verdict": "act_on", "category": "money", "clinic_scenario": "reception, iPad, "
+                                  "checkout", "demonstrated": "red test"}]),
+                           seat(prose, [("P2", "lib/pay.ts:40", "double charge — guard")]))
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=1 ESCALATE=0", out)
+        self.assertIn("UNLISTED=1", out)
+
     def test_severity_mismatch_still_refuses_the_inputs(self):
         code, out, _ = run(lead(findings=[{"id": "F1", "source_line": "P2 lib/pay.ts:40 — retry charges twice — fix",
                                            "verdict": "act_on", "category": "money", "clinic_scenario": "x",

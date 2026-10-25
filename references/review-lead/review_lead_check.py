@@ -1144,17 +1144,27 @@ def prose_claim_errors(p, lines, meta, prior):
                 first = re.search(r"P[123]", start.group(0)).group(0)
                 if first not in weak:
                     unlocated[first].append(line.strip()[:100])
+        unlisted = []
         for sev, path, ln in claims:
             why = claim_error(sev, path, ln, targets)
             if why and why.startswith(NO_TARGET):
-                # LUCY-xyjxs: not a refusal of the inputs. The lead must rule on it (unlisted_rulings); the
-                # highest severity anywhere on the line decides whether a dismissal escalates.
-                item = UNLISTED.setdefault(why[len(NO_TARGET):], {"sev": "P3", "lines": []})
-                item["sev"] = min([item["sev"]] + [s.group(0) for s in claim_sevs(line)])
-                if line.strip() not in item["lines"]:
-                    item["lines"].append(line.strip())
+                unlisted.append(why[len(NO_TARGET):])
             elif why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
+        # LUCY-xyjxs attempt 2 (independent r1): a severity binds one path, so every other unmatched file:line on
+        # a line main refused is its own UNLISTED item too, or a ruling on the bound one would wave the rest
+        # through. A line whose claims all match the block is accepted as on main (its other paths are context).
+        if unlisted:
+            unlisted += [f"{m.group(1)}:{m.group(2)}" for m in repo_paths(note.group(5) if note else line)
+                         if m.group(2) and not any(same_file(t[1], m.group(1)) and t[2] == m.group(2)
+                                                   for t in targets)]
+        for loc in dict.fromkeys(unlisted):
+            # LUCY-xyjxs: not a refusal of the inputs. The lead must rule on it (unlisted_rulings); the
+            # highest severity anywhere on the line decides whether a dismissal escalates.
+            item = UNLISTED.setdefault(loc, {"sev": "P3", "lines": []})
+            item["sev"] = min([item["sev"]] + [s.group(0) for s in claim_sevs(line)])
+            if line.strip() not in item["lines"]:
+                item["lines"].append(line.strip())
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
     # LUCY-16n7i W1: a weak claim may be a real extensionless path ("workers/billing"), so it needs a block
