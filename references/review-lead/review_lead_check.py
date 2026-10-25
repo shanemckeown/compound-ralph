@@ -124,7 +124,10 @@ PROTECTED = re.compile(
 # booking, sends or tenancy; anything else (a claim, another path, a digit, non-ASCII) keeps the backstop.
 # A protected category still wins.
 RATCHET_TEST = "tests/meta/file-length-ratchet.test.ts"
-RATCHET_COUNT = re.compile(r"(?<![\w./\[\]-])[\w./\[\]-]*[A-Za-z_][\w./\[\]-]*\.(?:tsx?|jsx?|mjs|cjs|py|sh|sql|css)"
+# A path, as FILE_LINE writes one. A "(group)/" segment is a Next.js route group: app/(home)/page.tsx:12
+# (LUCY-e3opf). The ratchet counts paths in the same grammar: app/(booking)/page.tsx 588/578 (LUCY-mz6fk).
+PATH = r"(?<![\w./\[\])-])(?=[\w./\[\]-]*[A-Za-z_/])(?:[\w./\[\]-]|\([\w.-]+\)(?=/))+"
+RATCHET_COUNT = re.compile(PATH + r"\.(?:tsx?|jsx?|mjs|cjs|py|sh|sql|css)"
                            r"\s+(?:is\s+)?\d+\s*/\s*\d+(?:\s+lines?)?(?![\w/])")
 RATCHET_PHRASES = re.compile(r"\bno (?:real )?clinic scenario\b|\bno runtime effect\b|\bbuild[- ]gate failure\b"
                              r"|\bbuild hygiene\b|\bfile[- ]length ratchet\b"
@@ -156,8 +159,7 @@ SEVERITY_TOKEN = re.compile(r"(?<![\w-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # "Finding (P1): Retry charges twice", "[P2] ...", "Issue P1 - ...".
 EXPLICIT_LABEL = re.compile(r"\b(?:finding|issue|bug|defect|blocker)s?\b\W{0,4}[\[(]?P[123]\b"
                             r"|[\[(]P[123][\])]|(?<![\w-])P[123]\s*:\s", re.I)
-# A "(group)/" segment is a Next.js route group: app/(home)/page.tsx:12 (LUCY-e3opf).
-FILE_LINE = re.compile(r"(?<![\w./\[\])-])(?=[\w./\[\]-]*[A-Za-z_/])(?:[\w./\[\]-]|\([\w.-]+\)(?=/))+:\d+")
+FILE_LINE = re.compile(PATH + r":\d+")
 # A finding's location as written, keeping a line range ("lib/t.ts:78-83"); compared exactly (LUCY-l1s6g c).
 LOC = re.compile(FILE_LINE.pattern + r"(?:-\d+)?(?![\w-])")
 # A count is a number standing alone: "1 P1", "(0 P1", never the 1 in "Round-1 P1" (LUCY-l1s6g e).

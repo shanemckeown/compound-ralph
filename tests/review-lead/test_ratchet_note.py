@@ -151,6 +151,22 @@ class RatchetNote(unittest.TestCase):
         ):
             self.assertTrue(chk.ratchet_only(src), src)
 
+    def test_4f_route_group_and_param_paths_count_like_file_line(self):
+        # Independent review r1 P2: the count grammar refused paths the location grammar accepts.
+        for path in ("app/(booking)/page.tsx", "app/[id]/page.tsx", "app/(booking)/[id]/credit/page.tsx"):
+            self.assertTrue(chk.FILE_LINE.fullmatch(path + ":1"), path)
+            src = f"P3 {T} — {path} 588/578"
+            self.assertTrue(chk.ratchet_only(src), src)
+            code, out, _ = self.run_one(lead_for(consider(src)), src)
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=0", out, src)
+        for src in (
+            f"P3 {T} — app/(booking refund)/page.tsx 588/578",
+            f"P3 {T} — (booking)/page.tsx 588/578",
+            f"P3 {T} — app/(booking)/page.tsx 588/578; booking slots double-book — regen",
+        ):
+            self.assertFalse(chk.ratchet_only(src), src)
+
     def test_4c_only_a_p3_is_exempt(self):
         src = f"P2 {T} — lib/services/credit-service.ts 588/578 — regenerate the baseline during landing"
         self.assertFalse(chk.ratchet_only(src))
