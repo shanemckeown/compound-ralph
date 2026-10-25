@@ -350,7 +350,12 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
 _ECHO_CLAIM_RE = re.compile(r"^[^A-Za-z0-9]*REVIEWING\b", re.I)
 _ECHO_ANY_RE = re.compile(r"REVIEWING[^A-Za-z0-9\s]*\s*:?[*_`\s]*`?([^\s`@]+?)`?\s*@\s*`?"
                           r"([0-9a-fA-F]{7,40})(?![0-9a-fA-F])", re.I)
-_HEADER_FIELD_RE = re.compile(r"\b(?:Bead|Branch)e?s?\b[*_`]*\s*:", re.I)
+_ECHO_AT_START_RE = re.compile(r"^[^A-Za-z0-9]*" + _ECHO_ANY_RE.pattern, re.I)
+_HEADER_FIELD_RE = re.compile(r"\b(?:Bead|Branch)e?s?\b[*_`]*\s*[:|]", re.I)
+# A line about a branch (``Branch / tip:``, a branch/tip table row, ``goal/<bead>``) and a JSON-ish
+# ``"branch"``/``"bead"`` key: either one naming this bead identifies the file as its review.
+_BRANCH_LINE_RE = re.compile(r"branch|(?:long-)?goal/", re.I)
+_JSON_ID_RE = re.compile(r"[\"'](?:branch|bead)[\"']\s*:\s*[\"']([^\"']*)[\"']", re.I)
 
 
 def _names_bead_any_form(text: str, bead_id: str) -> bool:
@@ -366,8 +371,9 @@ def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> 
     """The one exemption from the veto scans (LUCY-txfbf): a review of ANOTHER branch that only
     quotes this bead, e.g. a harness review replaying its files as fixtures. True only when the
     file has a line-start REVIEWING echo, every such claim parses, no echo-shaped text on any line
-    names this bead, is a bare HEAD or is at this tip, and neither the file name nor any Bead: or
-    Branch: field names the bead. Any doubt keeps the veto (fail closed)."""
+    names this bead, is a bare HEAD or is at this tip, and neither the file name, any Bead: or
+    Branch: field, a "branch"/"bead" key, nor a branch line at this tip names the bead. Any doubt
+    keeps the veto (fail closed)."""
     if _names_bead_any_form(Path(path).name, bead_id):
         return False
     tip_sha = tip_sha.lower()
@@ -375,14 +381,19 @@ def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> 
     for line in body.splitlines():
         if _HEADER_FIELD_RE.search(line) and _names_bead_any_form(line, bead_id):
             return False
+        if any(_names_bead_any_form(v, bead_id) for v in _JSON_ID_RE.findall(line)):
+            return False
+        if (_BRANCH_LINE_RE.search(line) and _names_bead_any_form(line, bead_id)
+                and _names_tip(line, tip_sha)):
+            return False
         found = _ECHO_ANY_RE.findall(line)
         for branch, sha in found:
             if (branch.upper() == "HEAD" or _names_bead_any_form(branch, bead_id)
                     or (tip_sha and tip_sha.startswith(sha.lower()))):
                 return False
         if _ECHO_CLAIM_RE.match(line):
-            if not found:
-                return False   # claims to be an echo but doesn't parse: doubt keeps the veto
+            if not _ECHO_AT_START_RE.match(line):
+                return False   # the line-start claim itself doesn't parse: doubt keeps the veto
             echoes += 1
     return echoes > 0
 

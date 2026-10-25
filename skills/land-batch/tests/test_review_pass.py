@@ -416,7 +416,7 @@ def test_txfbf_doubtful_echoes_keep_the_veto(tmp_path):
 def test_txfbf_real_harness_review_files_do_not_veto_3bm73(tmp_path):
     reviews = Path("/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews")
     names = [f"REVIEW_e3opf_structured_astra-high_r{n}_2026-10-24.md" for n in (3, 4, 5, 6)]
-    names.append("REVIEW_txfbf_astra-high_independent_r1_2026-10-25.md")
+    names += [f"REVIEW_txfbf_astra-high_independent_r{n}_2026-10-25.md" for n in (1, 2)]
     present = [n for n in names if (reviews / n).is_file()]
     if not present:
         import pytest
@@ -462,6 +462,27 @@ def test_txfbf_descriptive_no_echo_file_and_hidden_bead_echoes_still_veto(tmp_pa
                                "| REVIEWING | Allure tip |")):
         body = f"REVIEWING: e3opf-structured @ 5acadb10c8\n{claim}\n3bm73 {TX_TIP[:8]} FAIL\n"
         assert len(_vetoes(tmp_path / f"q{i}", "REVIEW_allure_followup_r9.md", body)) == 1, claim
+
+
+def test_txfbf_branch_lines_json_keys_and_line_start_claims_keep_the_veto(tmp_path):
+    other = "REVIEWING: other-branch @ 1111111\n"
+    # (A) a line naming the bead's branch at this tip; (B) a "branch"/"bead" key naming the bead,
+    # tip or not; a branch/tip table cell naming the bead (independent r2 probes).
+    for i, body in enumerate((
+            f"- Branch / tip: `goal/aestheticcnext-3bm73` @ `{TX_TIP}`\nVerdict: FAIL\n",
+            f"| Branch | New tip | Verdict |\n|---|---|---|\n| goal/aestheticcnext-3bm73 | {TX_TIP} | FAIL |\n",
+            f"| Branch | goal/aestheticcnext-3bm73 |\n| Tip | {TX_TIP} |\n| Verdict | FAIL |\n",
+            f'```review-verdict\n{{\n  "branch": "goal/aestheticcnext-3bm73",\n  "tip": "{TX_TIP}",\n  "verdict": "FAIL"\n}}\n```\n',
+            f'```json\n{{"bead": "AestheticcNext-3bm73", "verdict": "FAIL"}}\n```\nat {TX_TIP[:10]}\n')):
+        assert len(_vetoes(tmp_path / f"a{i}", "REVIEW_allure_consent_r9.md", other + body)) == 1, body
+    # (C) a line-start claim must parse by itself: a later echo on the same line does not rescue it.
+    body = (f"REVIEWING: review snapshot @ {TX_TIP}; prior REVIEWING: other-branch @ 1111111\n"
+            f"This review of AestheticcNext-3bm73 at {TX_TIP} finds a regression.\nVerdict: FAIL\n")
+    assert len(_vetoes(tmp_path / "c", "REVIEW_allure_consent_r9.md", body)) == 1
+    # Control: the branch word, the bead and the tip on separate lines of a harness review stay exempt.
+    body = (f"REVIEWING: e3opf-structured @ 5acadb10c8\nBranch notes: fixture replay.\n"
+            f"3bm73 r1-r6 replayed\nat tip {TX_TIP[:8]}: FAIL\n")
+    assert _vetoes(tmp_path / "ok", "REVIEW_e3opf_r9.md", body) == []
 
 
 def test_txfbf_lander_is_not_held_by_a_harness_review_quoting_the_bead(tmp_path):
