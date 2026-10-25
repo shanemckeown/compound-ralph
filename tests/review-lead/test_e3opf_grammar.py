@@ -38,17 +38,26 @@ class G3RefIdentity(unittest.TestCase):
         lead["findings"] = [dict(lead["findings"][0], id=f"F{i + 1}", source_line=s) for i, s in enumerate(srcs)]
         return lead
 
-    def run_pair(self, sonnet_text):
+    def run_pair(self, sonnet_text, opus_prior=None):
+        """r1: two seats at one location. r2: an astra seat closing it, plus an opus seat when opus_prior is
+        given ([] = a block with no entry for it)."""
+        opus = [] if opus_prior is None else [("REVIEW_x_opus_r2_b.md", r2_file(prior=opus_prior), 2100)]
         return run_named(self.lead([self.A, sonnet_text]), [
             ("REVIEW_x_astra_r1_a.md", r1_seat(self.A), 1000),
             ("REVIEW_x_sonnet_r1_a.md", r1_seat(sonnet_text), 1100),
-            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000)])
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(REF, "closed")]), 2000), *opus])
 
     def test_two_distinct_findings_one_ref_escalate(self):
-        code, out = self.run_pair(self.B)
+        # LUCY-unykv: a newest-round seat with no closed entry for the ambiguous ref keeps the escalation.
+        code, out = self.run_pair(self.B, opus_prior=[])
         self.assertEqual(code, 0, out)
         self.assertIn("BLOCKING=0 ESCALATE=2", out)
         self.assertIn("FIXED=0", out)
+        # Every newest-round seat (here the only one) closes the location with evidence: both count fixed.
+        code, out = self.run_pair(self.B)
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=2", out)
 
     def test_same_text_in_two_seats_is_one_finding(self):
         code, out = self.run_pair(self.A)
@@ -649,7 +658,8 @@ class A5AmbiguityWhateverTheGrade(unittest.TestCase):
             self.assertIn("FIXED=0", out, grade)
 
     def test_fixed_grade_still_escalates(self):
-        code, out = G3RefIdentity().run_pair(self.B)
+        # LUCY-unykv: escalates unless every newest-round seat closes it; one seat keeping it open does.
+        code, out = G3RefIdentity().run_pair(self.B, opus_prior=[(REF, "open")])
         self.assertIn("ESCALATE=2", out)
         self.assertIn("FIXED=0", out)
 
@@ -1280,7 +1290,9 @@ class CwpxuPathOnlyRef(unittest.TestCase):
             self.assertIn("FIXED=0", out)
 
     def test_line_less_and_lined_at_one_path_escalate(self):
-        """'Exactly one round-N finding at that path + severity': a lined sibling makes the path-only ref ambiguous."""
+        """'Exactly one round-N finding at that path + severity': a lined sibling makes the path-only ref ambiguous.
+        Since LUCY-unykv the lined sibling, closed at its own file:line by every newest seat, is fixed; the path-only
+        finding still escalates (every_seat_closes never speaks for a path-only ref)."""
         lined = "P3 tests/a.test.ts:12 — the 500 cell asserts nothing — assert the blank tokens"
         raise_r1 = (f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n{LL_SRC}\n{lined}\n" + strict_block(
             "FAIL", [("P3", "tests/a.test.ts:12", lined[3:])]).replace(
@@ -1289,8 +1301,11 @@ class CwpxuPathOnlyRef(unittest.TestCase):
             ("REVIEW_x_sonnet_r1_a.md", raise_r1, 1000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed"), ("r1 P3 tests/a.test.ts:12", "closed")]), 2000)])
         self.assertEqual(code, 0, out)
-        self.assertIn("BLOCKING=0 ESCALATE=2", out)
-        self.assertIn("FIXED=0", out)
+        self.assertIn("BLOCKING=0 ESCALATE=1", out)
+        self.assertIn("FIXED=1", out)
+        files = [("REVIEW_x_sonnet_r1_a.md", [LL_SRC, lined], raise_r1),
+                 ("REVIEW_x_astra_r2_b.md", [], r2_file(prior=[(LL_REF, "closed")]))]
+        self.assertFalse(chk.every_seat_closes(LL_SRC, files))  # the escalated one is the path-only finding
 
     def test_raised_again_at_the_path_at_the_tip_not_fixed(self):
         again = "P3 tests/a.test.ts:40 — still no failed-fetch cell — add one"

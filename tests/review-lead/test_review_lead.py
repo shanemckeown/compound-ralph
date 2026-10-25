@@ -1572,9 +1572,10 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
         # B1: the h2h seat reviewed the same tip and wrote no prior, so the other four stay NOT fixed
         # (blocking), without refusing the run.
         self.assertIn("BLOCKING=4 ESCALATE=6 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=0", out)
+        # LUCY-unykv: with every r2 seat closing "r1 P2 ...:78", the ambiguous pair counts fixed too.
         code, out = self.run_lead(self.lead(), seats=(0, 1, 2))
         self.assertEqual(code, 0, out)
-        self.assertIn("BLOCKING=0 ESCALATE=6 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=4", out)
+        self.assertIn("BLOCKING=0 ESCALATE=4 FOLLOWUPS=0 DISMISSED=0 NOTED=0 P4=0 CLEARED=2 FIXED=6", out)
         r1 = [(str(FIX_Z0 / as_round_one(n)), chk.reviewer_findings([str(FIX_Z0 / n)])) for n in (Z0_R1_SONNET, Z0_R1_OPUS)]
         self.assertEqual(len(chk.ref_ambiguity(r1, 1, "P2", "lib/agent-core/thread-find-or-create.ts:78")), 2)
 
@@ -1595,7 +1596,7 @@ class L1s6gZ0oteRound2EndToEnd(unittest.TestCase):
         lead["verified_notes"] = []
         code, out = self.run_lead(lead, seats=(0, 1, 2))
         self.assertEqual(code, 0, out)
-        self.assertIn("FIXED=4", out)
+        self.assertIn("FIXED=6", out)  # LUCY-unykv: the every-seat-closed ambiguous pair included
 
 
 # ---------------------------------------------------------------------------------------------
