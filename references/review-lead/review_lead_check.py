@@ -549,24 +549,25 @@ def ref_loc(finding):
 
 # Path-only refs (LUCY-cwpxu): any repo-relative file name, extensionless (Dockerfile) and short (main.c)
 # included. Never the prose-path grammar: a path-only ref names a file, it doesn't find one in prose.
-_REF_SEG = re.compile(r"[\w.@+\[\]()-]+")
+_REF_SEG = re.compile(r"[\w.@+\[\]()$=%~-]+")
 
 
 def canon_path(t):
     """The one canonical form of a repo path, on both sides of a path-only ref: diff prefixes a/ b/ and ./
     dropped, // collapsed, x/../ resolved (a ref may not use '..': structured_prior). None for an absolute path,
-    a directory, one escaping the repo, a tally or a token with no letter."""
+    a directory, one escaping the repo, a home path (~), a tally or a token with no letter."""
+    t = re.sub(r"/{2,}", "/", t)
     while t.startswith("./"):
         t = t[2:]
     if t.startswith(("a/", "b/")):
         t = t[2:]
     segs = []
-    for s in re.sub(r"/{2,}", "/", t).split("/"):
+    for s in t.split("/"):
         if s == ".." and segs and segs[-1]:
             segs.pop()
         elif s != ".":
             segs.append(s)
-    if not segs or not all(s and s != ".." and _REF_SEG.fullmatch(s) for s in segs):
+    if not segs or segs[0].startswith("~") or not all(s and s != ".." and _REF_SEG.fullmatch(s) for s in segs):
         return None
     t = "/".join(segs)
     return None if TALLY.fullmatch(t) or not re.search(r"[A-Za-z]", t) else t
@@ -574,8 +575,15 @@ def canon_path(t):
 
 def token_loc(token):
     """(canonical path, line or None) of one location token as written, else None. Markdown wrappers go
-    first (backticks, **, _x_, quotes, unbalanced parens, trailing punctuation), so `src/a.ts`:12 and
-    **src/a.ts:12** keep their line."""
+    first (unwrap), so `src/a.ts`:12 and **src/a.ts:12** keep their line."""
+    m = re.fullmatch(r"(.+?)(?::(\d+(?:-\d+)?))?", unwrap(token))
+    path = canon_path(m.group(1)) if m else None
+    return (path, m.group(2)) if path else None
+
+
+def unwrap(token):
+    """A location token less its markdown wrappers: backticks, **, _x_, quotes, unbalanced or enclosing
+    parens, trailing punctuation."""
     t, prev = token, None
     while t != prev:
         prev = t
@@ -587,9 +595,7 @@ def token_loc(token):
         m = re.fullmatch(r"(_{1,2})(.+)\1(:\d+(?:-\d+)?)?", t)
         if m:
             t = m.group(2) + (m.group(3) or "")
-    m = re.fullmatch(r"(.+?)(?::(\d+(?:-\d+)?))?", t)
-    path = canon_path(m.group(1)) if m else None
-    return (path, m.group(2)) if path else None
+    return t
 
 
 def lead_token(finding):
@@ -607,8 +613,12 @@ def own_paths(o):
 
 
 def mentioned_paths(o):
-    """Every canonical path a finding line names, token-bounded (src/a.ts is not src/a.tsx)."""
-    return {pl[0] for tok in re.split(r"[\s–—]+", o) for pl in [token_loc(tok)] if pl}
+    """Every canonical path a finding line names, token-bounded (src/a.ts is not src/a.tsx): each word, and
+    each piece of it between markdown link / quote / anchor punctuation ("[x](src/a.ts#L3)"). Extra pieces
+    only add vetoes, never remove one."""
+    words = re.split(r"[\s–—]+", o)
+    toks = words + [p for w in words for p in re.split(r"[\[\](){}<>\"'`#,;|]+", w)]
+    return {pl[0] for tok in toks for pl in [token_loc(tok)] if pl}
 
 
 def ref_candidates(o, sev, loc):
@@ -753,7 +763,7 @@ def structured_prior(p, data):
         if not m:
             m = PRIOR_PATH_REF.match(ref)
             pl = token_loc(m.group(3)) if m else None
-            if not pl or pl[1] is not None or m.group(3).endswith(":") or ".." in m.group(3).split("/"):
+            if not pl or pl[1] is not None or m.group(3).endswith(":") or ".." in unwrap(m.group(3)).split("/"):
                 raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>' (or 'r<N> P<1-3> "
                                  "<file>' for a finding raised with no line)")
             loc = pl[0]

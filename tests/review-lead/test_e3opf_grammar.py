@@ -1388,12 +1388,13 @@ class CwpxuCanonicalPath(unittest.TestCase):
 
     def test_canon_path(self):
         for raw, want in [("./tests/a.test.ts", "tests/a.test.ts"), ("a/tests/a.test.ts", "tests/a.test.ts"),
-                          ("b/tests//a.test.ts", "tests/a.test.ts"), ("./b/tests/a.test.ts", "tests/a.test.ts"), ("tests/./a.test.ts", "tests/a.test.ts"),
+                          ("b/tests//a.test.ts", "tests/a.test.ts"), ("./b/tests/a.test.ts", "tests/a.test.ts"), (".//tests/a.test.ts", "tests/a.test.ts"),
+                          ("src/$id.tsx", "src/$id.tsx"), ("tests/./a.test.ts", "tests/a.test.ts"),
                           ("Dockerfile", "Dockerfile"), ("main.c", "main.c"),
                           ("app/(booking)/[id].tsx", "app/(booking)/[id].tsx")]:
             self.assertEqual(chk.canon_path(raw), want, raw)
         self.assertEqual(chk.canon_path("src/../src/a.ts"), "src/a.ts")
-        for raw in ["../a.ts", "src/../../a.ts", "/abs/a.ts", "tests/", "P1/P2", "12", "~/a.ts", "src/a.ts/"]:
+        for raw in ["../a.ts", "src/../../a.ts", "/abs/a.ts", "tests/", "P1/P2", "12", "~/a.ts", "~user/a.ts", "src/a.ts/"]:
             self.assertIsNone(chk.canon_path(raw), raw)
 
     def test_token_loc_unwraps_before_reading_the_line(self):
@@ -1426,6 +1427,12 @@ class CwpxuCanonicalPath(unittest.TestCase):
         code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
             ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 tests/../tests/a.test.ts", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("FIXED=", out)
+        # Own-gate r1 :756: wrapping can't smuggle the '..' past the ref check.
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 `junk/..`/tests/a.test.ts", "closed")]), 2000)])
         self.assertEqual(code, 1, out)
         self.assertNotIn("FIXED=", out)
 
@@ -1484,6 +1491,15 @@ class CwpxuCanonicalPath(unittest.TestCase):
         self.assertIn("ESCALATE=1", out)
         self.assertIn("FIXED=0", out)
 
+    def test_markdown_link_mention_at_the_tip_vetoes(self):
+        """Own-gate r1 :611: a path inside a markdown link or anchor is still a mention."""
+        for again in ("P3 lib/b.ts:5 — [the test](tests/a.test.ts) still lacks the failed-fetch assertion — add it",
+                      "P3 lib/b.ts:5 — see tests/a.test.ts#L40, still no failed-fetch cell — add it"):
+            code, out = self.tip_mention(again)
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1", out)
+            self.assertIn("FIXED=0", out)
+
     def test_mention_is_token_bounded(self):
         code, out = self.tip_mention("P3 lib/b.ts:5 — tests/a.test.tsx lacks the empty-state cell — add it")
         self.assertEqual(code, 0, out)
@@ -1492,7 +1508,7 @@ class CwpxuCanonicalPath(unittest.TestCase):
 
     def test_extensionless_and_short_names_close(self):
         """r1 :677 — honest line-less Dockerfile / main.c findings close by their exact path."""
-        for path in ("Dockerfile", "main.c", "voice-service/Makefile"):
+        for path in ("Dockerfile", "main.c", "voice-service/Makefile", "src/$id.tsx", ".//tests/a.test.ts"):
             src = f"P3 {path} — the build skips the contraindication checker's tests — run them"
             code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
                 ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
