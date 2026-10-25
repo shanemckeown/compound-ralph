@@ -198,6 +198,17 @@ class P1P2LinesBindAsMain(unittest.TestCase):
                           ""):                                                  # an unnamed finding
                 self.refuses(f"{named}\n{billing}", "workers/billing", one, prior=[("r1 P1 lib/old.ts:3", "closed")])
 
+    def test_a_p1_note_on_a_slash_word_reads_as_main(self):
+        # Its slash-word reference is a reference (as main), so it is carried by the prior at that location.
+        self.assertEqual(parse_text(strict_file("- r1 P1 workers/billing open: still double-charges",
+                                                prior=[("r1 P1 workers/billing:10", "closed")])), [])
+
+    def test_an_all_p3_note_on_a_slash_word_absorbs_nothing(self):
+        # W2 at P3: the note's slash-word is no reference, so a closed prior there can't absorb its tail.
+        with self.assertRaisesRegex(ValueError, "3 prose P3 claim\\(s\\) name only a slash-word"):
+            parse_text(strict_file("- r1 P3 reports/summary closed: P3 exports/archive naming; P3 team/member naming",
+                                   prior=[("r1 P3 reports/summary:10", "closed")]))
+
     def test_m5lm7_shape_is_p3_and_passes(self):
         p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
         self.assertEqual(len(parse_text(strict_file("P3 lib/auth/request-memo.ts:70 — H-D1 test gap\n" + M5LM7_17,
