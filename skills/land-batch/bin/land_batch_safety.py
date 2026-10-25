@@ -306,6 +306,17 @@ _REVIEWING_RE = re.compile(r"(?m)^\s*REVIEWING:\s*\S+\s*@\s*([0-9a-fA-F]{7,40})[
 # A veto token, deliberately broad: over-holding costs one fresh gate run, under-holding lands
 # unreviewed code. Upper-case words only, so prose like "failed" or "void" doesn't trip it.
 _VETO_RE = re.compile(r"\b(FAIL|FAILED|VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\b|\bBLOCKING=[1-9]")
+# A review withdrawn by its author says so on a line of its own ("VOID: superseded by r11"); the
+# word inside a finding ("VOID invoices can still charge") is never a withdrawal (Astra r14, r22).
+# review_gate.py reads it from here: one definition.
+WITHDRAWAL_RE = re.compile(r"(?mi)^\W*(VOID|VOIDED|REVOKED|WITHDRAWN|RETRACTED)\b(?:\W*[:—–-]|\W*$)")
+# goal.md's lead-escalation status line (LUCY-b7pqo). Starts-with, not fullmatch: the Manager
+# writes a summary after the path on the same line.
+_LEAD_ESCALATION_RE = re.compile(r"^needs input: (?P<bead>\S+) escalated \d+ protected item\(s\): (?P<path>/\S+)")
+# "FAIL @<sha>" and its markdown/punctuated variants ("**FAIL** @<sha>", "FAIL: <sha>").
+_FAIL_AT_SHA_RE = re.compile(r"\bFAIL(?:ED)?\b[^\w\n]{0,4}@?[^\w\n]{0,2}[0-9a-fA-F]{7,40}\b")
+_BLOCKING_RE = re.compile(r"\bBLOCKING=[1-9]")
+EVIDENCE_ROOT = Path("~/.claude/evidence").expanduser()
 
 
 def is_gate_record(path, body: str) -> bool:
@@ -350,9 +361,34 @@ def mentions_bead(body: str, bead_id: str) -> bool:
                for t in (bead_id, suffix))
 
 
-def comment_vetoes(comments_text, tip_sha):
+def is_lead_escalation_status(body: str, bead_id: str) -> bool:
+    """The review lead's escalation status comment for this bead (goal.md Phase 4 Step 4): line 1
+    starts ``needs input: <bead_id> escalated <N> protected item(s): <path under ~/.claude/evidence/>``
+    and nowhere does the comment carry a verdict-shaped veto (``FAIL @<sha>``, a withdrawal line,
+    ``BLOCKING>=1``) or any veto token other than the bare prose word FAIL. A real review verdict
+    always reaches the bead as review-gate.sh's ``FAIL @<tip>`` mirror, which still vetoes."""
+    lines = body.strip().splitlines()
+    m = _LEAD_ESCALATION_RE.match(lines[0].strip()) if lines else None
+    if not m or m.group("bead") != bead_id:
+        return False
+    path = Path(m.group("path"))
+    if ".." in path.parts or EVIDENCE_ROOT not in Path(os.path.normpath(path)).parents:
+        return False
+    if _FAIL_AT_SHA_RE.search(body) or WITHDRAWAL_RE.search(body) or _BLOCKING_RE.search(body):
+        return False
+    # Any veto word other than a bare FAIL (FAILED, VOID, ...) keeps it a veto; BLOCKING is above.
+    return all(t.group(1) in (None, "FAIL") for t in _VETO_RE.finditer(body))
+
+
+def _comment_vetoes_tip(body: str, tip_sha: str, bead_id: str) -> bool:
+    return (_names_tip(body, tip_sha) and bool(_VETO_RE.search(body))
+            and not is_lead_escalation_status(body, bead_id))
+
+
+def comment_vetoes(comments_text, tip_sha, bead_id):
     """[(utc epoch of the comment's minute, first line, body)] of bead comments that veto this tip:
-    they name it and carry a veto token, and are not a clean exact ``PASS @<tip>`` line."""
+    they name it and carry a veto token, and are not a clean exact ``PASS @<tip>`` line nor the
+    lead-escalation status line."""
     tip_sha = tip_sha.lower()
     out = []
     for ts, body in _parse_comments(comments_text):
@@ -360,7 +396,7 @@ def comment_vetoes(comments_text, tip_sha):
             continue
         key = datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
         first = (body.strip().splitlines() or [""])[0].strip()
-        if _names_tip(body, tip_sha) and _VETO_RE.search(body):
+        if _comment_vetoes_tip(body, tip_sha, bead_id):
             out.append((key, first, body))
     return out
 
@@ -398,7 +434,7 @@ def independent_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None)
         exact = _EXACT_PASS_LINE_RE.match(first)
         if exact and tip_sha.startswith(exact.group("sha")) and not _VETO_RE.search(body):
             passes.append((key, seq, first))
-        elif _names_tip(body, tip_sha) and _VETO_RE.search(body):
+        elif _comment_vetoes_tip(body, tip_sha, bead_id):
             vetoes.append(("comment", key, seq, f"bead comment: {first[:120]}"))
     root = Path(reviews_dir or DEFAULT_REVIEWS_DIR)
     file_passes = []

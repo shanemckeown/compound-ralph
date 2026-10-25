@@ -697,8 +697,9 @@ On exit 0 it writes, and you use **only** these:
   (not demonstrated, or out of scope under the lock). They don't add a round, and the push goes
   ahead. But non-empty means **the branch must not land** until the orchestrator clears each one:
   report `needs input: <BEAD_ID> escalated <n> protected item(s): <path>` in Phase 7, and put the
-  same line in a `bd comment`. The orchestrator clears a **pre-existing** one (follow-up bead filed)
-  with a bead comment whose first line is `ORCHESTRATOR CLEARED <finding-id> (<follow-up bead>)`;
+  same line in a `bd comment` (this exact prefix, with an evidence path, is a status line, never a
+  veto; a `FAIL @<sha>` or `BLOCKING=1` in it still vetoes, LUCY-b7pqo). The orchestrator clears a
+  **pre-existing** one (follow-up bead filed) with a bead comment whose first line is `ORCHESTRATOR CLEARED <finding-id> (<follow-up bead>)`;
   the checker then honours `--bead <BEAD_ID> --cleared-escalation <finding-id>` and prints
   `CLEARED=n`. A finding the branch caused can't be cleared, only fixed.
 - **Recording the PASS (lead / orchestrator, after the independent review):** when the lead
