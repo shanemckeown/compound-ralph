@@ -2,11 +2,40 @@
 when EVERY newest-round seat at the tip closes it with evidence; a missing, open, mixed or re-raised entry keeps
 the G3/A5 escalation. Replays the real 9kwlw independent r2 inputs (BLOCKING=0 ESCALATE=0).
 """
+import io
+import shutil
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
-from test_16n7i_slashwords import replay
+import test_review_lead as base
+from test_review_lead import chk
 from test_e3opf_grammar import REF, G3RefIdentity, r1_seat
 from test_review_lead import r2_file, run_named
+
+FIX = base.HERE / "fixtures"
+OPS = "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews"
+
+
+def replay(name, scope_lock):
+    """chk.main over a fixtures/replay-<name> copy of real Ops/reviews inputs, fixed_by re-pointed at the copy."""
+    src = FIX / f"replay-{name}"
+    with tempfile.TemporaryDirectory(dir="/private/tmp") as d:
+        for f in src.iterdir():
+            shutil.copy(f, d)
+        lead = Path(d) / "lead-round-2.json"
+        lead.write_text(lead.read_text().replace(OPS, d))
+        argv = ["--lead", str(lead), "--out-dir", str(Path(d) / "out"), "--round", "2"]
+        for f in sorted(Path(d).glob("REVIEW_*.md")):
+            argv += ["--verdict", str(f)]
+        if scope_lock:
+            argv.append("--scope-lock")
+        out = io.StringIO()
+        with redirect_stderr(out), redirect_stdout(out):
+            code = chk.main(argv)
+        return code, out.getvalue()
+
 
 A, B = G3RefIdentity.A, G3RefIdentity.B
 
