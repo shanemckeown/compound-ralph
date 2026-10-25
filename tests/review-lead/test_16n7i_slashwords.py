@@ -113,16 +113,34 @@ class G5SlashWords(unittest.TestCase):
         self.assertEqual(chk.line_claims("P1 app/(booking)/page.tsx 588/578"),
                          ([("P1", "app/(booking)/page.tsx", None)], []))
 
-    def test_strong_path_wins_over_a_slash_word_on_one_line(self):
-        self.assertEqual(chk.line_claims("P1 user/owned/member leak at lib/x.ts:4"), ([("P1", "lib/x.ts", "4")], []))
+    def test_a_mixed_line_binds_as_before(self):
+        # own-gate r1/r2: with any strong path on the line, slash-words are locations again (as on main), so
+        # they refuse; no severity borrows the strong path or escapes it.
+        self.assertEqual(chk.line_claims("P1 user/owned/member leak at lib/x.ts:4"),
+                         ([("P1", "user/owned/member", None)], []))
+        unrelated = [("r1 P1 lib/pay.ts:37", "closed")]
+        for line, where in (
+                ("P2 reports/summary returns a blank export; P2 exports/archive omits the saved report; "
+                 "P2 lib/label.ts:3 uses an unclear local variable", "reports/summary"),
+                ("P2 lib/label.ts:3 uses an unclear local variable; P2 reports/summary returns a blank export",
+                 "reports/summary"),
+                ("lib/tenant.ts:90 — P1 the user/owned/member filter exposes another clinic patient export",
+                 "user/owned/member")):
+            with self.assertRaisesRegex(ValueError, f"no review-verdict finding or prior ref at {where}", msg=line):
+                parse_text(strict_file(line, [("P2", "lib/label.ts:3", "uses an unclear local variable")],
+                                       prior=unrelated))
 
-    def test_a_clause_never_borrows_another_clauses_strong_path(self):
-        # own-gate r1 Astra: each P2 binds within its own clause, so the two slash-word P2s stay unlocated.
-        line = ("P2 reports/summary returns a blank export; P2 exports/archive omits the saved report; "
-                "P2 lib/label.ts:3 uses an unclear local variable")
-        self.assertEqual(chk.line_claims(line), ([("P2", "lib/label.ts", "3")], ["P2", "P2"]))
-        with self.assertRaisesRegex(ValueError, "2 prose line\\(s\\) start with P2 but name no file"):
-            parse_text(strict_file(line, [("P2", "lib/label.ts:3", "uses an unclear local variable")]))
+    def test_a_slash_word_cut_out_of_a_longer_token_is_strong(self):
+        # own-gate r2 Astra: PATH_TOKEN stops at '+', leaving 'reports/patient'; it is not a whole prose word.
+        for token in ("reports/patient+export.sql-template", "reports/patient%20export", "x=reports/summary",
+                      "reports/summary#anchor"):
+            m = [x for x in chk.repo_paths(f"P1 {token} leak") if x.group(1).startswith("reports/")]
+            self.assertTrue(m and not chk.weak_path(m[0]), token)
+        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at reports/patient"):
+            parse_text(strict_file("P1 reports/patient+export.sql-template exposes another clinic patient export",
+                                   prior=[("r1 P1 lib/pay.ts:37", "closed")]))
+        for prose in ("P3 user/owned/member.", "(P3 user/owned/member)", "P3 'and/or', P3 \"read/write\":"):
+            self.assertTrue(all(chk.weak_path(m) for m in chk.repo_paths(prose)), prose)
 
     def test_an_unrelated_prior_does_not_cover_a_dotted_path(self):
         # own-gate r1 Astra: an extension of any shape is strong, so the claim must match the block by location.
