@@ -79,8 +79,9 @@ The checker verifies this; you never confirm a fix yourself. No clearance is nee
   - a path with no `/` and an extension of one letter, or none, with no line number (`main.c`, `Makefile`), and a URL;
   - a finding with no severity token at all ("this still double-charges"), or a severity written another way ("priority one", "p1", "P-1");
   - a claim whose path matches a block finding of the same severity and file but describes a different bug (wording is never compared);
-  - a tally token is never a path: one whose every `/` segment is a severity, a number or a hazard id (`P1/P2`, `14/14`, `H-U1/H-U3`).
-  It also refuses some clean lines (fails closed): `and/or`, `user.id` or a quoted `` `P2 lib/x.ts:12` `` next to a severity. Reword them.
+  - a tally token is never a path: one whose every `/` segment is a severity, a number or a hazard id (`P1/P2`, `14/14`, `H-U1/H-U3`);
+  - a weak slash-word is never a location (LUCY-16n7i): a `/` token with no `:line`, no leading `~/` or `/`, no trailing `/`, no extension on its last segment, no `(group)`/`[param]`/`@`/dot-led segment, and a first segment that is not a known top-level dir (`user/owned/member`, `and/or`). Its severity is counted like a line that names no file, against the block's findings + prior refs of that severity, so a real path written that way (`reports/summary`) is checked by count, not by location.
+  It also refuses some clean lines (fails closed): `user.id` or a quoted `` `P2 lib/x.ts:12` `` next to a severity, or more slash-word severities than the block holds. Reword them.
 - **More than 5 blocking Act on items means you're not filtering hard enough.** Filter harder, or give `act_on_over_cap_reason`.
 - The Dismissed list isn't busywork. It's the trust mechanism that lets the orchestrator or Shane overrule you.
 - When a dismissal is a new, reusable shape, append a `candidate` pattern to DISMISSAL_PATTERNS.md (format in that file). Never add one whose "Skip when" covers a never-dismiss area.

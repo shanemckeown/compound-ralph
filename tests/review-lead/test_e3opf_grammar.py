@@ -289,10 +289,10 @@ class G5RealFiles(unittest.TestCase):
         return text.replace("identity/idempotent", "identity, idempotent")
 
     def test_q2lod_cp2_seats_parse(self):
-        # B2: the server seat's carry line says 'identity/idempotent' next to its P3, a slash token, so the
-        # real file is refused (an accepted false refusal, listed on the bead); reworded it parses.
-        with self.assertRaisesRegex(ValueError, "prior ref at identity/idempotent"):
-            self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
+        # B2 refused the server seat: its carry line says 'identity/idempotent' next to its P3. LUCY-16n7i:
+        # that slash-word is weak, so the P3 is counted as unlocated against the block's P3s, and the real
+        # file parses the same as the reworded one.
+        self.assertEqual(len(self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")), 5)
         self.assertEqual(len(parse_text(self.server_text())), 5)
         for name, n in (("NOTES_REVIEW_q2lod_cp2_astra-xhigh-app_2026-10-24.md", 4),
                         ("NOTES_REVIEW_q2lod_cp2_astra-xhigh-tests_2026-10-24.md", 2),
@@ -349,9 +349,9 @@ class OwnGateRound1(unittest.TestCase):
         for prose in ("No H-P0/P1 hazards apply", "Seen on localhost:3000 during the P3 check",
                       "Earlier P3 grading retained."):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
-        # LUCY-e3opf B2: any slash token is a path, so 'and/or' next to a severity is a claim (an accepted
-        # false refusal: it fails closed).
-        with self.assertRaisesRegex(ValueError, "prior ref at and/or"):
+        # LUCY-16n7i: 'and/or' is a weak slash-word, never a location. Its severities are unlocated, so with
+        # no P2 in the block the line still refuses (fails closed), now by count, not as a path.
+        with self.assertRaisesRegex(ValueError, "start with P2 but name no file"):
             parse_text(self.file("No P2 and/or P3 items remain"))
 
     def test_backticked_bare_severity_is_a_claim(self):
@@ -403,7 +403,7 @@ class OwnGateRound2(unittest.TestCase):
                      [("P2", "lib/a.ts:37", "refresh hides the search input — keep it")])
         self.refuses("P1 Dockerfile:12 — fixture stripped", [("P1", "Dockerfile:11", "other — fix")])
         self.refuses("P1 .gcloudignore:5 — fixture stripped", [("P1", ".gcloudignore:4", "other — fix")])
-        self.assertEqual(chk.line_claims("P1 build.gradle:40 x"), [("P1", "build.gradle", "40")])
+        self.assertEqual(chk.line_claims("P1 build.gradle:40 x"), ([("P1", "build.gradle", "40")], []))
 
     def test_parenthesised_absolute_and_bare_paths_are_claims(self):
         nit = [("P3", "lib/label.ts:4", "label typo — fix")]
@@ -736,9 +736,14 @@ class B2WholeResponseSweep(unittest.TestCase):
                       "H-U1/H-U3 answered; no P3."):
             self.assertEqual(parse_text(closing_r2(tail=prose + "\n")), [], prose)
         # A real path that merely contains a tally-like run is still a path.
-        for prose in ("P2 in lib/2024/10/report.ts — totals drift", "P2 in reports/P1/P2/summary — wrong"):
+        for prose in ("P2 in lib/2024/10/report.ts — totals drift", "P2 in lib/reports/P1/P2/summary — wrong"):
             with self.assertRaises(ValueError, msg=prose):
                 parse_text(closing_r2(tail=prose + "\n"))
+        # LUCY-16n7i: with no known top-level dir it is a weak slash-word: still a path token, never a tally,
+        # but it locates nothing, so its P2 is counted against the block's P2s instead.
+        m = chk.repo_paths("P2 in reports/P1/P2/summary — wrong")
+        self.assertEqual([x.group(1) for x in m], ["reports/P1/P2/summary"])
+        self.assertTrue(chk.weak_path(m[0]))
 
 
 # ---------------------------------------------------------------------------------------------
