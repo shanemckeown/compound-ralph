@@ -154,6 +154,18 @@ class ClearedComment(unittest.TestCase):
             orch = comment(ts, f"ORCHESTRATOR CLEARED COMMENT {self.clear_arg}")
             self.assertRefused(self.run_gate(self.real + orch, self.clear_arg), "no bead comment whose first line")
 
+    def test_orchestrator_line_must_postdate_the_newest_verdict_file(self):
+        """After the cleared comment is not enough: a verdict written after the clearance voids it."""
+        newest = self.reviews / "REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md"
+        t = 1792906530  # 2026-10-25 05:35:30 UTC, after the 01:10 comment
+        os.utime(newest, (t, t))
+        between = comment("2026-10-25 05:20", f"ORCHESTRATOR CLEARED COMMENT {self.clear_arg}")
+        same_minute = comment("2026-10-25 05:35", f"ORCHESTRATOR CLEARED COMMENT {self.clear_arg}")
+        after = comment("2026-10-25 05:36", f"ORCHESTRATOR CLEARED COMMENT {self.clear_arg}")
+        for orch in (between, same_minute):
+            self.assertRefused(self.run_gate(self.real + orch, self.clear_arg), "after the verdict files")
+        self.assertEqual(self.run_gate(self.real + after, self.clear_arg)[0], 0)
+
     def test_two_matching_comments_in_the_minute_refuse(self):
         twice = self.real + comment(STATUS_TS, self.status) + self.orch_line
         self.assertRefused(self.run_gate(twice, self.clear_arg), "2 bead comments at 2026-10-25 01:10")
