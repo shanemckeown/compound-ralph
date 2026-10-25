@@ -3,7 +3,8 @@
 
   ~/.claude/scripts/review-gate.sh <bead> <full-tip-sha> --lead lead-round-N.json \
       --verdict ~/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_<...>.md [--verdict ...] \
-      --out-dir "$EVIDENCE_DIR" --round N [--scope-lock] [--cleared-escalation F1 ...] [--dry-run]
+      --out-dir "$EVIDENCE_DIR" --round N [--scope-lock] [--cleared-escalation F1 ...] \
+      [--cleared-comment "YYYY-MM-DD HH:MM:<sha256 hex prefix>" ...] [--dry-run]
 
 Runs review_lead_check.py on the reviewers' files exactly as they are, and only when it prints
 BLOCKING=0 ESCALATE=0 writes the two records the lander reads (land-batch independent_pass_for):
@@ -23,6 +24,17 @@ It always waits for the next UTC minute before writing, then re-checks every ver
 bd comment times are minute-resolution and the lander (land_batch_safety.independent_pass_for)
 orders the gate's records after every FAIL file and FAIL comment by time.
 --dry-run runs every check and prints what it would write.
+
+--cleared-comment (LUCY-b7pqo, Orchestrator23 ruling (a)) removes ONE bead comment from the
+comment vetoes: the one at that UTC minute whose text, byte for byte as `bd comments --json`
+returns it, has that sha256 prefix, at least 12 hex. Nothing is stripped or normalised, so any
+edit to the comment, a trailing space or a CRLF included, voids the clearance. Orchestrator only:
+the caller must be the live orchestrator by fleet-role.py (no agent id in the env = a human
+terminal, allowed), checked again after the minute wait, and the bead must carry a comment whose
+first line starts `ORCHESTRATOR CLEARED COMMENT <ts>:<prefix>`, in a minute strictly after the
+cleared comment's and the newest verdict file's. No match, two matches, or a comment that is not
+a veto of this tip refuses. After the wait the whole clearance is verified again on the same
+single read of the comments that the veto scan uses. Recorded as `CLEARED-COMMENT <ts>:<prefix>`.
 """
 import argparse
 import hashlib
@@ -85,6 +97,123 @@ def bd_comment(bead, text):
     return subprocess.run(["bd", "comment", bead, text], capture_output=True, text=True, timeout=60, env=env)
 
 
+# The wqn96 identity rule (scripts/git-hooks/reference-transaction caller_role), on the installed
+# checker: that hook rebuilds fleet-role.py from main's git blobs inside a ref transaction, so it
+# can't be imported here. No env override of the checker path.
+FLEET_ROLE = HERE.parent.parent / "scripts" / "fleet-role.py"
+AGENT_ID_RE = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{7,63}")
+AGENT_ID_VARS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+CLEARED_COMMENT = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}):([0-9a-f]{12,64})$")
+
+
+def caller_is_orchestrator():
+    """True for a human terminal (no agent id set) or when every agent id set is the orchestrator.
+    Set but empty or malformed, or the checker failing or hanging, is False (fail closed)."""
+    present = [os.environ[v] for v in AGENT_ID_VARS if v in os.environ]
+    if not present:
+        return True
+    if not all(AGENT_ID_RE.fullmatch(i) for i in present):
+        return False
+    for agent_id in present:
+        try:
+            res = subprocess.run([sys.executable, "-E", "-s", str(FLEET_ROLE), agent_id],
+                                 capture_output=True, text=True, timeout=60, cwd=str(FLEET_ROLE.parent))
+        except (OSError, subprocess.SubprocessError):
+            return False
+        lines = res.stdout.splitlines()
+        if res.returncode != 0 or not lines or lines[0].strip() != "ORCHESTRATOR":
+            return False
+    return True
+
+
+def comment_hash(body):
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def comment_minute(ts):
+    return datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
+
+
+def snapshot_from_json(raw):
+    """[(comment id, 'YYYY-MM-DD HH:MM' UTC, text exactly as bd stores it)] from `bd comments --json`."""
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError("bd comments --json is not a list")
+    out = []
+    for c in data:
+        if not (isinstance(c, dict) and isinstance(c.get("text"), str) and isinstance(c.get("created_at"), str)):
+            raise ValueError("bd comments --json has a comment without text or created_at")
+        at = datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
+        if at.tzinfo is None:
+            raise ValueError(f"bd comment time {c['created_at']!r} has no timezone")
+        out.append((str(c.get("id") or len(out)), at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M"), c["text"]))
+    return out
+
+
+def snapshot_from_text(text):
+    """The same records from `bd comments` text (the --comments-file dry-run fixtures): bd's
+    two-space indent is removed, so a multi-line body reads as it was written."""
+    return [(f"#{i}", ts, "\n".join(ln[2:] if ln.startswith("  ") else ln for ln in body.split("\n")))
+            for i, (ts, body) in enumerate(lbs._parse_comments(text)) if ts is not None]
+
+
+def bead_comments_json(bead):
+    env = dict(os.environ)
+    if not env.get("BEADS_DIR"):
+        for prefix, path in chk.BEADS_DIRS_BY_PREFIX:
+            if bead.lower().startswith(prefix):
+                env["BEADS_DIR"] = os.path.expanduser(path)
+    out = subprocess.run(["bd", "comments", bead, "--json"], capture_output=True, text=True, timeout=30, env=env)
+    if out.returncode != 0:
+        raise ValueError(f"bd comments {bead} --json failed: {(out.stderr or out.stdout).strip()[:200]}")
+    return out.stdout
+
+
+def render(ts, text):
+    """One snapshot record as `bd comments` prints it, for land_batch_safety's veto rules."""
+    return f"[bd] at {ts}\n" + "".join(f"  {ln}\n" for ln in text.splitlines()) + "\n"
+
+
+def snapshot_vetoes(snap, tip):
+    """[(comment id, minute epoch, first line, text)] of the snapshot's comments that veto the tip,
+    each judged alone by land_batch_safety.comment_vetoes."""
+    out = []
+    for cid, ts, text in snap:
+        hit = lbs.comment_vetoes(render(ts, text), tip)
+        if hit:
+            out.append((cid, hit[0][0], hit[0][1], text))
+    return out
+
+
+def verify_cleared_comments(snap, tip, clears, not_before):
+    """({comment id}, errors) for --cleared-comment (ts, prefix) pairs: the one comment each names,
+    hashed exactly as bd returns it, which must be a veto of the tip and cleared by an orchestrator
+    line in a minute after it and at or after not_before."""
+    vetoes = {cid for cid, _, _, _ in snapshot_vetoes(snap, tip)}
+    honoured, errs = set(), []
+    for ts, prefix in clears:
+        tag = f"--cleared-comment {ts}:{prefix}"
+        hits = [cid for cid, t, text in snap if t == ts and comment_hash(text).startswith(prefix)]
+        if len(hits) != 1:
+            at = ", ".join(comment_hash(text)[:12] for _, t, text in snap if t == ts) or "none"
+            errs.append(f"{tag}: {len(hits)} bead comments at {ts} UTC hash to that prefix; exactly one must "
+                        f"(comments at that minute, exactly as bd stores them: {at})")
+            continue
+        if hits[0] not in vetoes:
+            errs.append(f"{tag}: that comment is not a veto of tip {tip[:10]}; nothing to clear")
+            continue
+        head = f"ORCHESTRATOR CLEARED COMMENT {ts}:{prefix}"
+        if not any(t > ts and comment_minute(t) >= not_before
+                   and (body.splitlines() or [""])[0].strip().startswith(head)
+                   and (body.splitlines() or [""])[0].strip()[len(head):len(head) + 1] in ("", " ", "\t")
+                   for _, t, body in snap):
+            errs.append(f"{tag}: no bead comment whose first line starts '{head}' dated after that comment "
+                        f"and after the verdict files ({datetime.fromtimestamp(not_before, timezone.utc):%Y-%m-%d %H:%M} UTC or later)")
+            continue
+        honoured.add(hits[0])
+    return honoured, errs
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("bead")
@@ -95,12 +224,44 @@ def main(argv=None):
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--scope-lock", action="store_true")
     ap.add_argument("--cleared-escalation", action="append", default=[], metavar="FINDING_ID")
+    ap.add_argument("--cleared-comment", action="append", default=[], metavar="'YYYY-MM-DD HH:MM:HEX'",
+                    help="one bead comment the orchestrator cleared (UTC minute + sha256 prefix of its body)")
     ap.add_argument("--comments-file", help="bd comments text to read instead of calling bd (tests)")
+    ap.add_argument("--comments-json-file", help="bd comments --json to read instead of calling bd (tests)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
 
-    if a.comments_file and not a.dry_run:
+    if (a.comments_file or a.comments_json_file) and not a.dry_run:
         return refuse("--comments-file is for --dry-run only; a real PASS reads the live bead comments")
+    if a.comments_file and a.comments_json_file:
+        return refuse("give --comments-file or --comments-json-file, not both")
+    if a.comments_json_file and a.cleared_escalation:
+        return refuse("a --cleared-escalation dry run reads --comments-file (the checker's input)")
+    clears = []
+    for c in a.cleared_comment:
+        m = CLEARED_COMMENT.match(c)
+        if not m:
+            return refuse(f"--cleared-comment {c!r} is not 'YYYY-MM-DD HH:MM:<12-64 lowercase hex>'")
+        clears.append(m.groups())
+    if clears and a.comments_file:
+        return refuse("--cleared-comment hashes the comment exactly as bd stores it: dry-run it with "
+                      "--comments-json-file, not the --comments-file text")
+    caller = {v: os.environ.get(v) for v in AGENT_ID_VARS}
+    if clears and not caller_is_orchestrator():
+        return refuse("--cleared-comment is for the orchestrator only (fleet-role.py did not say ORCHESTRATOR "
+                      "for this session)")
+    cleared_comments = set()  # ids of the bead comments removed from the vetoes
+
+    def read_snapshot():
+        """One read of the bead comments; the clearance and the veto scan both use it."""
+        if a.comments_json_file:
+            return snapshot_from_json(Path(a.comments_json_file).read_text())
+        if a.comments_file:
+            return snapshot_from_text(Path(a.comments_file).read_text())
+        # Without a clearance nothing is hashed: read the text as before.
+        if not clears:
+            return snapshot_from_text(chk.bead_comments_text(a.bead))
+        return snapshot_from_json(bead_comments_json(a.bead))
     tip = a.tip.lower()
     if not FULL_SHA.match(tip):
         return refuse(f"tip {a.tip!r} is not a full 40-hex sha")
@@ -117,7 +278,7 @@ def main(argv=None):
         if lbs.is_gate_record(v, v.read_text(errors="ignore")):
             return refuse(f"{v.name} is a review-gate record, not a reviewer's verdict")
 
-    def newer_fail():
+    def newer_fail(snap):
         """Vetoes the gated reviews don't account for, so a stale or hand-picked input set can't
         launder them: any other FAIL review of this tip newer than the OLDEST input (a later input
         never supersedes another reviewer's findings), and any veto comment on the bead newer than
@@ -135,13 +296,12 @@ def main(argv=None):
             # Other vetoes only count when newer than the oldest input.
             if m > oldest or (echoes and any(tip.startswith(e) for e in echoes) and not withdrawn):
                 found.append(p)
-        if a.comments_file:
-            text = Path(a.comments_file).read_text()
-        else:
-            text = chk.bead_comments_text(a.bead)
-        for key, first, body in lbs.comment_vetoes(text, tip):
+        for cid, key, first, body in snapshot_vetoes(snap, tip):
+            if cid in cleared_comments:
+                continue
             if key + 60 > oldest and not is_mirror(body):
-                found.append(f"bead comment: {first[:100]}")
+                ts = datetime.fromtimestamp(key, timezone.utc).strftime("%Y-%m-%d %H:%M")
+                found.append(f"bead comment {ts}:{comment_hash(body)[:12]}: {first[:100]}")
         return found
 
     def is_mirror(body):
@@ -234,8 +394,31 @@ def main(argv=None):
                 return refuse(f"finding {f.get('id') or '?'} is graded fixed but was raised by a review of tip "
                               f"{tip[:10]} itself (or by no input): only an earlier commit's finding can be fixed")
     sums = {str(v): md5(v) for v in verdicts}
-    if newer_fail():
-        return refuse(f"a FAIL review of this tip is not among the inputs ({newer_fail()[0]}): "
+    def clearance_errors(snap):
+        """Verify every --cleared-comment against this read of the comments and the verdict mtimes
+        as they are now; on success the honoured set replaces cleared_comments. Run again after the
+        wait, on the read the veto scan then uses."""
+        if not clears:
+            return None
+        # Strictly after the newest verdict file's minute: bd minutes are UTC and minute-resolution,
+        # so a clearing comment in that same minute may predate it, even at second 0.
+        newest = max(v.stat().st_mtime for v in verdicts)
+        honoured, errs = verify_cleared_comments(snap, tip, clears, newest - newest % 60 + 60)
+        cleared_comments.clear()
+        if errs:
+            return "clearance not verified: " + "; ".join(errs)
+        cleared_comments.update(honoured)
+        return None
+    try:
+        snap = read_snapshot()
+    except (OSError, ValueError) as e:
+        return refuse(f"cannot read bead comments ({e})")
+    err = clearance_errors(snap)
+    if err:
+        return refuse(err)
+    vetoed = newer_fail(snap)
+    if vetoed:
+        return refuse(f"a FAIL review of this tip is not among the inputs ({vetoed[0]}): "
                       "gate every review of the tip together")
     recorded = Path(a.out_dir) / "review-file.md5"
     if not recorded.is_file():
@@ -274,6 +457,7 @@ def main(argv=None):
         if m:
             bead_ids = chk.BEAD_ID.findall(ln)
             cleared.append(f"CLEARED {m.group(1)} ({bead_ids[0] if bead_ids else '?'})")
+    cleared += [f"CLEARED-COMMENT {ts}:{prefix}" for ts, prefix in clears]
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     short = a.bead.split("-", 1)[-1]
@@ -305,8 +489,21 @@ def main(argv=None):
     changed = [str(v) for v in verdicts if md5(v) != sums[str(v)]]
     if changed:
         return refuse(f"verdict file changed while waiting: {changed[0]}; nothing written")
-    if newer_fail():
-        return refuse(f"a FAIL review arrived while waiting ({newer_fail()[0]}); nothing written")
+    # The caller's orchestrator role may have been revoked during the wait.
+    if clears and ({v: os.environ.get(v) for v in AGENT_ID_VARS} != caller or not caller_is_orchestrator()):
+        return refuse("--cleared-comment: the caller is no longer the orchestrator after the wait; nothing written")
+    # One fresh read for both: a verdict rewritten (same bytes, new mtime), an orchestrator line
+    # removed, or a duplicate of the cleared comment posted during the wait is caught on it.
+    try:
+        snap = read_snapshot()
+    except (OSError, ValueError) as e:
+        return refuse(f"cannot read bead comments ({e}); nothing written")
+    err = clearance_errors(snap)
+    if err:
+        return refuse(f"{err}; nothing written")
+    vetoed = newer_fail(snap)
+    if vetoed:
+        return refuse(f"a FAIL review arrived while waiting ({vetoed[0]}); nothing written")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     review_path = reviews_root / f"REVIEW_{short}_gate_{tip[:10]}_{stamp}.md"
     if review_path.exists():
