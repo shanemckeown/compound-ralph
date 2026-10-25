@@ -746,14 +746,9 @@ class B2WholeResponseSweep(unittest.TestCase):
                       "H-U1/H-U3 answered; no P3."):
             self.assertEqual(parse_text(closing_r2(tail=prose + "\n")), [], prose)
         # A real path that merely contains a tally-like run is still a path.
-        for prose in ("P2 in lib/2024/10/report.ts — totals drift", "P2 in lib/reports/P1/P2/summary — wrong"):
+        for prose in ("P2 in lib/2024/10/report.ts — totals drift", "P2 in reports/P1/P2/summary — wrong"):
             with self.assertRaises(ValueError, msg=prose):
                 parse_text(closing_r2(tail=prose + "\n"))
-        # LUCY-16n7i: with no known top-level dir it is a weak slash-word: still a path token, never a tally,
-        # but it locates nothing, so its P2 is counted against the block's P2s instead.
-        m = chk.repo_paths("P2 in reports/P1/P2/summary — wrong")
-        self.assertEqual([x.group(1) for x in m], ["reports/P1/P2/summary"])
-        self.assertTrue(chk.weak_path(m[0]))
 
 
 # ---------------------------------------------------------------------------------------------

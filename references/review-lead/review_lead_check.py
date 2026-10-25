@@ -847,21 +847,18 @@ KNOWN_TOP_DIRS = frozenset("""
     scheduled-tasks scripts services skills skills-archived src strategy styles supabase templates tests
     types utils voice-service
 """.split())
-_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,9}$")
+_WORD = re.compile(r"[A-Za-z][A-Za-z-]*")
 
 
 def weak_path(m):
     """True when a repo_paths match is a slash-word that may be prose ("user/owned/member", "and/or"), not a
-    file (LUCY-16n7i): it has a slash, no :line, no leading ~/ or /, no trailing /, no extension on the last
-    segment, no (group), [param], @ or dot-led segment, and its first segment is not a known top-level dir.
-    Anything else is a strong path. A weak path never locates a claim; its severity is counted as unlocated."""
-    path = m.group(1)
-    if m.group(2) or "/" not in path or path.startswith(("~", "/")) or path.endswith("/"):
-        return False
-    segs = path.split("/")
-    if _EXT.search(segs[-1]) or any(s[:1] in ("(", "[", ".") or "[" in s or "@" in s for s in segs):
-        return False
-    return segs[0].lower() not in KNOWN_TOP_DIRS
+    file (LUCY-16n7i): no :line, two or more segments, every segment a plain word (letters and hyphens only:
+    no dot, digit, underscore, (group), [param], @, ~, or empty segment from a leading or trailing /), and a
+    first segment that is not a known top-level dir. Anything else is a strong path. A weak path never locates
+    a claim; its severity is counted as unlocated."""
+    segs = m.group(1).split("/")
+    return (not m.group(2) and len(segs) > 1 and all(_WORD.fullmatch(s) for s in segs)
+            and segs[0].lower() not in KNOWN_TOP_DIRS)
 
 
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
@@ -884,27 +881,30 @@ def claim_sevs(line):
 
 def line_claims(line, skip=None):
     """([(severity, path, line or None)], [severity]) for a prose line: each standalone severity with the
-    first strong path after it (before the next severity), else the nearest one before it. No path, no
-    claim. A line whose only paths are weak slash-words (weak_path) locates nothing: its severities come
-    back in the second list, to be counted as unlocated, never ignored (LUCY-16n7i). The severity token
-    starting at `skip` (an earlier-round note's own reference) is not a claim."""
+    first path after it (before the next severity), else the nearest path before it. No path, no claim.
+    Weak slash-words (weak_path) locate nothing (LUCY-16n7i): a severity whose own clause holds a strong
+    path claims the first one; one whose clause holds only weak ones, or that falls back to a weak one, comes
+    back in the second list, to be counted as unlocated, never ignored. It never borrows another clause's
+    strong path past its own slash-word. The severity token starting at `skip` (an earlier-round note's own
+    reference) is not a claim."""
     sevs = claim_sevs(line)
-    found = repo_paths(line)
-    paths = [m for m in found if not weak_path(m)]
-    if found and not paths:
-        return [], [s.group(0) for s in sevs if s.start() != skip]
+    paths = repo_paths(line)
     if not sevs or not paths:
         return [], []
-    out = []
+    out, weak = [], []
     for k, s in enumerate(sevs):
         if s.start() == skip:
             continue
         stop = sevs[k + 1].start() if k + 1 < len(sevs) else len(line)
         after = [m for m in paths if s.end() <= m.start() < stop]
         before = [m for m in paths if m.end() <= s.start()]
-        m = after[0] if after else (before[-1] if before else paths[0])
-        out.append((s.group(0), m.group(1), m.group(2)))
-    return out, []
+        strong = [m for m in after if not weak_path(m)]
+        m = strong[0] if strong else after[0] if after else (before[-1] if before else paths[0])
+        if weak_path(m):
+            weak.append(s.group(0))
+        else:
+            out.append((s.group(0), m.group(1), m.group(2)))
+    return out, weak
 
 
 def same_file(a, b):
