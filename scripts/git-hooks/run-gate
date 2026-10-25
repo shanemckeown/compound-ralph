@@ -67,7 +67,10 @@ except BaseException:
 # else: claude (~/.local/bin), the codex wrapper (~/.claude/bin), npx (~/.npm-global/bin).
 SYSTEM_PATH = ("/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 USER_PATH = (".local/bin", ".claude/bin", ".npm-global/bin")
-SCRUB = ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH")
+# The last four name a script for a gate to run (test seams, discover.sh's own exports): a
+# caller must not point an exported gate back at the checkout or anywhere else (LUCY-p122j r7).
+SCRUB = ("BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH",
+         "GATE_WATCH_SWEEP", "GATE_WATCH_ROLE", "LAND_STATE_SCRIPT", "SESSIONS_SCRIPT")
 # Bash imports a function from BASH_FUNC_<name>%% (older bash: BASH_FUNC_<name>()), and it
 # overrides a command of that name whatever PATH says.
 SCRUB_PREFIXES = ("PYTHON", "BASH_FUNC_")

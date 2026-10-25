@@ -1203,7 +1203,8 @@ def check_resources(snap=None):
 WIP_CHECK = "13 WIP cap"
 WIP_CAP = 10
 WIP_PREFIXES = ("goal", "long-goal")
-UNLANDED_SWEEP = os.path.expanduser("~/.claude/scripts/unlanded-sweep.py")
+# Beside this file, so run-gate's exported copy loads the exported sweep (LUCY-p122j r7).
+UNLANDED_SWEEP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unlanded-sweep.py")
 WIP_KEY_RE = re.compile(r"^(?:(?:aestheticcnext|lucy)-)?([a-z0-9]+(?:\.\d+)*)", re.I)
 LANDED_MARK_RE = re.compile(r"\bLANDED\s*@\s*[0-9a-f]{7,40}\b|\bSUPERSEDED\s+by\s+\S", re.I)
 

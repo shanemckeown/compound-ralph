@@ -4,7 +4,9 @@
 
 set -u
 set -o pipefail
+# ROOT holds logs/ and state/; code runs from this script's own dir.
 ROOT="$HOME/.claude/hooks/night-batch"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)  # sibling scripts (LUCY-p122j r7)
 LOG="$ROOT/logs/sentry-triage.log"
 STATE_FILE="$HOME/.aestheticc-ops/sentry-state.json"
 SLACK_USER="${SHANE_SLACK_USER_ID:-U0AAHJHPYCC}"
@@ -56,7 +58,7 @@ if [[ "${SENTRY_TRIAGE_DRY_RUN:-}" == "1" ]]; then
   export SENTRY_TRIAGE_DRY_RUN
 fi
 
-if ! node "$ROOT/sentry-triage.mjs" > "$OUTPUT_FILE" 2>>"$LOG"; then
+if ! node "$SCRIPT_DIR/sentry-triage.mjs" > "$OUTPUT_FILE" 2>>"$LOG"; then
   log "ERROR: sentry-triage.mjs failed"
   printf '%s\n' '{"slack_text":"*Sentry triage* — node runner failed before producing a digest","dispatched":0,"health":"NODE_FAIL"}' > "$OUTPUT_FILE"
 fi

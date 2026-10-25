@@ -28,12 +28,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ROOT holds logs/ and state/; code runs from this script's own dir.
 ROOT="$HOME/.claude/hooks/night-batch"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)  # sibling scripts (LUCY-p122j r7)
 LOG="$ROOT/logs/orchestrator.log"
 STATE="$ROOT/state"
 ZERO_STREAK_FILE="$STATE/zero-eligible-streak"
 ZERO_ALERT_FILE="$STATE/zero-eligible-alert"
-DISPATCH="$ROOT/dispatch.sh"
+DISPATCH="$SCRIPT_DIR/dispatch.sh"
 # Pivot 2026-05-01: night-batch reads from AestheticcNext, not the vault.
 # Vault beads are mostly Shane-tasks (sales, calls, emails); the codeable
 # backlog (where /do-bead can actually produce a diff) lives in AestheticcNext.
@@ -70,7 +72,7 @@ runtime_exceeded() {
 pick_eligible() {
   local limit="$1"
   cd "$BEADS_REPO" || return 1
-  local validator="$ROOT/check-eligibility.sh"
+  local validator="$SCRIPT_DIR/check-eligibility.sh"
   local today_processed
   today_processed="$STATE/processed/$(date +%Y-%m-%d)"
   local picked=0
@@ -128,9 +130,9 @@ active_count() {
 # of side-by-side data, decide whether to drop blind-claude or keep both.
 reap_completed() {
   local reaped=0
-  local guard="$ROOT/check-guard.sh"
-  local gate_review="$ROOT/codex-review.sh"
-  local parallel_review="$ROOT/blind-claude-review.sh"
+  local guard="$SCRIPT_DIR/check-guard.sh"
+  local gate_review="$SCRIPT_DIR/codex-review.sh"
+  local parallel_review="$SCRIPT_DIR/blind-claude-review.sh"
   for marker in "$STATE"/*.running; do
     [[ -f "$marker" ]] || continue
     local bead
@@ -173,7 +175,7 @@ reap_completed() {
           # is deleted from the repo, and unattended per-bead `gcloud builds
           # submit` violates the no-autonomous-deploy rule. QA surface = main
           # staging via /land-batch. Do not re-enable without Shane.
-          # local preview="$ROOT/staging-preview-deploy.sh"
+          # local preview="$SCRIPT_DIR/staging-preview-deploy.sh"
           # if [[ -x "$preview" ]]; then
           #   log "  $bead: spawning staging-preview deploy (background)"
           #   nohup "$preview" "$bead" >>"$ROOT/logs/${bead}.preview.log" 2>&1 &
@@ -295,11 +297,11 @@ log "=== night-batch end (dispatched=$dispatched) ==="
 # Render TODO + archive now; the 07:00 job reads archives and owns Slack
 # delivery (AestheticcNext-yoi4o). This replaces the old end-of-run Slack DM.
 # Even a night-batch dry-run must never reach a sending reporter invocation.
-if [[ -x "$ROOT/morning-report.sh" ]]; then
+if [[ -x "$SCRIPT_DIR/morning-report.sh" ]]; then
   log "running morning-report.sh --archive-only"
   if [[ $DRY_RUN -eq 1 ]]; then
-    "$ROOT/morning-report.sh" --archive-only --dry-run 2>&1 | tee -a "$LOG"
+    "$SCRIPT_DIR/morning-report.sh" --archive-only --dry-run 2>&1 | tee -a "$LOG"
   else
-    "$ROOT/morning-report.sh" --archive-only 2>&1 | tee -a "$LOG"
+    "$SCRIPT_DIR/morning-report.sh" --archive-only 2>&1 | tee -a "$LOG"
   fi
 fi

@@ -43,7 +43,10 @@ from datetime import datetime, timezone
 HOME = os.path.expanduser("~")
 LEDGER = os.environ.get("GATE_LEDGER", os.path.join(HOME, "Documents/Obsidian/Aestheticc/Ops/GATE_LEDGER.jsonl"))
 CACHE = os.environ.get("GATE_WATCH_CACHE", os.path.join(HOME, ".claude/state/gate-watch-cache.json"))
-SWEEP = os.environ.get("GATE_WATCH_SWEEP", os.path.join(HOME, ".claude/scripts/unlanded-sweep.py"))
+# The sweep beside this file: under run-gate that is the export's copy, never the checkout's.
+# run-gate scrubs GATE_WATCH_SWEEP and GATE_WATCH_ROLE (tests only) from a gate's env.
+SWEEP = os.environ.get("GATE_WATCH_SWEEP",
+                       os.path.join(os.path.dirname(os.path.abspath(__file__)), "unlanded-sweep.py"))
 # Gates run from the committed live export, never the checkout (LUCY-wqn96).
 RUN_GATE = os.path.join(HOME, ".claude/.git/live/run-gate")
 ROLE = os.environ.get("GATE_WATCH_ROLE")  # tests: a checker script run with this python

@@ -35,7 +35,7 @@ fi
 # hallucinated "complete" state, 41s exits). auto-bead.sh creates the worktree
 # directly and dispatches a single focused claude -p invocation. See observer
 # log entry 2026-04-26 for the /do-bead-headless incompatibility.
-AUTOBEAD="$HOME/.claude/hooks/night-batch/auto-bead.sh"
+AUTOBEAD="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/auto-bead.sh"  # sibling (LUCY-p122j r7)
 echo "[$(ts)] dispatch: spawning tmux session $SESSION for $BEAD (auto-bead.sh)" >> "$LOG"
 
 tmux new-session -d -s "$SESSION" \

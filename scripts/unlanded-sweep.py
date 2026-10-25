@@ -137,7 +137,9 @@ def _load_safety():
     """land-batch's own review_pass_for / is_sensitive_path, so the sweep and the lander agree. None on any error."""
     try:
         import importlib.util
-        f = os.path.expanduser("~/.claude/skills/land-batch/bin/land_batch_safety.py")
+        # Relative to this file, so an exported sweep loads the exported module (LUCY-p122j r7).
+        f = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "skills/land-batch/bin/land_batch_safety.py")
         spec = importlib.util.spec_from_file_location("land_batch_safety", f)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
