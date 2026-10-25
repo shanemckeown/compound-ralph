@@ -333,7 +333,9 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
             mtime = path.stat().st_mtime
         except OSError:
             continue
-        if not reviews_bead_tip(path, body, bead_id, tip_sha):
+        if not mentions_bead(body, bead_id) or not _names_tip(body, tip_sha):
+            continue
+        if is_other_branch_review(path, body, bead_id, tip_sha):
             continue
         if is_gate_record(path, body) and not _VETO_RE.search(body):
             continue
@@ -342,24 +344,44 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
     return out
 
 
-_REVIEWING_BRANCH_RE = re.compile(r"(?m)^\s*REVIEWING:\s*(\S+?)\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
+# A line that claims to be a REVIEWING echo, and one that parses as ``<branch> @ <sha>``. Lenient on
+# markdown (``**REVIEWING:**``, ``> - REVIEWING:``, backticks) and on any trailing text.
+_ECHO_CLAIM_RE = re.compile(r"^[ \t>*_`-]*REVIEWING[*_`]*\s*:", re.I)
+_ECHO_PARSE_RE = re.compile(r"^[ \t>*_`-]*REVIEWING[*_`]*\s*:[*_`]*\s*`?([^\s`@]+?)`?\s*@\s*`?"
+                            r"([0-9a-fA-F]{7,40})(?![0-9a-fA-F])", re.I)
+_HEADER_FIELD_RE = re.compile(r"^[ \t>*_`-]*(?:Bead|Branch)[*_`]*\s*:", re.I)
 
 
-def reviews_bead_tip(path, body: str, bead_id: str, tip_sha: str) -> bool:
-    """Is this Ops/reviews file a review OF <bead> at <tip>? (LUCY-txfbf) Identity comes from its
-    ``REVIEWING: <branch> @ <sha>`` echo: one echo must name the tip, and that echo's branch or the
-    file name must name the bead. Prose naming the bead and the tip never counts (a harness review
-    replaying a bead's files as fixtures). A file with no echo falls back to its name: legacy
-    REVIEW_<suffix>_* naming the tip anywhere still counts. One rule for the lander and the gate."""
+def _names_bead_any_form(text: str, bead_id: str) -> bool:
+    """mentions_bead, also for a dotted child's dashed (1b6a3-32) and dotless (noyau2) forms and its
+    parent epic (an epic's branch carries its children)."""
+    forms = {bead_id, bead_id.replace(".", "-"), bead_id.replace(".", "")}
+    if "." in bead_id:
+        forms.add(bead_id.split(".", 1)[0])
+    return any(mentions_bead(text, f) for f in forms)
+
+
+def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> bool:
+    """The one exemption from the veto scans (LUCY-txfbf): a review of ANOTHER branch that only
+    quotes this bead, e.g. a harness review replaying its files as fixtures. True only when the
+    file has a REVIEWING echo, every echo parses, and none names this bead, is a bare HEAD or is at
+    this tip; and neither the file name nor a line-start Bead:/Branch: field names the bead. Any
+    doubt keeps the veto (fail closed)."""
+    if _names_bead_any_form(Path(path).name, bead_id):
+        return False
     tip_sha = tip_sha.lower()
-    name = Path(path).name
-    # A dotted child's legacy file name may dash it (REVIEW_1b6a3-32_* for AestheticcNext-1b6a3.32).
-    named = mentions_bead(name, bead_id) or mentions_bead(name, bead_id.replace(".", "-"))
-    echoes = _REVIEWING_BRANCH_RE.findall(body)
-    if not echoes:
-        return named and _names_tip(body, tip_sha)
-    return any(tip_sha.startswith(sha.lower()) and (named or mentions_bead(branch, bead_id))
-               for branch, sha in echoes)
+    echoes = 0
+    for line in body.splitlines():
+        if _HEADER_FIELD_RE.match(line) and _names_bead_any_form(line, bead_id):
+            return False
+        if not _ECHO_CLAIM_RE.match(line):
+            continue
+        m = _ECHO_PARSE_RE.match(line)
+        if (not m or m.group(1).upper() == "HEAD" or _names_bead_any_form(m.group(1), bead_id)
+                or (tip_sha and tip_sha.startswith(m.group(2).lower()))):
+            return False
+        echoes += 1
+    return echoes > 0
 
 
 def mentions_bead(body: str, bead_id: str) -> bool:
@@ -429,12 +451,14 @@ def independent_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None)
                 mtime = path.stat().st_mtime
             except OSError:
                 continue
+            if not mentions_bead(body, bead_id):
+                continue
             echoes = [m.group(1).lower() for m in _REVIEWING_RE.finditer(body)]
-            if (mentions_bead(body, bead_id) and is_gate_record(path, body) and echoes
-                    and all(tip_sha.startswith(e) for e in echoes)
+            if (is_gate_record(path, body) and echoes and all(tip_sha.startswith(e) for e in echoes)
                     and re.search(r"(?m)^Verdict: PASS$", body) and not _VETO_RE.search(body)):
                 file_passes.append((mtime, str(path)))
-            elif reviews_bead_tip(path, body, bead_id, tip_sha) and _VETO_RE.search(body):
+            elif (_names_tip(body, tip_sha) and _VETO_RE.search(body)
+                    and not is_other_branch_review(path, body, bead_id, tip_sha)):
                 vetoes.append(("file", mtime, 0, str(path)))
 
     def comment_after(c, veto):

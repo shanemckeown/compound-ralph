@@ -326,9 +326,8 @@ def test_txfbf_harness_review_quoting_the_bead_as_fixture_does_not_veto(tmp_path
                     "Verdict: FAIL\n\nREVIEWING: e3opf-structured @ 5acadb10c839b61435d08494cf085e1a2222edfe\n\nFAIL\n"
                     "- **3bm73 r1–r6:** all ten files parse at tip `4f1c34f2`; AestheticcNext-3bm73 replayed.\n")
     assert lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP) == []
-    assert lbs.reviews_bead_tip(root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md",
-                                (root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md").read_text(),
-                                "AestheticcNext-3bm73", TX_TIP) is False
+    path = root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md"
+    assert lbs.is_other_branch_review(path, path.read_text(), "AestheticcNext-3bm73", TX_TIP) is True
 
 
 def test_txfbf_real_fail_at_the_tip_still_vetoes_in_every_echo_form(tmp_path):
@@ -339,8 +338,8 @@ def test_txfbf_real_fail_at_the_tip_still_vetoes_in_every_echo_form(tmp_path):
                               f"REVIEWING: goal/aestheticcnext-3bm73 @ 1111111\nREVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP}")):
         root = _tx_root(tmp_path / str(i), "REVIEW_3bm73_astra-xhigh_r8.md", f"{echo}\nFAIL\nP1 lib/x.ts:1 — bad — fix\n")
         assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1, echo
-    # The file name alone carries the bead when the echo's branch is a bare worktree name.
-    root = _tx_root(tmp_path / "wt", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: HEAD @ {TX_TIP}\nFAIL\n")
+    # The file name carries the bead when the echo's branch is a bare worktree name.
+    root = _tx_root(tmp_path / "wt", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: wt-3 @ {TX_TIP[:9]}\n3bm73 FAIL\n")
     assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1
     # And the lander's own scan holds the tip on it.
     root = _tx_root(tmp_path / "ind", "REVIEW_3bm73_astra-xhigh_r8.md",
@@ -353,16 +352,106 @@ def test_txfbf_real_fail_at_the_tip_still_vetoes_in_every_echo_form(tmp_path):
 def test_txfbf_legacy_review_with_no_echo_still_vetoes_by_its_name(tmp_path):
     root = _tx_root(tmp_path, "REVIEW_3bm73_legacy.md", f"AestheticcNext-3bm73 at {TX_TIP[:10]}\n**Verdict: FAIL**\n")
     assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1
-    # A review of another bead's branch, or of this bead at another commit, does not.
+    # A bead-named file with an older echo and a FAIL naming the current tip still vetoes.
     other = _tx_root(tmp_path / "o", "REVIEW_3bm73_r2.md",
-                     f"REVIEWING: goal/aestheticcnext-3bm73 @ 1111111\nbase {TX_TIP}\nFAIL\n")
-    assert lbs.review_file_vetoes(other, "AestheticcNext-3bm73", TX_TIP) == []
+                     f"REVIEWING: goal/aestheticcnext-3bm73 @ 1111111\nnow at {TX_TIP}\nFAIL\n")
+    assert len(lbs.review_file_vetoes(other, "AestheticcNext-3bm73", TX_TIP)) == 1
 
 
 def test_txfbf_dashed_legacy_name_and_bare_echo_veto_in_lander_and_scan(tmp_path):
-    root = _tx_root(tmp_path, "REVIEW_1b6a3-32_astra.md", f"tip {TX_TIP[:9]}\nFAIL\n")
+    root = _tx_root(tmp_path, "REVIEW_1b6a3-32_astra.md",
+                    f"REVIEWING: wt @ 2222222\nAestheticcNext-1b6a3.32 tip {TX_TIP[:9]}\nFAIL\n")
     assert len(lbs.review_file_vetoes(root, "AestheticcNext-1b6a3.32", TX_TIP)) == 1
-    root = _tx_root(tmp_path / "h", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: HEAD @ {TX_TIP}\nFAIL\n")
+    root = _tx_root(tmp_path / "h", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: HEAD @ {TX_TIP}\n3bm73 FAIL\n")
     ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=root,
                                      comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
     assert ok is False
+
+
+# Attempt 2: the old veto rule stands; only a review that echoes ANOTHER branch is exempt.
+
+def _vetoes(tmp_path, name, body, bead="AestheticcNext-3bm73", tip=TX_TIP):
+    return lbs.review_file_vetoes(_tx_root(tmp_path, name, body), bead, tip)
+
+
+def test_txfbf_noyau_corpus_shapes_with_no_echo_still_veto(tmp_path):
+    tip = "20696a4f5968424a8a092da94086bf6a54d48930"
+    body = ("# Review — AestheticcNext-noyau.2 @ 20696a4f5\n\nVerdict: FAIL\n\n"
+            "- Bead: AestheticcNext-noyau.2 (help cards)\n"
+            "- Branch: goal/aestheticcnext-noyau.2, tip 20696a4f5 (20696a4f5968424a8a092da94086bf6a54d48930)\n")
+    for i, name in enumerate(("REVIEW_noyau2_20261006.md", "REVIEW_noyau2_r2_20261006.md", "REVIEW_x_20261006.md")):
+        assert len(_vetoes(tmp_path / str(i), name, body, "AestheticcNext-noyau.2", tip)) == 1, name
+    # Even with an echo of another branch, a Bead:/Branch: field naming the bead keeps the veto.
+    echoed = "REVIEWING: other-branch @ 1234567\n" + body
+    assert len(_vetoes(tmp_path / "e", "REVIEW_x_20261006.md", echoed, "AestheticcNext-noyau.2", tip)) == 1
+
+
+def test_txfbf_annotated_bold_and_backticked_echoes_of_the_bead_still_veto(tmp_path):
+    for i, echo in enumerate((f"REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP} (round 9)",
+                              f"**REVIEWING:** goal/aestheticcnext-3bm73 @ {TX_TIP}",
+                              f"REVIEWING: `goal/aestheticcnext-3bm73` @ `{TX_TIP[:10]}`",
+                              f"> - REVIEWING: goal/aestheticcnext-3bm73@{TX_TIP} round 9",
+                              f"Reviewing: goal/aestheticcnext-3bm73 @ {TX_TIP}")):
+        body = f"{echo}\nFAIL\nP2 lib/x.ts:1 — bad — fix\n"
+        assert len(_vetoes(tmp_path / str(i), "REVIEW_allure_followup_astra_r9.md", body)) == 1, echo
+        lbs_root = _tx_root(tmp_path / f"l{i}", "REVIEW_allure_followup_astra_r9.md", body)
+        ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=lbs_root,
+                                         comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
+        assert ok is False, echo
+
+
+def test_txfbf_doubtful_echoes_keep_the_veto(tmp_path):
+    prose = f"3bm73 replay at {TX_TIP[:8]}: FAIL\n"
+    for i, echo in enumerate(("REVIEWING: e3opf-structured (no sha)",           # unparseable echo
+                              "REVIEWING: HEAD @ 3333333",                      # bare HEAD, another sha
+                              f"REVIEWING: some-worktree @ {TX_TIP}",           # at this very tip
+                              f"REVIEWING: e3opf @ 5acadb10c8\nREVIEWING: goal/aestheticcnext-3bm73 @ 1111111")):
+        assert len(_vetoes(tmp_path / str(i), "REVIEW_e3opf_r9.md", f"{echo}\n{prose}")) == 1, echo
+    # A dotted child's parent epic branch carries the child.
+    body = "REVIEWING: goal/aestheticcnext-noyau @ 5acadb10c8\nnoyau.2 at 20696a4f5: FAIL\n"
+    assert len(_vetoes(tmp_path / "p", "REVIEW_epic_r1.md", body, "AestheticcNext-noyau.2",
+                       "20696a4f5968424a8a092da94086bf6a54d48930")) == 1
+
+
+def test_txfbf_real_harness_review_files_do_not_veto_3bm73(tmp_path):
+    reviews = Path("/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews")
+    names = [f"REVIEW_e3opf_structured_astra-high_r{n}_2026-10-24.md" for n in (3, 4, 5, 6)]
+    names.append("REVIEW_txfbf_astra-high_independent_r1_2026-10-25.md")
+    present = [n for n in names if (reviews / n).is_file()]
+    if not present:
+        import pytest
+        pytest.skip("Ops/reviews corpus not on this machine")
+    root = tmp_path / "reviews"
+    root.mkdir()
+    for n in present:
+        (root / n).write_text((reviews / n).read_text(errors="replace"))
+        # The old rule alone would veto each one: the exemption is what clears it.
+        body = (root / n).read_text()
+        assert lbs.mentions_bead(body, "AestheticcNext-3bm73") and lbs._names_tip(body, TX_TIP), n
+    assert lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP) == []
+
+
+def test_txfbf_descriptive_no_echo_file_and_hidden_bead_echoes_still_veto(tmp_path):
+    # No echo, no header field, descriptive name: the old prose rule still holds it.
+    body = f"Allure follow-up: AestheticcNext-3bm73 at {TX_TIP[:10]} is FAIL (P2 lib/x.ts:1).\n"
+    assert len(_vetoes(tmp_path / "n", "REVIEW_allure_followup_r9.md", body)) == 1
+    # An other-branch echo beside an echo of the bead that only a lenient parse sees.
+    for i, echo in enumerate((f"**REVIEWING:** goal/aestheticcnext-3bm73 @ {TX_TIP[:10]} (round 9)",
+                              f"> REVIEWING: `goal/aestheticcnext-3bm73` @ `{TX_TIP[:10]}`")):
+        body = f"REVIEWING: e3opf-structured @ 5acadb10c8\n{echo}\nFAIL\n"
+        assert len(_vetoes(tmp_path / f"h{i}", "REVIEW_allure_followup_r9.md", body)) == 1, echo
+    # An unparseable echo beside a parseable other-branch one keeps the veto.
+    body = f"REVIEWING: e3opf-structured @ 5acadb10c8\nREVIEWING: the 3bm73 branch tip\n3bm73 {TX_TIP[:8]} FAIL\n"
+    assert len(_vetoes(tmp_path / "u", "REVIEW_e3opf_r9.md", body)) == 1
+
+
+def test_txfbf_lander_is_not_held_by_a_harness_review_quoting_the_bead(tmp_path):
+    root = _reviews(tmp_path, bead="AestheticcNext-3bm73", tip=TX_TIP)
+    harness = root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md"
+    harness.write_text("REVIEWING: e3opf-structured @ 5acadb10c839b61435d08494cf085e1a2222edfe\n\nFAIL\n"
+                       f"- 3bm73 r1-r6 replayed at tip `{TX_TIP[:8]}`; AestheticcNext-3bm73 parses.\n")
+    gate = next(root.glob("*_gate_*"))
+    os.utime(harness, (gate.stat().st_mtime + 60,) * 2)  # newer than the gate: a veto would hold it
+    ok, ev = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=root,
+                                      comments_text=_comment("2099-01-01 00:00", f"PASS @{TX_TIP}"))
+    assert ok is True, ev
