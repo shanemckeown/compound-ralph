@@ -173,7 +173,7 @@ candidate_tokens_from() {
 resolve_canonical_id() {
   local token="$1"
   local canon
-  canon="$("$REAL_BD" show "$token" --json 2>/dev/null | python3 -c '
+  canon="$("$REAL_BD" show "$token" --json 2>/dev/null | python3 -I -c '
 import json, sys
 try:
     d = json.load(sys.stdin)

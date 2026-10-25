@@ -11,7 +11,9 @@ finds its repo from its own location, then refuses (exit 3, or N with --fail-exi
   - every file under live/<main> is exactly main's gate blob, with nothing extra or missing
     (GATE_PATHS is read from the installed hook, the one definition), and
   - <relpath> is one of those files.
-Then it execs the exported file with the caller's cwd: a .py entry as python3 -I with its
+Then it pins the export (a shared flock on live/pins/<oid>.lock, inherited across exec, so
+the exporter's cleanup keeps that export while the gate or any child still runs) and execs the
+exported file with the caller's cwd: a .py entry as python3 -I with its
 own dir on sys.path (so sibling imports resolve inside the export), a .mjs/.cjs/.js entry
 with node, anything else by its shebang, or bash for a non-executable .sh.
 
@@ -38,8 +40,22 @@ import time  # noqa: E402
 
 DRIFT = 3
 CATCH_UP_S = 2.0
-PY_BOOT = ("import os, runpy, sys; p = sys.argv[1]; sys.argv = sys.argv[1:]; "
-           "sys.path.insert(0, os.path.dirname(p)); runpy.run_path(p, run_name='__main__')")
+# A .py gate whose export disappears mid-run (only same-uid tampering can, given the pin) exits
+# with the caller's --fail-exit code, never a bare traceback's 1.
+PY_BOOT = """import os, runpy, sys
+fail, root, p = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+sys.argv = sys.argv[3:]
+sys.path.insert(0, os.path.dirname(p))
+try:
+    runpy.run_path(p, run_name='__main__')
+except SystemExit:
+    raise
+except BaseException:
+    if os.path.isdir(root):
+        raise
+    sys.stderr.write('run-gate: live export %s vanished mid-run; refuse\\n' % root)
+    sys.exit(fail)
+"""
 
 
 # The export's bin/ (only bin/bd, the bead close-guard, is a gate path) comes first: Homebrew
@@ -77,6 +93,32 @@ def load_hook(common):
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
+
+
+def pin(hook, live, oid):
+    """Hold a shared flock on live/pins/<oid>.lock for the gate's lifetime, or False.
+
+    The fd is inheritable, so it survives exec and is shared by the gate's children: the
+    exporter's cleanup never removes an export while anyone holds its pin. A pin file that
+    cleanup unlinked while we waited is not a pin, and an export already gone is refused.
+    """
+    path = os.path.join(live, hook.PINS, oid + ".lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for _ in range(3):
+        fd = hook.acquire(path, hook.fcntl.LOCK_SH, CATCH_UP_S)
+        if fd is None:
+            return False
+        try:
+            linked = os.fstat(fd).st_ino == os.stat(path).st_ino
+        except FileNotFoundError:
+            linked = False
+        if linked and os.path.isdir(os.path.join(live, oid)):
+            os.set_inheritable(fd, True)
+            return True
+        os.close(fd)
+        if not os.path.isdir(os.path.join(live, oid)):
+            return False
+    return False
 
 
 def main(argv):
@@ -147,10 +189,12 @@ def run(argv, fail):
 
     # The verified directory, not the current link: the link may move after the check.
     root = os.path.join(live, current)
+    if not pin(hook, live, current):
+        return refuse(fail, "cannot pin export %s" % current[:12])
     entry = os.path.join(root, rel)
     args = argv[1:]
     if rel.endswith(".py"):
-        cmd = [sys.executable, "-I", "-c", PY_BOOT, entry] + args
+        cmd = [sys.executable, "-I", "-c", PY_BOOT, str(fail), root, entry] + args
     elif rel.endswith((".mjs", ".cjs", ".js")):
         cmd = ["node", entry] + args
     elif os.access(entry, os.X_OK):

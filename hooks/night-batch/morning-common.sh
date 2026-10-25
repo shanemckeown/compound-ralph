@@ -21,7 +21,7 @@ init_report() {
   ROOT="${NIGHT_BATCH_ROOT:-$SCRIPT_DIR}"
   STATE="$ROOT/state"
   TODAY=$(date +%Y-%m-%d)
-  YESTERDAY=$(python3 - "$TODAY" <<'PY'
+  YESTERDAY=$(python3 -I - "$TODAY" <<'PY'
 import datetime, sys
 print(datetime.date.fromisoformat(sys.argv[1]) - datetime.timedelta(days=1))
 PY
@@ -47,7 +47,7 @@ lock_report() {
   [[ $DRY_RUN -eq 1 ]] && return 0
   [[ "${MORNING_REPORT_LOCK:-}" == "$DELIVERY" ]] && return 0
   mkdir -p "$DELIVERY" "$ROOT/logs" || return 1
-  exec python3 - "$DELIVERY" "$BASH" "$0" "$@" <<'PY'
+  exec python3 -I - "$DELIVERY" "$BASH" "$0" "$@" <<'PY'
 import fcntl, os, sys
 directory, bash, script, *args = sys.argv[1:]
 fd = os.open(directory + '/.lock', os.O_CREAT | os.O_RDWR, 0o600)
@@ -134,7 +134,7 @@ deliver_pending() {
       log "ERROR: Slack transport failed; retained $pending/payload.json"
       return 1
     fi
-    if ! python3 - "$response" <<'PY'
+    if ! python3 -I - "$response" <<'PY'
 import json, sys
 try:
     response = json.load(open(sys.argv[1]))
@@ -158,7 +158,7 @@ queue_message() {
   [[ -f "$DELIVERY/$TODAY/payload.json" ]] && return 0
   local message="$1" staging="$DELIVERY/.pending-$$"
   mkdir "$staging" || return 1
-  if ! printf '%s\n%s' "$SLACK_USER" "$message" | python3 -c '
+  if ! printf '%s\n%s' "$SLACK_USER" "$message" | python3 -I -c '
 import json, sys
 channel, text = sys.stdin.read().split("\n", 1)
 print(json.dumps({"channel": channel, "text": text, "unfurl_links": False, "mrkdwn": True}))

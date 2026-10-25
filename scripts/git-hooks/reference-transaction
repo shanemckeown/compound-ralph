@@ -32,6 +32,9 @@ run. In state "committed" this hook refreshes the copy for main's resolved tip w
 or a link of its symbolic chain was updated, so it moves only when main does. The export is written blob by blob from main's tree (never git archive,
 which .gitattributes can change), refuses a symlink, and only ever holds main's current tip:
 the --export CLI (install.sh, live-export.sh) also needs the orchestrator or a human.
+Exporters publish one at a time under live/.lock and re-read main's tip there, so a slow
+exporter for an older tip discards its copy. Cleanup keeps current, the previous export, any
+superseded under 30 minutes ago and any a running gate has pinned (see run-gate).
 
 This file runs with python3 -I -S (no PYTHON* env, no cwd or user site on sys.path, no
 site import) and re-execs itself that way if started otherwise.
@@ -52,12 +55,14 @@ import sys
 if __name__ == "__main__" and not (sys.flags.isolated and sys.flags.no_site):
     os.execv(sys.executable, [sys.executable, "-I", "-S", os.path.abspath(__file__)] + sys.argv[1:])
 
+import fcntl  # noqa: E402
 import hashlib  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import stat  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
+import time  # noqa: E402
 
 MAIN_REF = "refs/heads/main"
 ZERO = "0" * 40
@@ -106,6 +111,13 @@ OID_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 LIVE = "live"
 KEEP_EXPORTS = 3
+# Publication lock and per-export pins (LUCY-p122j r6), both inside live/.
+LOCK = ".lock"
+PINS = "pins"
+LOCK_WAIT_S = 30
+# A superseded export stays at least this long, pinned or not: covers a gate between
+# run-gate's check and its pin.
+RETAIN_S = 30 * 60
 
 RULE = (
     "Gate changes go on a branch: commit there, get the independent Astra fail-open "
@@ -383,11 +395,46 @@ def write_blobs(root, tree):
             fh.write(data)
 
 
+def acquire(path, how, wait_s):
+    """An fd holding flock `how` on path (created if missing), or None after wait_s."""
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(fd, how | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.05)
+
+
+def build(live, oid):
+    """A verified, read-only copy of main@oid's gate paths in a fresh temp dir under live/."""
+    tmp = tempfile.mkdtemp(prefix=".tmp-", dir=live)
+    try:
+        tree = gate_tree(oid)
+        if tree is None:
+            raise RuntimeError("cannot list %s" % oid)
+        write_blobs(tmp, tree)
+        problems = export_drift(tmp, oid)
+        if problems:
+            raise RuntimeError("export does not match %s: %s" % (oid, "; ".join(problems[:5])))
+        make_read_only(tmp)
+        return tmp
+    except BaseException:
+        remove_tree(tmp)
+        raise
+
+
 def export(oid):
     """Write main@oid's gate paths to <common>/live/<oid>, read-only, and point current at it.
 
-    The copy is checked blob by blob before current moves, so a failed export leaves the old
-    one in place. Keeps the newest KEEP_EXPORTS exports. Returns 0 or 1.
+    The copy is built and checked blob by blob outside the lock. Publishing (moving it into
+    place, swapping current, cleanup) happens under live/.lock, after re-reading main's tip:
+    an exporter that main has since moved past discards its copy, so a slow older export can
+    never replace a newer one. A failed export leaves the old one in place. Returns 0 or 1.
     """
     if not is_commit(oid):
         sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s is not a commit\n" % oid)
@@ -398,37 +445,85 @@ def export(oid):
         sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s is not main's tip\n" % oid)
         return 1
     live = os.path.join(common_dir(), LIVE)
-    os.makedirs(live, exist_ok=True)
+    os.makedirs(os.path.join(live, PINS), exist_ok=True)
     final = os.path.join(live, oid)
-    if os.path.isdir(final) and export_drift(final, oid):
-        remove_tree(final)
-    if not os.path.isdir(final):
-        tmp = tempfile.mkdtemp(prefix=".tmp-", dir=live)
+    tmp = None
+    try:
+        if not os.path.isdir(final) or export_drift(final, oid):
+            tmp = build(live, oid)
+        lock = acquire(os.path.join(live, LOCK), fcntl.LOCK_EX, LOCK_WAIT_S)
+        if lock is None:
+            raise RuntimeError("live/%s held for %ds" % (LOCK, LOCK_WAIT_S))
         try:
-            tree = gate_tree(oid)
-            if tree is None:
-                raise RuntimeError("cannot list %s" % oid)
-            write_blobs(tmp, tree)
-            problems = export_drift(tmp, oid)
-            if problems:
-                raise RuntimeError("export does not match %s: %s" % (oid, "; ".join(problems[:5])))
-            make_read_only(tmp)
-            os.rename(tmp, final)
-        except Exception as exc:  # noqa: BLE001 - every failure leaves current where it was
+            if main_tip() != oid:
+                sys.stderr.write("LIVE EXPORT SKIPPED (LUCY-p122j): main moved past %s; "
+                                 "the newer export publishes\n" % oid[:12])
+                return 0
+            if tmp is None and (not os.path.isdir(final) or export_drift(final, oid)):
+                tmp = build(live, oid)  # rare: removed or changed since the first look
+            if tmp is not None:
+                if os.path.isdir(final):
+                    remove_tree(final)  # drifted, so no gate can verify against it anyway
+                os.rename(tmp, final)
+                tmp = None
+            previous = live_current()
+            link_tmp = os.path.join(live, ".current-%d" % os.getpid())
+            if os.path.lexists(link_tmp):
+                os.unlink(link_tmp)
+            os.symlink(oid, link_tmp)
+            os.replace(link_tmp, os.path.join(live, "current"))
+            if previous and previous != oid:
+                # Its mtime becomes the moment it stopped being current: the retention clock.
+                os.utime(os.path.join(live, previous))
+            clean(live, oid)
+        finally:
+            os.close(lock)
+    except Exception as exc:  # noqa: BLE001 - every failure leaves current where it was
+        sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s\n" % exc)
+        return 1
+    finally:
+        if tmp is not None:
             remove_tree(tmp)
-            sys.stderr.write("LIVE EXPORT FAILED (LUCY-wqn96): %s\n" % exc)
-            return 1
-    link_tmp = os.path.join(live, ".current-%d" % os.getpid())
-    if os.path.lexists(link_tmp):
-        os.unlink(link_tmp)
-    os.symlink(oid, link_tmp)
-    os.replace(link_tmp, os.path.join(live, "current"))
-    exports = [d for d in os.listdir(live)
-               if OID_RE.fullmatch(d) and os.path.isdir(os.path.join(live, d)) and d != oid]
-    exports.sort(key=lambda d: os.lstat(os.path.join(live, d)).st_mtime, reverse=True)
-    for stale in exports[KEEP_EXPORTS - 1:]:
-        remove_tree(os.path.join(live, stale))
     return 0
+
+
+def clean(live, current):
+    """Remove old exports. Caller holds live/.lock.
+
+    Kept: current, the newest KEEP_EXPORTS - 1 others, any superseded less than RETAIN_S ago,
+    and any pinned by a running gate (run-gate holds a shared flock on pins/<oid>.lock across
+    exec, inherited by the gate's children). A pin is tested with a non-blocking exclusive
+    flock, held while the export and its pin file are removed.
+    """
+    now = time.time()
+    exports = [d for d in os.listdir(live)
+               if OID_RE.fullmatch(d) and os.path.isdir(os.path.join(live, d)) and d != current]
+    exports.sort(key=lambda d: os.lstat(os.path.join(live, d)).st_mtime, reverse=True)
+    for old in exports[KEEP_EXPORTS - 1:]:
+        path = os.path.join(live, old)
+        if now - os.lstat(path).st_mtime < RETAIN_S:
+            continue
+        pin_path = os.path.join(live, PINS, old + ".lock")
+        pin = acquire(pin_path, fcntl.LOCK_EX, 0)
+        if pin is None:
+            continue  # a gate is still running from it
+        try:
+            remove_tree(path)
+            os.unlink(pin_path)
+        finally:
+            os.close(pin)
+    # Pin files whose export is gone and that nobody holds.
+    for name in os.listdir(os.path.join(live, PINS)):
+        oid = name[:-len(".lock")] if name.endswith(".lock") else None
+        if oid is None or OID_RE.fullmatch(oid) is None or os.path.isdir(os.path.join(live, oid)):
+            continue
+        pin_path = os.path.join(live, PINS, name)
+        pin = acquire(pin_path, fcntl.LOCK_EX, 0)
+        if pin is not None:
+            try:
+                os.unlink(pin_path)
+            finally:
+                os.close(pin)
 
 
 def prepared(lines):

@@ -78,7 +78,7 @@ for marker in "${pending[@]}"; do
   fi
 
   # Strip a leading/trailing ```json fence if present, then parse
-  slug=$(echo "$response" | python3 -c "
+  slug=$(echo "$response" | python3 -I -c "
 import sys, json, re
 raw = sys.stdin.read().strip()
 m = re.search(r'\`\`\`json\s*(.+?)\s*\`\`\`', raw, re.DOTALL)
@@ -90,7 +90,7 @@ except Exception:
     print('')
 " 2>/dev/null)
 
-  body=$(echo "$response" | python3 -c "
+  body=$(echo "$response" | python3 -I -c "
 import sys, json, re
 raw = sys.stdin.read().strip()
 m = re.search(r'\`\`\`json\s*(.+?)\s*\`\`\`', raw, re.DOTALL)
@@ -102,7 +102,7 @@ except Exception:
     print('')
 " 2>/dev/null)
 
-  entities_json=$(echo "$response" | python3 -c "
+  entities_json=$(echo "$response" | python3 -I -c "
 import sys, json, re
 raw = sys.stdin.read().strip()
 m = re.search(r'\`\`\`json\s*(.+?)\s*\`\`\`', raw, re.DOTALL)
@@ -144,7 +144,7 @@ except Exception:
   log "worker: wrote slug=$slug session=$session_id result=$put_result"
 
   # Link entities (best-effort; failures are non-fatal)
-  echo "$entities_json" | python3 -c "
+  echo "$entities_json" | python3 -I -c "
 import sys, json
 try:
     for e in json.load(sys.stdin):
@@ -154,7 +154,7 @@ except Exception:
 " 2>/dev/null | while IFS= read -r entity; do
     [[ -z "$entity" ]] && continue
     # Slugify entity for the target — GBrain will create if missing
-    entity_slug=$(echo "$entity" | python3 -c "
+    entity_slug=$(echo "$entity" | python3 -I -c "
 import sys, re
 s = sys.stdin.read().strip().lower()
 s = re.sub(r'[^a-z0-9]+', '-', s).strip('-')

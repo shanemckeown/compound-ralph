@@ -61,7 +61,7 @@ if ! node "$ROOT/sentry-triage.mjs" > "$OUTPUT_FILE" 2>>"$LOG"; then
   printf '%s\n' '{"slack_text":"*Sentry triage* — node runner failed before producing a digest","dispatched":0,"health":"NODE_FAIL"}' > "$OUTPUT_FILE"
 fi
 
-slack_text=$(python3 - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
+slack_text=$(python3 -I - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -72,7 +72,7 @@ except Exception:
 PY
 )
 
-dispatched=$(python3 - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
+dispatched=$(python3 -I - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -83,7 +83,7 @@ except Exception:
 PY
 )
 
-health=$(python3 - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
+health=$(python3 -I - "$OUTPUT_FILE" <<'PY' 2>>"$LOG"
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -106,7 +106,7 @@ if [[ -n "$slack_text" ]]; then
       | head -1 | cut -d= -f2- | sed -E 's/^["'\'']//; s/["'\'']$//' || true)
     if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
       PAYLOAD=$(printf '%s\n%s\n' "$SLACK_USER" "$slack_text" \
-        | python3 -c '
+        | python3 -I -c '
 import json, sys
 lines = sys.stdin.read().split("\n", 1)
 print(json.dumps({"channel": lines[0], "text": lines[1].rstrip("\n"), "unfurl_links": False, "mrkdwn": True}))
@@ -115,7 +115,7 @@ print(json.dumps({"channel": lines[0], "text": lines[1].rstrip("\n"), "unfurl_li
         -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
         -H "Content-Type: application/json; charset=utf-8" \
         --data-binary "$PAYLOAD" 2>>"$ROOT/logs/sentry-triage-dm.log")
-      SLACK_OK=$(echo "$SLACK_RESPONSE" | python3 -c "import json,sys
+      SLACK_OK=$(echo "$SLACK_RESPONSE" | python3 -I -c "import json,sys
 try: print(json.loads(sys.stdin.read()).get('ok', False))
 except: print(False)" 2>/dev/null || echo False)
       if [[ "$SLACK_OK" == "True" ]]; then

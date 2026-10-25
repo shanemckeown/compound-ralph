@@ -781,9 +781,19 @@ def test_l2_branch_commit_does_not_move_export(repo):
     assert repo.current() == before
 
 
+def age_exports(repo, seconds=31 * 60):
+    """Back-date every export past the 30-minute retention window (LUCY-p122j r6)."""
+    t = time.time() - seconds
+    for d in os.listdir(repo.live):
+        if len(d) == 40:
+            os.utime(os.path.join(repo.live, d), (t, t))
+
+
 def test_l2_keeps_three_exports(repo):
     for i in range(5):
         assert repo.commit("commands/closeout.md", f"x{i}\n").returncode == 0
+    age_exports(repo)
+    assert repo.commit("commands/closeout.md", "last\n").returncode == 0
     exports = [d for d in os.listdir(repo.live) if len(d) == 40]
     assert len(exports) == 3 and repo.current() in exports
 
@@ -1679,3 +1689,195 @@ def test_b4_exported_bash_function_is_scrubbed(repo, tmp_path):
     res = repo.gate(probe, env=env)
     assert res.returncode == 0, res.stderr
     assert "hijacked" not in res.stdout and not marker.exists()
+
+
+# ---- Layer-B round 6 (C1-C3): isolated child python, ordered publication, pinned exports ----
+
+def exported_shell_gates():
+    """Every committed gate file that bash runs: *.sh, or a sh/bash shebang (bin/bd has none)."""
+    hook = load_hook()
+    out = subprocess.run(["git", "-C", REAL_ROOT, "ls-files", "-z"], capture_output=True, text=True)
+    rels = []
+    for rel in out.stdout.split("\0"):
+        if not rel or not hook.is_gate_path(rel) or "/tests/" in rel or rel.endswith(".md"):
+            continue
+        path = os.path.join(REAL_ROOT, rel)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as fh:
+            first = fh.readline()
+        if rel.endswith(".sh") or (first.startswith(b"#!") and _re.search(rb"\b(ba)?sh\b", first)):
+            rels.append(rel)
+    return rels
+
+
+# C1: no exported shell gate runs python -c / python - without -I (bin/bd, transitively-run hooks)
+def test_c1_every_exported_shell_gate_isolates_inline_python():
+    rels = exported_shell_gates()
+    assert "bin/bd" in rels and "hooks/gbrain-ingest/worker.sh" in rels
+    assert "hooks/night-batch/morning-common.sh" in rels
+    offenders = {}
+    for rel in rels:
+        with open(os.path.join(REAL_ROOT, rel), encoding="utf-8", errors="replace") as fh:
+            hits = [l.strip() for l in fh if not l.lstrip().startswith("#") and CWD_PYTHON_RE.search(l)]
+        if hits:
+            offenders[rel] = hits
+    assert offenders == {}
+
+
+def test_c1_bd_wrapper_ignores_a_planted_cwd_module(repo, tmp_path):
+    commit_files(repo, {"bin/bd": (os.path.join(REAL_ROOT, "bin/bd"),)})  # copy2 keeps +x
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    marker = tmp_path / "planted-ran"
+    (cwd / "json.py").write_text("open(%r, 'w').write('x')\n" % str(marker))
+    env = dict(repo.env, BEADS_DIR=str(tmp_path / "no-beads"))
+    res = subprocess.run([repo.run_gate, "bin/bd", "close", "LUCY-doesnotexist"], cwd=cwd,
+                         env=env, capture_output=True, text=True)
+    assert "run-gate:" not in res.stderr  # the wrapper ran (it refuses: no resolvable id)
+    assert "refus" in (res.stderr + res.stdout).lower()
+    assert not marker.exists()
+
+
+class InProcess:
+    """The hook loaded in this process, git pointed at the repo (for pausing an exporter)."""
+    def __init__(self, repo, monkeypatch):
+        for k in list(os.environ):
+            if k.startswith("GIT_") or k in AGENT_VARS:
+                monkeypatch.delenv(k)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        monkeypatch.chdir(repo.root)
+        self.hook = load_hook()
+
+
+def commit_without_hook(repo, text):
+    """Move main with the hook off, so no export happens: main is ahead of live/current."""
+    repo.write("commands/closeout.md", text)
+    repo.git("add", "commands/closeout.md", env=repo.human_env())
+    repo.git("-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", text, env=repo.human_env())
+    return repo.rev("main")
+
+
+# C2: an exporter that main moved past while it was writing never publishes
+def test_c2_paused_older_exporter_does_not_overwrite_the_newer_export(repo, monkeypatch):
+    a = commit_without_hook(repo, "a\n")
+    ip = InProcess(repo, monkeypatch)
+    real_write = ip.hook.write_blobs
+    moved = {}
+
+    def write_then_main_moves(root, tree):
+        real_write(root, tree)
+        res = repo.commit("commands/closeout.md", "b\n")  # human, real hook exports B
+        assert res.returncode == 0, res.stderr
+        moved["b"] = repo.rev("main")
+        assert repo.current() == moved["b"]
+
+    monkeypatch.setattr(ip.hook, "write_blobs", write_then_main_moves)
+    assert ip.hook.export(a) == 0
+    b = moved["b"]
+    assert repo.rev("main") == b and repo.current() == b
+    assert not os.path.exists(os.path.join(repo.live, a))
+    assert not [d for d in os.listdir(repo.live) if d.startswith(".tmp-")]
+    res = repo.gate(PROBE)
+    assert res.returncode == 0, res.stderr
+
+
+def test_c2_publication_waits_for_the_lock(repo, monkeypatch):
+    tip = commit_without_hook(repo, "a\n")
+    before = repo.current()
+    ip = InProcess(repo, monkeypatch)
+    monkeypatch.setattr(ip.hook, "LOCK_WAIT_S", 0.3)
+    held = ip.hook.acquire(os.path.join(repo.live, ".lock"), ip.hook.fcntl.LOCK_EX, 0)
+    assert held is not None
+    try:
+        assert ip.hook.export(tip) == 1
+        assert repo.current() == before
+    finally:
+        os.close(held)
+    assert ip.hook.export(tip) == 0 and repo.current() == tip
+
+
+SLOW = "references/review-lead/slow.py"
+SLOW_SIBLING = "references/review-lead/slow_sib.py"
+SLOW_SOURCE = textwrap.dedent("""\
+    import os, sys, time
+    open(sys.argv[1], 'w').write('started')
+    while not os.path.exists(sys.argv[2]):
+        time.sleep(0.05)
+    from slow_sib import WHO
+    print(WHO)
+""")
+
+
+def start_slow_gate(repo, tmp_path, *extra):
+    commit_files(repo, {SLOW: SLOW_SOURCE, SLOW_SIBLING: "WHO = 'still here'\n"})
+    started, go = tmp_path / "started", tmp_path / "go"
+    proc = subprocess.Popen([repo.run_gate, *extra, SLOW, str(started), str(go)], cwd=repo.root,
+                            env=repo.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 20
+    while not started.exists():
+        assert proc.poll() is None, proc.communicate()
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    return proc, go, repo.current()
+
+
+# C3: three main moves while a gate runs never delete the export it runs from
+@pytest.mark.parametrize("aged", [False, True], ids=["fresh", "aged-past-retention"])
+def test_c3_paused_gate_survives_three_main_moves(repo, tmp_path, aged):
+    proc, go, pinned = start_slow_gate(repo, tmp_path)
+    try:
+        for i in range(4):
+            if aged:
+                age_exports(repo)  # only the pin can keep it now
+            assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
+        assert repo.current() != pinned
+        assert os.path.isdir(os.path.join(repo.live, pinned))
+    finally:
+        go.write_text("go")
+        out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert out.strip() == "still here"
+
+
+def test_c3_released_pin_lets_cleanup_remove_the_export(repo, tmp_path):
+    proc, go, pinned = start_slow_gate(repo, tmp_path)
+    go.write_text("go")
+    assert proc.communicate(timeout=30) and proc.returncode == 0
+    for i in range(4):
+        age_exports(repo)
+        assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
+    assert not os.path.exists(os.path.join(repo.live, pinned))
+    exports = {d for d in os.listdir(repo.live) if len(d) == 40}
+    pins = {n[:-5] for n in os.listdir(os.path.join(repo.live, "pins"))}
+    assert pins <= exports  # stale pin files go with their export
+
+
+def test_c3_young_exports_are_kept(repo):
+    for i in range(5):
+        assert repo.commit("commands/closeout.md", f"x{i}\n").returncode == 0
+    assert len([d for d in os.listdir(repo.live) if len(d) == 40]) == 6
+
+
+def test_c3_gate_that_loses_its_export_uses_fail_exit(repo, tmp_path):
+    proc, go, pinned = start_slow_gate(repo, tmp_path, "--fail-exit", "2")
+    try:
+        remove = load_hook().remove_tree  # same-uid tampering: the only way past the pin
+        remove(os.path.join(repo.live, pinned))
+        assert not os.path.exists(os.path.join(repo.live, pinned))
+    finally:
+        go.write_text("go")
+        out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 2, err
+    assert "vanished mid-run" in err
+
+
+def test_c3_retention_clock_starts_when_an_export_is_superseded(repo):
+    """An export made long ago but current until a moment ago is young: a gate may still be
+    between run-gate's check and its pin."""
+    age_exports(repo)
+    was_current = repo.current()
+    for i in range(3):
+        assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
+    assert os.path.isdir(os.path.join(repo.live, was_current))
