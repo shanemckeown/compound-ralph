@@ -289,6 +289,7 @@ class G5RealFiles(unittest.TestCase):
     def parse(self, name):
         chk.UNBOUND_NOTES.clear()
         chk.NOTE_REFS.clear()
+        chk.UNLISTED.clear()
         return chk.reviewer_findings([str(FIX / name)])
 
     def server_text(self):
@@ -300,10 +301,11 @@ class G5RealFiles(unittest.TestCase):
     def test_q2lod_cp2_seats_parse(self):
         # B2: the server seat's carry line says 'identity/idempotent' next to its P3, a slash token, so the
         # real file is refused (an accepted false refusal, listed on the bead); reworded it parses. LUCY-16n7i
-        # own-gate r3: still refused, because that note line also names a strong path (its reference), and the
-        # slash-word relief only applies to a line with no strong path.
-        with self.assertRaisesRegex(ValueError, "prior ref at identity/idempotent"):
-            self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
+        # own-gate r3: still unmatched, because that note line also names a strong path (its reference), and the
+        # slash-word relief only applies to a line with no strong path. LUCY-xyjxs: unmatched is an UNLISTED item
+        # the lead must rule on, no longer a refusal of the file.
+        self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
+        self.assertEqual(list(chk.UNLISTED), ["identity/idempotent"])
         self.assertEqual(len(parse_text(self.server_text())), 5)
         for name, n in (("NOTES_REVIEW_q2lod_cp2_astra-xhigh-app_2026-10-24.md", 4),
                         ("NOTES_REVIEW_q2lod_cp2_astra-xhigh-tests_2026-10-24.md", 2),
@@ -315,11 +317,13 @@ class G5RealFiles(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertTrue(found[0].startswith("P3 lib/ava/unpaid-reply.ts:96 — "), found[0])
 
-    def test_e3opf_astra_review_with_a_quoted_example_is_refused(self):
+    def test_e3opf_astra_review_with_a_quoted_example_is_unlisted(self):
         """B2: its prose quotes `r1 P2 lib/x.ts:12` as an example; read as plain text that is an unmatched
-        claim (the accepted false refusal of a frozen prose sweep)."""
-        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at lib/x.ts:12"):
+        claim. LUCY-xyjxs: that is an UNLISTED P2 the lead must rule on, no longer a refusal of the file. The same
+        file still refuses on a severity mismatch (P1 prose, P2 block at :367): only "no finding there" moved."""
+        with self.assertRaisesRegex(ValueError, r"severity mismatch: the block has P2 at \S+review_lead_check.py:367"):
             self.parse("REVIEW_e3opf_structured_astra-high_2026-10-24.md")
+        self.assertEqual(chk.UNLISTED["lib/x.ts:12"]["sev"], "P2")
 
     def test_q2lod_server_open_carry_line_resolves_at_run_level(self):
         """'r1 P3 tokens.ts:172 … open: … Earlier P3 grading retained.' is matched by the block when the

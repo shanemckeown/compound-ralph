@@ -1222,10 +1222,18 @@ def fixture_named(fix, names, mtimes=None):
 
 
 def parse_text(text, name="v.md"):
+    """The reviewer's findings, as a lead that rules on nothing sees them: an UNLISTED prose claim (LUCY-xyjxs)
+    is not refused by the parser itself, but main() refuses every one the lead leaves unruled, so it is raised
+    here with the location the parser recorded (tests/review-lead/test_xyjxs_unlisted.py drives main())."""
     p = Path(tempfile.mkdtemp(dir="/private/tmp")) / name
     p.write_text(text)
     chk.UNBOUND_NOTES.clear()
-    return chk.reviewer_findings([str(p)])
+    chk.UNLISTED.clear()
+    found = chk.reviewer_findings([str(p)])
+    if chk.UNLISTED:
+        raise ValueError("; ".join(f"{p}: UNLISTED, unruled: prose finding not in the review-verdict block "
+                                   f"({chk.NO_TARGET}{loc}): {it['lines'][0][:100]}" for loc, it in chk.UNLISTED.items()))
+    return found
 
 
 def block(verdict, *findings):

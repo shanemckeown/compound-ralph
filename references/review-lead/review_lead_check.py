@@ -38,6 +38,9 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
+    A prose path with NO block finding or prior ref at it is not refused here (LUCY-xyjxs): it is an UNLISTED
+    item (a quoted example and a prose-only finding read alike), and the lead must rule on each in `unlisted`;
+    an unruled one refuses, FINDING P1/P2 blocks, a dismissed P1/P2 line escalates (unlisted_rulings).
     Lines that start like a finding but name no file, and P3s whose only path is a weak slash-word
     ("user/owned/member", LUCY-16n7i, on an all-P3 line only), may not outnumber the block's findings + prior
     refs of that severity; the weak ones alone may not outnumber the block's P3 findings (prior refs never
@@ -497,6 +500,11 @@ UNBOUND_NOTES = {}
 NOTE_REFS = {}
 # Printed after the counts: things the run ignored on purpose, so the lead and orchestrator still see them.
 RUN_NOTES = []
+# {loc: {"sev": highest severity on any prose line citing it, "lines": [raw]}}: prose file:line claims that
+# match no block finding or prior ref (LUCY-xyjxs). A quoted example and a real prose-only finding look the
+# same, so wording never decides: the lead rules on each in its `unlisted` list (unlisted_rulings).
+UNLISTED = {}
+NO_TARGET = "no review-verdict finding or prior ref at "
 
 
 def tolerated_note(line, mine):
@@ -1062,7 +1070,7 @@ def claim_error(sev, path, line, targets):
     cands = [t for t in targets if same_file(t[1], path) and (line is None or t[2] == line)]
     where = f"{path}:{line}" if line else path
     if not cands:
-        return f"no review-verdict finding or prior ref at {where}"
+        return NO_TARGET + where
     if len({t[1] for t in cands}) > 1 and len({t[0] for t in cands}) > 1:
         return f"{where} is ambiguous: it matches {', '.join(sorted({f'{t[0]} {t[1]}' for t in cands}))}"
     if sev not in {t[0] for t in cands}:
@@ -1138,7 +1146,14 @@ def prose_claim_errors(p, lines, meta, prior):
                     unlocated[first].append(line.strip()[:100])
         for sev, path, ln in claims:
             why = claim_error(sev, path, ln, targets)
-            if why:
+            if why and why.startswith(NO_TARGET):
+                # LUCY-xyjxs: not a refusal of the inputs. The lead must rule on it (unlisted_rulings); the
+                # highest severity anywhere on the line decides whether a dismissal escalates.
+                item = UNLISTED.setdefault(why[len(NO_TARGET):], {"sev": "P3", "lines": []})
+                item["sev"] = min([item["sev"]] + [s.group(0) for s in claim_sevs(line)])
+                if line.strip() not in item["lines"]:
+                    item["lines"].append(line.strip())
+            elif why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
@@ -1201,6 +1216,7 @@ def verify_clearances(cleared_ids, escalate, comments, not_before):
       - the finding is graded pre_existing: true and its follow_up names a bead id;
       - a bead comment whose first line starts `ORCHESTRATOR CLEARED` names the finding id AND
         that follow-up bead (ids repeat across rounds, follow-up beads don't);
+      - an escalated UNLISTED item (id `UNLISTED:<loc>`, LUCY-xyjxs) needs neither: the comment names its id;
       - that comment's minute starts after the newest verdict file's mtime (bd times are UTC
         minutes, so a comment in the verdict's own minute may predate it and does not count).
     """
@@ -1212,24 +1228,26 @@ def verify_clearances(cleared_ids, escalate, comments, not_before):
             errs.append(f"--cleared-escalation {cid}: not an escalated finding this round "
                         f"(escalated ids: {sorted(by_id) or 'none'})")
             continue
-        if f.get("pre_existing") is not True:
-            errs.append(f"--cleared-escalation {cid}: only a pre_existing finding can be cleared; this one "
-                        "is the branch's own and must be fixed or graded again")
-            continue
-        follow = BEAD_ID.search(f.get("follow_up") or "")
-        if not follow:
-            errs.append(f"--cleared-escalation {cid}: follow_up names no bead id (file the follow-up first)")
-            continue
-        follow_id = follow.group(0)
+        follow_id = ""
+        if not f.get("_unlisted"):  # a dismissed UNLISTED prose item has nothing to follow up (LUCY-xyjxs)
+            if f.get("pre_existing") is not True:
+                errs.append(f"--cleared-escalation {cid}: only a pre_existing finding can be cleared; this one "
+                            "is the branch's own and must be fixed or graded again")
+                continue
+            follow = BEAD_ID.search(f.get("follow_up") or "")
+            if not follow:
+                errs.append(f"--cleared-escalation {cid}: follow_up names no bead id (file the follow-up first)")
+                continue
+            follow_id = follow.group(0)
         match = None
         for ts, body in comments:
             first = lines_of(body)[0].strip() if body else ""
             if (first.upper().startswith("ORCHESTRATOR CLEARED") and token_in(cid, first)
-                    and token_in(follow_id, first) and ts >= not_before):
+                    and (not follow_id or token_in(follow_id, first)) and ts >= not_before):
                 match = first
         if match is None:
             errs.append(f"--cleared-escalation {cid}: no bead comment whose first line is 'ORCHESTRATOR "
-                        f"CLEARED {cid} ... {follow_id}' dated after the verdict files "
+                        f"CLEARED {cid}{' ... ' + follow_id if follow_id else ''}' dated after the verdict files "
                         f"(minute {not_before:%Y-%m-%d %H:%M} UTC or later)")
             continue
         honoured[cid] = match
@@ -1550,6 +1568,60 @@ def fixed_errors(tag, f, src, files):
     return []
 
 
+UNLISTED_RULING = re.compile(r"^\s*UNLISTED\s+(?P<loc>\S+):\s+(?:DISMISSED\s*[—–-]+\s*(?P<reason>.*?)"
+                             r"|FINDING\s+(?P<sev>P[123])(?:\s*[—–-]+\s*(?P<why>.*?))?)\s*$")
+
+
+def unlisted_rulings(lead):
+    """(errors, blocking, escalate, notes) for the UNLISTED prose items (LUCY-xyjxs). Each needs one lead line
+    in `unlisted`: 'UNLISTED <loc>: DISMISSED — <reason>' or 'UNLISTED <loc>: FINDING <P1|P2|P3>' (a P3 adds
+    ' — <reason>': it is Noted). FINDING P1/P2 blocks like an act_on. A dismissal, or a P3 grade, of an item
+    whose prose line carries a P1 or P2 escalates (id UNLISTED:<loc>): the orchestrator decides. An item with
+    no line, or a line for an item no prose raised, refuses."""
+    errs, blocking, escalate, notes, ruled = [], [], [], [], {}
+    entries = lead.get("unlisted") or []
+    if not isinstance(entries, list):
+        return ["lead `unlisted` is not a list of 'UNLISTED <loc>: ...' lines"], [], [], []
+    for raw in entries:
+        m = UNLISTED_RULING.match(raw) if isinstance(raw, str) else None
+        if not m:
+            errs.append(f"unlisted entry not 'UNLISTED <loc>: DISMISSED — <reason>' or 'UNLISTED <loc>: FINDING "
+                        f"<P1|P2|P3>': {str(raw)[:100]}")
+            continue
+        loc = m.group("loc")
+        if loc not in UNLISTED:
+            errs.append(f"lead rules on UNLISTED {loc}, which no reviewer prose raised (UNLISTED: "
+                        f"{', '.join(sorted(UNLISTED)) or 'none'})")
+        elif loc in ruled:
+            errs.append(f"lead rules on UNLISTED {loc} twice")
+        else:
+            ruled[loc] = m
+    for loc, item in UNLISTED.items():
+        m = ruled.get(loc)
+        src = f"UNLISTED {loc} ({item['sev']} on the reviewer's prose line): {item['lines'][0][:160]}"
+        if m is None:
+            errs.append(f"UNLISTED {loc}: a prose {item['sev']} line cites it, and it is not in any review-verdict "
+                        f"block; rule on it in the lead's `unlisted` list ('UNLISTED {loc}: DISMISSED — <reason>' "
+                        f"or 'UNLISTED {loc}: FINDING <P1|P2|P3>'): {item['lines'][0][:100]}")
+            continue
+        sev, reason = m.group("sev"), norm(m.group("reason") or m.group("why") or "")
+        f = {"id": f"UNLISTED:{loc}", "source_line": src, "reason": reason, "_unlisted": True,
+             "verdict": "act_on" if sev in ("P1", "P2") else ("noted" if sev else "dismissed")}
+        if f["verdict"] == "act_on":
+            f.update(clinic_scenario="n/a: reviewer prose outside its block, graded a finding by the lead",
+                     demonstrated=f"lead ruled FINDING {sev}")
+            blocking.append(f)
+            continue
+        if len(reason) < 12:
+            errs.append(f"UNLISTED {loc}: {f['verdict']} needs a written reason ('UNLISTED {loc}: "
+                        f"{'FINDING P3' if sev else 'DISMISSED'} — <reason>')")
+        elif item["sev"] in ("P1", "P2"):
+            escalate.append(f)
+        else:
+            notes.append(f)
+    return errs, blocking, escalate, notes
+
+
 def check(lead, reviewer_lines, round_no, scope_lock, files=None):
     errs = []
     items = lead.get("findings")
@@ -1636,10 +1708,12 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
         if line not in want:
             errs.append(f"lead lists a finding no reviewer made: {line[:100]}")
     errs += orphan_open_priors(files or [], items)
+    u_errs, u_blocking = unlisted_rulings(lead)[:2]
+    errs += u_errs
     # A `fixed` grade that some review of the tip does not close stays blocking (LUCY-e3opf B1).
     blocking = [f for f in items if f.get("_not_fixed") or (
         f.get("verdict") == "act_on" and not f.get("_demoted")
-        and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True))]
+        and not routed_out(f, scope_lock) and (not scope_lock or f.get("in_scope") is True))] + u_blocking
     if len(blocking) > ACT_ON_CAP and not norm(lead.get("act_on_over_cap_reason") or ""):
         errs.append(f"{len(blocking)} blocking act_on items (> {ACT_ON_CAP}): not filtering; filter harder "
                     "or give act_on_over_cap_reason")
@@ -1677,6 +1751,7 @@ def main(argv=None):
     UNBOUND_NOTES.clear()
     NOTE_REFS.clear()
     RUN_NOTES.clear()
+    UNLISTED.clear()
     try:
         lead = json.loads(Path(a.lead).read_text())
         reviewer_lines = reviewer_findings(a.verdict)
@@ -1716,8 +1791,9 @@ def main(argv=None):
                 or (f.get("_duplicate_path") and f.get("pre_existing") is not True))
     # Whatever the grade (LUCY-e3opf C4): an in-scope act_on that is disputed stays blocking AND escalates.
     disputed = [f for f in items if f.get("_disputed") and f not in consider and f not in out_of_scope]
+    _, _, u_escalate, u_notes = unlisted_rulings(lead)
     escalate = [f for f in consider if must_escalate(f)] + \
-               [f for f in out_of_scope if must_escalate(f)] + disputed
+               [f for f in out_of_scope if must_escalate(f)] + disputed + u_escalate
     cleared = {}
     if a.cleared_escalation:
         try:
@@ -1745,7 +1821,7 @@ def main(argv=None):
         "".join(f"{f['source_line']}\n  why not fixed here: "
                 f"{f.get('_disputed') or f.get('reason') or f.get('follow_up')}\n" for f in escalate))
     (out / f"lead-cleared-round-{n}.txt").write_text(
-        "".join(f"{cid}\t{line}\t{f['source_line']}\n" for f in items
+        "".join(f"{cid}\t{line}\t{f['source_line']}\n" for f in items + u_escalate
                 for cid, line in cleared.items() if f.get("id") == cid))
     (out / f"lead-followups-round-{n}.txt").write_text(
         "".join(f"{f['follow_up']}\t{f['source_line']}\n" for f in follow))
@@ -1778,6 +1854,10 @@ def main(argv=None):
         if f.get("id") in cleared:
             why += f" | cleared by the orchestrator: {cleared[f['id']]}"
         rows.append(f"- **{label}**{pat}: {f['source_line']}\n  - reason: {why}")
+    for f in u_escalate + u_notes:
+        label = "UNLISTED " + f["verdict"] + (" (cleared)" if f["id"] in cleared else " (escalated)"
+                                              if f in u_escalate else "")
+        rows.append(f"- **{label}**: {f['source_line']}\n  - reason: {f['reason']}")
     for nt in lead.get("verified_notes") or []:
         if isinstance(nt, dict):
             rows.append(f"- **verified note** (reviewer's own, outside its finding): {nt.get('line')}\n"
@@ -1787,7 +1867,7 @@ def main(argv=None):
               for k in ("dismissed", "noted", "fixed")}
     print(f"BLOCKING={len(blocking)} ESCALATE={len(escalate)} FOLLOWUPS={len(follow)} "
           f"DISMISSED={counts['dismissed']} NOTED={counts['noted']} P4={len(demoted)} CLEARED={len(cleared)} "
-          f"FIXED={counts['fixed']}")
+          f"FIXED={counts['fixed']} UNLISTED={len(UNLISTED)}")
     for cid, line in cleared.items():
         print(f"CLEARED {cid}: {line}")
     for nt in RUN_NOTES:
