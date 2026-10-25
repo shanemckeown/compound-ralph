@@ -29,7 +29,8 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     {severity, file_line, text}, a prior entry {ref, status, evidence}. A raising review may use the
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
   - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
-    distinct one escalates, whatever it is graded;
+    distinct one escalates, whatever it is graded, unless it is graded fixed and every newest-round seat
+    closes that ref with evidence (LUCY-unykv, every_seat_closes);
   - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally (builder
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
@@ -44,7 +45,8 @@ fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
     evidence is never a seat and never fixed_by;
   - C3: with 2+ inputs, a file whose name states no round (_r<N>_ or round-<N>), or a newest round on two
     commits. The mtime never orders reviews.
-  - C4: an ambiguous ref escalates whatever the grade, act_on included. C6: an earlier (non-tip) review's
+  - C4: an ambiguous ref escalates whatever the grade, act_on included (a fixed grade every newest-round
+    seat closes excepted, G3). C6: an earlier (non-tip) review's
     unmatched prose note is printed as NOTE, not refused.
 Names never decide identity (attempt 6), each refused:
   - D1: a builder-evidence name carrying a REVIEWING echo or a review-verdict block. Builder evidence is
@@ -1180,6 +1182,25 @@ def ambiguous_refs(files):
     return out
 
 
+def every_seat_closes(src, files):
+    """True when a `fixed` grade may skip the G3/A5 ambiguity escalation (LUCY-unykv, Orchestrator23 25 Oct):
+    every review of the newest round at the current tip has a closed prior entry (structured_prior already
+    refuses one without evidence) at src's severity + location for every round that raised it. One entry then
+    speaks for every finding at that location, because every seat closed the location. A missing, open or
+    mixed one keeps the escalation. fixed_errors still runs first: any review of the tip (an earlier round's
+    included) marking it open is a dispute (escalated), and one raising it again refuses the run. The roster
+    and statuses are fixed_errors' (B1, C5)."""
+    loc, sev = leading_loc(src), src[:2]
+    tip, newest = current_tip(files) if files else ("", None)
+    rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
+    if not loc or not tip or not rounds or None in rounds:
+        return False
+    at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
+    roster = [x for x in at_tip if round_of(x[0]) == round_of(newest[0]) and not is_builder_evidence(x[0])]
+    st = tip_statuses(files, tip, rounds, sev, loc)
+    return bool(roster) and all(st.get(x[0], {}).get(r) == "closed" for x in roster for r in rounds)
+
+
 def same_commit(a, b):
     return bool(a and b) and (a.startswith(b) or b.startswith(a))
 
@@ -1323,7 +1344,7 @@ def check(lead, reviewer_lines, round_no, scope_lock, files=None):
             errs.append(f"{tag}: category {cat!r} is not one of {sorted(CATEGORIES)}")
         if v == "fixed":
             errs += fixed_errors(tag, f, src, files)
-            if src in amb:
+            if src in amb and not every_seat_closes(src, files):
                 f["_disputed"] = amb[src]
                 f.pop("_not_fixed", None)
             continue

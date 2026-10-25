@@ -1,0 +1,80 @@
+{
+  "bead": "AestheticcNext-9kwlw",
+  "round": 2,
+  "scope_lock": true,
+  "premise": {
+    "premise": "No shared premise: round 1 failed on the failed-start toast, the poll route (H-D0) and SKIP LOCKED; round 2 fails only on an unrelated pre-existing short-path deadline. No two fix rounds failed the same gate.",
+    "rounds_failed_on_it": 0,
+    "action": null
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "reviewer": "astra-xhigh",
+      "source_line": "P2 hooks/useVoiceInput.ts:545 — H-U0, UI-07, COM-06: after a practitioner stops a 55-minute consultation on an iPad, a Google start timeout or S3 fallback returns an already-failed transcription. backgroundFailed stays false, and the saved reason is omitted from the response, so the practitioner receives only a success toast — handle failed upload status explicitly and return a safe, explanatory failure reason.",
+      "verdict": "fixed",
+      "fixed_by": "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md",
+      "category": "user_facing",
+      "clinic_scenario": "A practitioner on the clinic iPad stops a 55-minute consultation note and Google's start call fails; fixed at 5f45b3c9d2 (warning toast with a plain reason).",
+      "ordinary_use": "none: needs a Google start failure or S3 fallback",
+      "carve_out": true,
+      "pre_existing": false,
+      "reason": "Both round-2 reviews of tip 5f45b3c9d2 carry prior {ref: r1 P2 hooks/useVoiceInput.ts:545, status: closed} with mutant evidence; neither raises it again."
+    },
+    {
+      "id": "F2",
+      "reviewer": "astra-xhigh",
+      "source_line": "P2 pages/api/voice-notes/[id]/transcription.ts:38 — H-D0, DR-05: the new endpoint duplicates the existing business-scoped single-recording GET’s status/transcript read. The supplied plan explicitly proposed extending that GET and records no refused-extend reason — add reconciliation to the existing endpoint and poll it.",
+      "verdict": "fixed",
+      "fixed_by": "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md",
+      "category": "duplicate_path",
+      "clinic_scenario": "none: structural H-D0 finding",
+      "ordinary_use": "none: structural, no runtime trigger",
+      "carve_out": false,
+      "pre_existing": false,
+      "reason": "Round-1 lead dismissed it (PLAN.md:26 records the refused-extend reason). Both round-2 reviews of the tip, including the raising seat Astra, carry prior {ref: r1 P2 pages/api/voice-notes/[id]/transcription.ts:38, status: closed} agreeing with the refused-extend reason."
+    },
+    {
+      "id": "F3",
+      "reviewer": "astra-xhigh",
+      "source_line": "P3 lib/voice-notes/transcription-reconcile.ts:207 — DR-01: overlapping scheduler attempts select the same recordings without FOR UPDATE SKIP LOCKED; concurrent finishers also load the catalogue and correct spelling before knowing the CAS winner. Persisted results are protected, but preparation is not exclusive — implement the required locked sweep claim and exclusive finalisation claim.",
+      "verdict": "fixed",
+      "fixed_by": "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md",
+      "category": "other",
+      "clinic_scenario": "The 5-minute sweep tick and an open recorder poll reach the same long-note row; fixed at c47344d82f with a SKIP LOCKED claim and 4-minute lease.",
+      "ordinary_use": "a practitioner waits on 'Transcribing…' while the sweep tick lands on the same recording",
+      "carve_out": false,
+      "pre_existing": false,
+      "reason": "Both round-2 reviews of the tip carry prior {ref: r1 P3 lib/voice-notes/transcription-reconcile.ts:207, status: closed}, with real-pg tests and mutants (no SKIP LOCKED, no lease) red."
+    },
+    {
+      "id": "F4",
+      "reviewer": "opus-h2h",
+      "source_line": "P3 lib/voice-notes/transcription-reconcile.ts:207 — Sweep selects 'processing' rows without FOR UPDATE SKIP LOCKED (plan and review focus 3); a concurrent poll and cron tick both query Google and run the spelling pass, and only the compare-and-set keeps the row correct (proven on real pg). Not user-facing. Fix: claim with SKIP LOCKED in a short transaction before the Google call, or record that the compare-and-set is the chosen guard.",
+      "verdict": "fixed",
+      "fixed_by": "/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews/REVIEW_9kwlw_astra-xhigh_r2_2026-10-25.md",
+      "category": "other",
+      "clinic_scenario": "Same as F3.",
+      "ordinary_use": "a practitioner waits on 'Transcribing…' while the sweep tick lands on the same recording",
+      "carve_out": false,
+      "pre_existing": false,
+      "reason": "Same ref as F3; both round-2 reviews of the tip mark r1 P3 lib/voice-notes/transcription-reconcile.ts:207 closed."
+    },
+    {
+      "id": "F5",
+      "reviewer": "astra-xhigh",
+      "source_line": "P2 lib/utils/google-speech.ts:219 — DR-08, H-U0: a practitioner finishing a three-minute note on an iPad during Google unavailability can exceed Cloud Run’s 300-second deadline. The inherited short path starts batch recognition without timeout options; its 240-second timer starts only after that RPC returns. Reproduced still pending after 300001 ms, leaving a pending recording outside reconciliation — enforce an overall speech deadline below 300 seconds, including startup, inline recognition and SDK retries.",
+      "verdict": "consider",
+      "category": "user_facing",
+      "clinic_scenario": "A practitioner on the clinic iPad stops a three-minute note while Google Speech is down or very slow; the upload request is killed at 300 s and the row stays 'pending'.",
+      "ordinary_use": "none: needs a Google outage that stalls the batchRecognize start RPC; no ordinary user action triggers it",
+      "carve_out": true,
+      "pre_existing": true,
+      "in_scope": false,
+      "follow_up": "AestheticcNext-4rr06: Short voice-note path: bound the whole sync transcription (batchRecognize start + wait) below Cloud Run's 300 s",
+      "reason": "Pre-existing, and the branch left it exactly the same. origin/main lib/utils/google-speech.ts:216 awaits client.batchRecognize({recognizer, config, files, recognitionOutputConfig}) with no call options; the 240 s LONG_RUNNING_TIMEOUT_MS wraps only operation.promise(). At the tip, line 219 calls the new shared builder startBatchRecognition(uri, config) (lib/utils/google-speech-batch.ts:95), which issues the identical request on the same getSpeechClient() singleton with callOptions undefined: no timeout added, none removed, retry budget unchanged. The branch actually narrows exposure: on main every note length went through this sync path; at the tip only notes of 270 s or less do, long notes use the bounded background start (START_TIMEOUT_MS 60 s, raced and passed as the gax timeout). Under scope_lock the branch did not cause it, so it is a follow-up (filed AestheticcNext-4rr06, discovered-from 9kwlw, qa-followup) and cannot add a round. Opus h2h at the same tip read this short path as unchanged and raised nothing."
+    }
+  ],
+  "verified_notes": [],
+  "act_on_over_cap_reason": null
+}
