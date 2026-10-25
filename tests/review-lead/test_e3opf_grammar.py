@@ -1389,7 +1389,7 @@ class CwpxuCanonicalPath(unittest.TestCase):
     def test_canon_path(self):
         for raw, want in [("./tests/a.test.ts", "tests/a.test.ts"), ("a/tests/a.test.ts", "tests/a.test.ts"),
                           ("b/tests//a.test.ts", "tests/a.test.ts"), ("./b/tests/a.test.ts", "tests/a.test.ts"), (".//tests/a.test.ts", "tests/a.test.ts"),
-                          ("src/$id.tsx", "src/$id.tsx"), ("tests/./a.test.ts", "tests/a.test.ts"),
+                          ("src/$id.tsx", "src/$id.tsx"), ("references/R&D.md", "references/R&D.md"), ("tests/./a.test.ts", "tests/a.test.ts"),
                           ("Dockerfile", "Dockerfile"), ("main.c", "main.c"),
                           ("app/(booking)/[id].tsx", "app/(booking)/[id].tsx")]:
             self.assertEqual(chk.canon_path(raw), want, raw)
@@ -1494,11 +1494,47 @@ class CwpxuCanonicalPath(unittest.TestCase):
     def test_markdown_link_mention_at_the_tip_vetoes(self):
         """Own-gate r1 :611: a path inside a markdown link or anchor is still a mention."""
         for again in ("P3 lib/b.ts:5 — [the test](tests/a.test.ts) still lacks the failed-fetch assertion — add it",
-                      "P3 lib/b.ts:5 — see tests/a.test.ts#L40, still no failed-fetch cell — add it"):
+                      "P3 lib/b.ts:5 — see tests/a.test.ts#L40, still no failed-fetch cell — add it",
+                      "P3 lib/b.ts:5 — [x](tests/a.test.ts#L40) still has no failed-fetch cell — add it"):
             code, out = self.tip_mention(again)
             self.assertEqual(code, 0, out)
             self.assertIn("ESCALATE=1", out)
             self.assertIn("FIXED=0", out)
+
+    def test_route_path_link_mention_at_the_tip_vetoes(self):
+        """Own-gate r2 :620: a link to a route path keeps its [id] / (group) segments."""
+        src = "P3 pages/api/clients/[id]/medical-history.ts — the contraindication read has no failed-fetch cell"
+        for again in ("P3 lib/b.ts:5 — [the handler](pages/api/clients/[id]/medical-history.ts) still lacks it",
+                      "P3 lib/b.ts:5 — [h](./pages/api/clients/[id]/medical-history.ts#L9) still lacks it"):
+            lead = fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md",
+                              extra=[{"id": "F2", "source_line": again, "verdict": "noted", "category": "other",
+                                      "reason": "test-only coverage gap, not user-facing"}])
+            code, out = run_named(lead, [
+                ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
+                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 pages/api/clients/[id]/medical-history.ts", "closed")],
+                                                   verdict="FAIL", findings=[("P3", again[3:])]), 2000)])
+            self.assertEqual(code, 0, out)
+            self.assertIn("ESCALATE=1", out)
+            self.assertIn("FIXED=0", out)
+
+    def test_markdown_link_leading_location(self):
+        """Own-gate r2 :608: [p](p) is a finding at p, for ambiguity and for its own honest closure."""
+        linked = "P3 [tests/a.test.ts](tests/a.test.ts) — the empty-record cache has no test — add one"
+        self.assertEqual(chk.ref_loc(linked), "tests/a.test.ts")
+        self.assertIsNone(chk.ref_loc("P3 [tests/a.test.ts](tests/a.test.ts#L12) — x"))  # two names, ambiguous
+        self.assertIsNone(chk.ref_loc("P3 [a](tests/a.test.ts:12) — x"))
+        lead = fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md",
+                          extra=[{"id": "F2", "source_line": linked, "verdict": "noted", "category": "other",
+                                  "reason": "test-only coverage gap, not user-facing"}])
+        code, out = run_named(lead, [("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC, linked), 1000),
+                                     ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+        code, out = run_named(fixed_lead(linked, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(linked), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=1", out)
 
     def test_mention_is_token_bounded(self):
         code, out = self.tip_mention("P3 lib/b.ts:5 — tests/a.test.tsx lacks the empty-state cell — add it")
@@ -1508,7 +1544,7 @@ class CwpxuCanonicalPath(unittest.TestCase):
 
     def test_extensionless_and_short_names_close(self):
         """r1 :677 — honest line-less Dockerfile / main.c findings close by their exact path."""
-        for path in ("Dockerfile", "main.c", "voice-service/Makefile", "src/$id.tsx", ".//tests/a.test.ts"):
+        for path in ("Dockerfile", "main.c", "voice-service/Makefile", "src/$id.tsx", ".//tests/a.test.ts", "references/R&D.md"):
             src = f"P3 {path} — the build skips the contraindication checker's tests — run them"
             code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
                 ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),

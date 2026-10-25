@@ -543,13 +543,26 @@ def ref_loc(finding):
     loc = leading_loc(finding)
     if loc:
         return loc
-    pl = token_loc(lead_token(finding))
-    return pl[0] if pl and pl[1] is None else None
+    locs = {pl for p in link_pieces(lead_token(finding)) for pl in [token_loc(p)] if pl}
+    return next(iter(locs))[0] if len(locs) == 1 and next(iter(locs))[1] is None else None
+
+
+def link_pieces(word):
+    """A location token as its names: a markdown link [text](target) is its text and its target, not the
+    whole token. A #L12 anchor is a line (:12); any other anchor is dropped. Route brackets and groups
+    ([id], (booking)) are kept whole."""
+    out = [word]
+    if "](" in word:
+        text, _, target = word.partition("](")
+        out = [text.lstrip("["), target]
+    return [re.sub(r"#L(\d+(?:-L?\d+)?)", lambda m: ":" + m.group(1).replace("L", ""), p).split("#", 1)[0]
+            for p in out]
 
 
 # Path-only refs (LUCY-cwpxu): any repo-relative file name, extensionless (Dockerfile) and short (main.c)
 # included. Never the prose-path grammar: a path-only ref names a file, it doesn't find one in prose.
-_REF_SEG = re.compile(r"[\w.@+\[\]()$=%~-]+")
+# A segment is any run of characters a repo file name may hold, less separators and markdown / anchor marks.
+_REF_SEG = re.compile(r"[^\s/:`*\"'<>|\\#?]+")
 
 
 def canon_path(t):
@@ -605,8 +618,7 @@ def lead_token(finding):
 
 def own_paths(o):
     """The canonical path a finding line sits at, lined or not (its leading location, however written)."""
-    pl = token_loc(lead_token(o))
-    out = {pl[0]} if pl else set()
+    out = {pl[0] for p in link_pieces(lead_token(o)) for pl in [token_loc(p)] if pl}
     loc = leading_loc(o)
     p = canon_path(path_parts(loc)[0]) if loc else None
     return out | ({p} if p else set())
@@ -617,7 +629,7 @@ def mentioned_paths(o):
     each piece of it between markdown link / quote / anchor punctuation ("[x](src/a.ts#L3)"). Extra pieces
     only add vetoes, never remove one."""
     words = re.split(r"[\s–—]+", o)
-    toks = words + [p for w in words for p in re.split(r"[\[\](){}<>\"'`#,;|]+", w)]
+    toks = words + [p for w in words for p in link_pieces(w)] + [p for w in words for p in re.split(r"[\[\](){}<>\"'`#,;|]+", w)]
     return {pl[0] for tok in toks for pl in [token_loc(tok)] if pl}
 
 
