@@ -344,13 +344,13 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
     return out
 
 
-# A line that claims to be a REVIEWING echo (any line-start REVIEWING word, colon or not), and one
-# that parses as ``<branch> @ <sha>``. Lenient on markdown (``**REVIEWING:**``, ``> - REVIEWING:``,
-# backticks) and on any trailing text.
-_ECHO_CLAIM_RE = re.compile(r"^[ \t>*_`-]*REVIEWING\b", re.I)
-_ECHO_PARSE_RE = re.compile(r"^[ \t>*_`-]*REVIEWING[*_`]*\s*:[*_`]*\s*`?([^\s`@]+?)`?\s*@\s*`?"
-                            r"([0-9a-fA-F]{7,40})(?![0-9a-fA-F])", re.I)
-_HEADER_FIELD_RE = re.compile(r"^[ \t>*_`-]*(?:Bead|Branch)[*_`]*\s*:", re.I)
+# A line that claims to be a REVIEWING echo: the word at line start after any markup (``#``, ``**``,
+# ``>``, ``-``, ``|``, backticks), colon or not. An echo-shaped ``REVIEWING[:] <branch> @ <sha>``
+# anywhere on a line, and a ``Bead:``/``Branch:`` field anywhere on a line, are read wherever they sit.
+_ECHO_CLAIM_RE = re.compile(r"^[^A-Za-z0-9]*REVIEWING\b", re.I)
+_ECHO_ANY_RE = re.compile(r"REVIEWING[^A-Za-z0-9\s]*\s*:?[*_`\s]*`?([^\s`@]+?)`?\s*@\s*`?"
+                          r"([0-9a-fA-F]{7,40})(?![0-9a-fA-F])", re.I)
+_HEADER_FIELD_RE = re.compile(r"\b(?:Bead|Branch)e?s?\b[*_`]*\s*:", re.I)
 
 
 def _names_bead_any_form(text: str, bead_id: str) -> bool:
@@ -365,23 +365,25 @@ def _names_bead_any_form(text: str, bead_id: str) -> bool:
 def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> bool:
     """The one exemption from the veto scans (LUCY-txfbf): a review of ANOTHER branch that only
     quotes this bead, e.g. a harness review replaying its files as fixtures. True only when the
-    file has a REVIEWING echo, every echo parses, and none names this bead, is a bare HEAD or is at
-    this tip; and neither the file name nor a line-start Bead:/Branch: field names the bead. Any
-    doubt keeps the veto (fail closed)."""
+    file has a line-start REVIEWING echo, every such claim parses, no echo-shaped text on any line
+    names this bead, is a bare HEAD or is at this tip, and neither the file name nor any Bead: or
+    Branch: field names the bead. Any doubt keeps the veto (fail closed)."""
     if _names_bead_any_form(Path(path).name, bead_id):
         return False
     tip_sha = tip_sha.lower()
     echoes = 0
     for line in body.splitlines():
-        if _HEADER_FIELD_RE.match(line) and _names_bead_any_form(line, bead_id):
+        if _HEADER_FIELD_RE.search(line) and _names_bead_any_form(line, bead_id):
             return False
-        if not _ECHO_CLAIM_RE.match(line):
-            continue
-        m = _ECHO_PARSE_RE.match(line)
-        if (not m or m.group(1).upper() == "HEAD" or _names_bead_any_form(m.group(1), bead_id)
-                or (tip_sha and tip_sha.startswith(m.group(2).lower()))):
-            return False
-        echoes += 1
+        found = _ECHO_ANY_RE.findall(line)
+        for branch, sha in found:
+            if (branch.upper() == "HEAD" or _names_bead_any_form(branch, bead_id)
+                    or (tip_sha and tip_sha.startswith(sha.lower()))):
+                return False
+        if _ECHO_CLAIM_RE.match(line):
+            if not found:
+                return False   # claims to be an echo but doesn't parse: doubt keeps the veto
+            echoes += 1
     return echoes > 0
 
 

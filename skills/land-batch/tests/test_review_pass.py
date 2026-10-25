@@ -450,6 +450,18 @@ def test_txfbf_descriptive_no_echo_file_and_hidden_bead_echoes_still_veto(tmp_pa
     ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=tmp_path / "c" / "reviews",
                                      comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
     assert ok is False
+    # Or one under a markdown heading, in a table cell, or quoted mid-line (own-gate r2).
+    for i, echo in enumerate((f"# REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP}",
+                              f"| REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP[:10]} | FAIL |",
+                              f"Echo: REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP[:10]}",
+                              f"Reviewer: astra · Branch: goal/aestheticcnext-3bm73 · tip {TX_TIP[:10]}")):
+        body = f"REVIEWING: e3opf-structured @ 5acadb10c8\n{echo}\nFAIL\n"
+        assert len(_vetoes(tmp_path / f"m{i}", "REVIEW_allure_followup_r9.md", body)) == 1, echo
+    # An unparseable claim keeps the veto however it is written: no colon, under a heading, in a table.
+    for i, claim in enumerate(("REVIEWING the Allure branch tip", "## REVIEWING: Allure follow-up",
+                               "| REVIEWING | Allure tip |")):
+        body = f"REVIEWING: e3opf-structured @ 5acadb10c8\n{claim}\n3bm73 {TX_TIP[:8]} FAIL\n"
+        assert len(_vetoes(tmp_path / f"q{i}", "REVIEW_allure_followup_r9.md", body)) == 1, claim
 
 
 def test_txfbf_lander_is_not_held_by_a_harness_review_quoting_the_bead(tmp_path):
