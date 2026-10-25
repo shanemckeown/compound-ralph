@@ -23,7 +23,8 @@ CLEAN_PATHSPEC = ["--", ".", ":(top,exclude).beads/**",
                   ":(top,exclude)issues.jsonl", ":(top,exclude)export-state.json"]
 BEAD = re.compile(r"(?:AestheticcNext|LUCY)-[a-z0-9.]+")
 DEFAULT_COMMAND = [
-    "python3", str(Path.home() / ".claude/scripts/gated-test-run.py"), "jest",
+    # The repo-root scripts/ beside this skill: under run-gate, the export's copy (LUCY-p122j r7).
+    "python3", str(Path(__file__).resolve().parents[3] / "scripts/gated-test-run.py"), "jest",
     "--selectProjects", "node-tests", "--runTestsByPath",
     "tests/meta/file-length-ratchet.test.ts", "--runInBand",
 ]

@@ -69,7 +69,9 @@ ZERO = "0" * 40
 
 # Prefixes (ending "/") match a directory; anything else matches that exact path.
 # scripts/risk_tier.py decides the land tier and tier_gates.py imports it, so it is a gate.
-# scripts/unlanded-sweep.py is run by gate-watch.py and loaded by fleet-dispatch.py (LUCY-p122j r7).
+# scripts/unlanded-sweep.py is run by gate-watch.py and loaded by fleet-dispatch.py, fleet-slots.py is
+# run by fleet-dispatch.py, gated-test-run.py (with its sibling pg-lane-lock.py) by
+# file_length_ratchet.py: exported gates run them, so they are gates too (LUCY-p122j r7).
 # bin/bd is the bead close-guard: run-gate puts the exported copy first on a gate's PATH, so a
 # gate's `bd close` goes through main's committed wrapper, never Homebrew's bd directly.
 GATE_PATHS = (
@@ -85,6 +87,9 @@ GATE_PATHS = (
     "scripts/build-gate.py",
     "scripts/risk_tier.py",
     "scripts/unlanded-sweep.py",
+    "scripts/fleet-slots.py",
+    "scripts/gated-test-run.py",
+    "scripts/pg-lane-lock.py",
     "scripts/live-export.sh",
     "bin/bd",
     "scripts/git-hooks/",

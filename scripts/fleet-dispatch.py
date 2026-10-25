@@ -59,7 +59,8 @@ refused; P0/P1 and dated client commitments still pass. Fails OPEN: a missing, u
 """
 import io, json, os, re, subprocess, sys, time, datetime
 
-SLOTS = os.path.expanduser("~/.claude/scripts/fleet-slots.py")
+# Beside this file, so run-gate's exported copy runs the exported slot manager (LUCY-p122j r7).
+SLOTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-slots.py")
 
 REPO = "/Users/shane/Documents/GitReBase/AestheticcNext"
 VAULT_BEADS = "/Users/shane/Documents/Obsidian/.beads"

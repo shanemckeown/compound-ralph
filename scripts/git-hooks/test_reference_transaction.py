@@ -923,7 +923,11 @@ CHECKOUT_GATE_RE = r"\.claude/((?:scripts|references|skills|hooks)/[\w./-]+?\.(?
 
 # install.sh is the one gate script run from the checkout: the orchestrator runs it once, and it
 # installs only main's committed blobs. Callers name it when run-gate is missing (T6).
-CHECKOUT_OK = ("scripts/git-hooks/install.sh",)
+# fleet-slots.py and the test runners are gates because exported gates run them (LUCY-p122j r7),
+# but builders and the lander's own shell also run them directly as tools: a builder releasing
+# its slot or running its own tests decides no gate, and the gates themselves reach the export.
+CHECKOUT_OK = ("scripts/git-hooks/install.sh", "scripts/fleet-slots.py", "scripts/gated-test-run.py",
+               "scripts/pg-lane-lock.py")
 
 
 def checkout_gate_refs(text):
@@ -958,7 +962,7 @@ def test_l5_detector_catches_checkout_paths():
     assert checkout_gate_refs('exec python3 "$HOME/.claude/references/review-lead/review_gate.py"')
     assert checkout_gate_refs("python3 ~/.claude/skills/land-batch/bin/land-state.py wait")
     assert not checkout_gate_refs("~/.claude/.git/live/run-gate references/review-lead/review_gate.py")
-    assert not checkout_gate_refs("python3 ~/.claude/scripts/gated-test-run.py jest")
+    assert not checkout_gate_refs("python3 ~/.claude/scripts/targeted-tests.py")
 
 
 # Round 6 (lead action): node hooks route through run-gate too
@@ -1853,6 +1857,9 @@ def test_c3_released_pin_lets_cleanup_remove_the_export(repo, tmp_path):
     assert proc.communicate(timeout=30) and proc.returncode == 0
     for i in range(4):
         age_exports(repo)
+        # oldest, so a same-mtime tie can't keep it among the newest (was flaky, LUCY-p122j r7)
+        if os.path.isdir(os.path.join(repo.live, pinned)):
+            age_exports_of(repo, pinned, 2 * 3600)
         assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
     assert not os.path.exists(os.path.join(repo.live, pinned))
     exports = {d for d in os.listdir(repo.live) if len(d) == 40}

@@ -29,18 +29,10 @@ DATA_PART_RE = re.compile(r"(?:^|/)(?:logs?|state|markers|seen|sessions)(?:/|$)"
 DATA_EXT = (".log", ".json", ".jsonl", ".md", ".txt", ".lock", ".diarised")
 LAUNCHER = ".git/live"  # the installed run-gate: the trust anchor, not checkout code
 
-# (exported file, ~/.claude target) -> why it may stay. A code target here is a tool that is
-# not a gate path: exporting it moves builder and lander callers onto run-gate (fixed PATH,
-# Homebrew node), a separate decision tracked in the r7 follow-up bead.
+# (exported file, ~/.claude target) -> why it may stay. The one code target here is command
+# text tier_gates emits for the lander's own shell; moving the lander's tier gates onto run-gate
+# is the r7 follow-up bead.
 ALLOWED = {
-    ("scripts/fleet-dispatch.py", "scripts/fleet-slots.py"):
-        "slot accounting, not a gate path; /goal and /long-goal call it from the checkout too",
-    ("skills/land-batch/bin/file_length_ratchet.py", "scripts/gated-test-run.py"):
-        "test runner, not a gate path; every builder and the lander shell run it from the checkout",
-    ("skills/land-batch/bin/tier_gates.py", "scripts/gated-test-run.py"):
-        "command text the lander's own shell runs after tier_gates exits, never under run-gate",
-    ("skills/land-batch/bin/tier_gates.py", "scripts/pg-lane-lock.py"):
-        "command text the lander's own shell runs after tier_gates exits, never under run-gate",
     ("skills/land-batch/bin/tier_gates.py", "scripts/cloudbuild-gate-remote.py"):
         "command text the lander's own shell runs after tier_gates exits, never under run-gate",
     ("scripts/git-hooks/run-gate", "bin"):
@@ -77,6 +69,10 @@ ALLOWED_TEXT = {
         "message naming the install step when run-gate is missing (install.sh installs main's blobs)",
     ("scripts/git-hooks/make-settings-patch.py", "scripts/git-hooks/make-settings-patch.py"):
         "usage text for Shane",
+    ("skills/land-batch/bin/tier_gates.py", "scripts/gated-test-run.py"):
+        "command text the lander's own shell runs after tier_gates exits, never under run-gate",
+    ("skills/land-batch/bin/tier_gates.py", "scripts/pg-lane-lock.py"):
+        "command text the lander's own shell runs after tier_gates exits, never under run-gate",
 }
 
 # Env vars a gate reads whose value names a script or binary to run.
@@ -344,9 +340,59 @@ def test_d1_sweep_loads_land_batch_safety_beside_it(tmp_path):
     assert mod._load_safety().WHO == "beside"
 
 
-def test_d1_unlanded_sweep_is_a_gate_path(tmp_path):
+@pytest.mark.parametrize("rel", ["scripts/unlanded-sweep.py", "scripts/fleet-slots.py",
+                                 "scripts/gated-test-run.py", "scripts/pg-lane-lock.py"])
+def test_d1_helpers_exported_gates_run_are_gate_paths(tmp_path, rel):
     repo = Repo(tmp_path)
     repo.as_agent()
     before = repo.rev("main")
-    assert_refused(repo.commit("scripts/unlanded-sweep.py", "print('x')\n"), repo, before,
-                   what="scripts/unlanded-sweep.py")
+    assert_refused(repo.commit(rel, "print('x')\n"), repo, before, what=rel)
+
+
+def load_from(path, name):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def copy_into(root, rel):
+    dest = root / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(open(os.path.join(REAL_ROOT, rel), encoding="utf-8").read())
+    return dest
+
+
+def test_d1_fleet_dispatch_runs_the_slot_manager_beside_it(tmp_path):
+    # every slot call is sh(f"python3 {SLOTS} ...")
+    mod = load_from(copy_into(tmp_path, "scripts/fleet-dispatch.py"), "p122j_fd_slots")
+    assert mod.SLOTS == str(tmp_path / "scripts/fleet-slots.py")
+
+
+def test_d1_ratchet_runs_the_test_runner_beside_its_skill(tmp_path):
+    mod = load_from(copy_into(tmp_path, "skills/land-batch/bin/file_length_ratchet.py"), "p122j_ratchet")
+    assert mod.DEFAULT_COMMAND[1] == str((tmp_path / "scripts/gated-test-run.py").resolve())
+
+
+def test_d1_ratchet_through_run_gate_ignores_a_checkout_runner_edit(tmp_path):
+    repo = Repo(tmp_path)
+    log = tmp_path / "runner.log"
+    runner = "import sys\nopen(%r, 'a').write('{who}\\n')\n" % str(log)
+    probe = ("import importlib.util, os, subprocess, sys\n"
+             "here = os.path.dirname(os.path.abspath(__file__))\n"
+             "spec = importlib.util.spec_from_file_location('r', os.path.join(here, 'file_length_ratchet.py'))\n"
+             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+             "sys.exit(subprocess.run([sys.executable, m.DEFAULT_COMMAND[1]]).returncode)\n")
+    commit_files(repo, {
+        "skills/land-batch/bin/file_length_ratchet.py":
+            (os.path.join(REAL_ROOT, "skills/land-batch/bin/file_length_ratchet.py"),),
+        "skills/land-batch/bin/ratchet_probe.py": probe,
+        "scripts/gated-test-run.py": runner.format(who="committed")})
+    repo.write("scripts/gated-test-run.py", runner.format(who="CHECKOUT"))  # uncommitted
+    home = tmp_path / "home"
+    home.mkdir()
+    os.symlink(repo.root, home / ".claude")
+    res = repo.gate("skills/land-batch/bin/ratchet_probe.py", env=dict(repo.env, HOME=str(home)))
+    assert res.returncode == 0, res.stderr
+    assert log.read_text() == "committed\n"
