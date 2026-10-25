@@ -307,3 +307,62 @@ def test_fail_review_quoting_the_gate_signature_still_vetoes(tmp_path):
     ok, _ = lbs.independent_pass_for("AestheticcNext-q41ar", IND_TIP, reviews_dir=root,
                                      comments_text=_comment("2025-10-22 09:30", f"PASS @{IND_TIP}"))
     assert ok is False
+
+
+# --- LUCY-txfbf: only a review OF bead@tip vetoes it, never a harness review quoting it ------
+
+TX_TIP = "4f1c34f25e75593f87ca09fc2b4639c63b174e23"
+
+
+def _tx_root(tmp_path, name, body):
+    root = tmp_path / "reviews"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text(body)
+    return root
+
+
+def test_txfbf_harness_review_quoting_the_bead_as_fixture_does_not_veto(tmp_path):
+    root = _tx_root(tmp_path, "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md",
+                    "Verdict: FAIL\n\nREVIEWING: e3opf-structured @ 5acadb10c839b61435d08494cf085e1a2222edfe\n\nFAIL\n"
+                    "- **3bm73 r1–r6:** all ten files parse at tip `4f1c34f2`; AestheticcNext-3bm73 replayed.\n")
+    assert lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP) == []
+    assert lbs.reviews_bead_tip(root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md",
+                                (root / "REVIEW_e3opf_structured_astra-high_r3_2026-10-24.md").read_text(),
+                                "AestheticcNext-3bm73", TX_TIP) is False
+
+
+def test_txfbf_real_fail_at_the_tip_still_vetoes_in_every_echo_form(tmp_path):
+    for i, echo in enumerate((f"REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP}",
+                              "REVIEWING: goal/aestheticcnext-3bm73@4f1c34f",
+                              "  REVIEWING:goal/aestheticcnext-3bm73-r2 @ 4f1c34f25e",
+                              f"REVIEWING: AestheticcNext-3bm73 @ {TX_TIP}",
+                              f"REVIEWING: goal/aestheticcnext-3bm73 @ 1111111\nREVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP}")):
+        root = _tx_root(tmp_path / str(i), "REVIEW_3bm73_astra-xhigh_r8.md", f"{echo}\nFAIL\nP1 lib/x.ts:1 — bad — fix\n")
+        assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1, echo
+    # The file name alone carries the bead when the echo's branch is a bare worktree name.
+    root = _tx_root(tmp_path / "wt", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: HEAD @ {TX_TIP}\nFAIL\n")
+    assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1
+    # And the lander's own scan holds the tip on it.
+    root = _tx_root(tmp_path / "ind", "REVIEW_3bm73_astra-xhigh_r8.md",
+                    f"REVIEWING: goal/aestheticcnext-3bm73 @ {TX_TIP}\nFAIL\n")
+    ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=root,
+                                     comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
+    assert ok is False
+
+
+def test_txfbf_legacy_review_with_no_echo_still_vetoes_by_its_name(tmp_path):
+    root = _tx_root(tmp_path, "REVIEW_3bm73_legacy.md", f"AestheticcNext-3bm73 at {TX_TIP[:10]}\n**Verdict: FAIL**\n")
+    assert len(lbs.review_file_vetoes(root, "AestheticcNext-3bm73", TX_TIP)) == 1
+    # A review of another bead's branch, or of this bead at another commit, does not.
+    other = _tx_root(tmp_path / "o", "REVIEW_3bm73_r2.md",
+                     f"REVIEWING: goal/aestheticcnext-3bm73 @ 1111111\nbase {TX_TIP}\nFAIL\n")
+    assert lbs.review_file_vetoes(other, "AestheticcNext-3bm73", TX_TIP) == []
+
+
+def test_txfbf_dashed_legacy_name_and_bare_echo_veto_in_lander_and_scan(tmp_path):
+    root = _tx_root(tmp_path, "REVIEW_1b6a3-32_astra.md", f"tip {TX_TIP[:9]}\nFAIL\n")
+    assert len(lbs.review_file_vetoes(root, "AestheticcNext-1b6a3.32", TX_TIP)) == 1
+    root = _tx_root(tmp_path / "h", "REVIEW_3bm73_opus_r8.md", f"REVIEWING: HEAD @ {TX_TIP}\nFAIL\n")
+    ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=root,
+                                     comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
+    assert ok is False

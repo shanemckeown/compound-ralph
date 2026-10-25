@@ -333,13 +333,33 @@ def review_file_vetoes(root, bead_id, tip_sha, exclude=()):
             mtime = path.stat().st_mtime
         except OSError:
             continue
-        if not mentions_bead(body, bead_id) or not _names_tip(body, tip_sha):
+        if not reviews_bead_tip(path, body, bead_id, tip_sha):
             continue
         if is_gate_record(path, body) and not _VETO_RE.search(body):
             continue
         if _VETO_RE.search(body):
             out.append((mtime, str(path)))
     return out
+
+
+_REVIEWING_BRANCH_RE = re.compile(r"(?m)^\s*REVIEWING:\s*(\S+?)\s*@\s*([0-9a-fA-F]{7,40})[ \t]*$")
+
+
+def reviews_bead_tip(path, body: str, bead_id: str, tip_sha: str) -> bool:
+    """Is this Ops/reviews file a review OF <bead> at <tip>? (LUCY-txfbf) Identity comes from its
+    ``REVIEWING: <branch> @ <sha>`` echo: one echo must name the tip, and that echo's branch or the
+    file name must name the bead. Prose naming the bead and the tip never counts (a harness review
+    replaying a bead's files as fixtures). A file with no echo falls back to its name: legacy
+    REVIEW_<suffix>_* naming the tip anywhere still counts. One rule for the lander and the gate."""
+    tip_sha = tip_sha.lower()
+    name = Path(path).name
+    # A dotted child's legacy file name may dash it (REVIEW_1b6a3-32_* for AestheticcNext-1b6a3.32).
+    named = mentions_bead(name, bead_id) or mentions_bead(name, bead_id.replace(".", "-"))
+    echoes = _REVIEWING_BRANCH_RE.findall(body)
+    if not echoes:
+        return named and _names_tip(body, tip_sha)
+    return any(tip_sha.startswith(sha.lower()) and (named or mentions_bead(branch, bead_id))
+               for branch, sha in echoes)
 
 
 def mentions_bead(body: str, bead_id: str) -> bool:
@@ -409,13 +429,12 @@ def independent_pass_for(bead_id, tip_sha, reviews_dir=None, comments_text=None)
                 mtime = path.stat().st_mtime
             except OSError:
                 continue
-            if not mentions_bead(body, bead_id):
-                continue
             echoes = [m.group(1).lower() for m in _REVIEWING_RE.finditer(body)]
-            if (is_gate_record(path, body) and echoes and all(tip_sha.startswith(e) for e in echoes)
+            if (mentions_bead(body, bead_id) and is_gate_record(path, body) and echoes
+                    and all(tip_sha.startswith(e) for e in echoes)
                     and re.search(r"(?m)^Verdict: PASS$", body) and not _VETO_RE.search(body)):
                 file_passes.append((mtime, str(path)))
-            elif _names_tip(body, tip_sha) and _VETO_RE.search(body):
+            elif reviews_bead_tip(path, body, bead_id, tip_sha) and _VETO_RE.search(body):
                 vetoes.append(("file", mtime, 0, str(path)))
 
     def comment_after(c, veto):

@@ -127,13 +127,14 @@ def main(argv=None):
         found = []
         for m, p in lbs.review_file_vetoes(reviews_root, a.bead, tip, exclude=independent):
             body_p = Path(p).read_text(errors="ignore")
-            echoes = [e.group(1).lower() for e in REVIEWING.finditer(body_p)]
+            # review_file_vetoes matched it as a review of bead@tip; with an echo, by that echo.
+            echoed = bool(lbs._REVIEWING_BRANCH_RE.search(body_p))
             # Only an explicit declaration at the start of a line, never the word inside a finding.
             withdrawn = withdrawal(body_p)
             # A FAIL review OF this tip is never superseded by a later one (the code didn't change):
             # it must be an input, so the lead adjudicates it, unless its author withdrew it.
             # Other vetoes only count when newer than the oldest input.
-            if m > oldest or (echoes and any(tip.startswith(e) for e in echoes) and not withdrawn):
+            if m > oldest or (echoed and not withdrawn):
                 found.append(p)
         if a.comments_file:
             text = Path(a.comments_file).read_text()
