@@ -200,6 +200,24 @@ class Rulings(unittest.TestCase):
             self.assertIn("BLOCKING=1 ESCALATE=0", out)
             self.assertIn("UNLISTED=2", out)
 
+    def test_an_earlier_round_note_head_location_needs_its_own_ruling(self):
+        """Independent r2 P2 (attempt 3): the sweep read only the note's tail, so a second file:line before
+        'open:' escaped and ruling only on the tail's quoted example passed."""
+        prose = ("r1 P3 lib/copy.ts:10 + lib/pay.ts:40 open: label typo and retry double charge remain; "
+                 "P3 lib/example.ts:9 is only a quoted example.")
+        f1 = {"id": "F1", "source_line": "P3 lib/copy.ts:10 — label typo", "verdict": "dismissed",
+              "category": "other", "reason": "cosmetic label typo only", "clinic_scenario": "none: cosmetic",
+              "ordinary_use": "none: cosmetic", "carve_out": False}
+        block = [("P3", "lib/copy.ts:10", "label typo")]
+        tail = ["UNLISTED lib/example.ts:9: DISMISSED — quoted example only"]
+        code, out, _ = run(lead(tail, [f1]), seat(prose, block))
+        self.assertEqual(code, 1, out)
+        self.assertIn("UNLISTED lib/pay.ts:40: a prose P3 line cites it", out)
+        code, out, _ = run(lead(tail + ["UNLISTED lib/pay.ts:40: FINDING P2"], [f1]), seat(prose, block))
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=1 ESCALATE=0", out)
+        self.assertIn("UNLISTED=2", out)
+
     def test_a_second_location_carried_by_the_block_needs_no_ruling(self):
         prose = "P3 lib/copy.ts:10 typo; lib/pay.ts:40 double charge, as in the block."
         code, out, _ = run(lead(["UNLISTED lib/copy.ts:10: DISMISSED — cosmetic, not a finding"],

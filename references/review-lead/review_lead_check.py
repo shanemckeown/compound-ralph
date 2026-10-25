@@ -1154,10 +1154,13 @@ def prose_claim_errors(p, lines, meta, prior):
         # LUCY-xyjxs attempt 2 (independent r1): a severity binds one path, so every other unmatched file:line on
         # a line main refused is its own UNLISTED item too, or a ruling on the bound one would wave the rest
         # through. A line whose claims all match the block is accepted as on main (its other paths are context).
+        # Attempt 3 (independent r2): the whole line is swept, an earlier-round note's head included, less the
+        # note's own reference (orphan_open_priors covers that one, as on main).
         if unlisted:
-            unlisted += [f"{m.group(1)}:{m.group(2)}" for m in repo_paths(note.group(5) if note else line)
-                         if m.group(2) and not any(same_file(t[1], m.group(1)) and t[2] == m.group(2)
-                                                   for t in targets)]
+            own_ref = note.start(3) + ref.start() if note and ref else None
+            unlisted += [f"{m.group(1)}:{m.group(2)}" for m in repo_paths(line)
+                         if m.group(2) and m.start() != own_ref
+                         and not any(same_file(t[1], m.group(1)) and t[2] == m.group(2) for t in targets)]
         for loc in dict.fromkeys(unlisted):
             # LUCY-xyjxs: not a refusal of the inputs. The lead must rule on it (unlisted_rulings); the
             # highest severity anywhere on the line decides whether a dismissal escalates.
