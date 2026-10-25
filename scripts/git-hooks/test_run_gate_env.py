@@ -54,17 +54,34 @@ def test_e1_r7_repro_pglite_entry_cannot_name_checkout_code(tmp_path):
     assert res.returncode != 0 and "usage: PGLITE_ENTRY" in res.stderr
 
 
-# E2: the caller's PATH selects nothing, verification included
-def test_e2_caller_path_git_and_python3_never_run(tmp_path):
-    repo = Repo(tmp_path)
-    commit_files(repo, {ENV_PROBE: ENV_PROBE_SOURCE})
+def fake_tools(tmp_path):
     fake = tmp_path / "fakebin"
     fake.mkdir()
     log = tmp_path / "fake.log"
     for tool, real in (("git", "/usr/bin/git"), ("python3", "/opt/homebrew/bin/python3")):
         (fake / tool).write_text('#!/bin/sh\necho %s >> %s\nexec %s "$@"\n' % (tool, log, real))
         (fake / tool).chmod(0o755)
+    return fake, log
+
+
+# E2: the caller's PATH selects nothing, verification included
+def test_e2_caller_path_git_and_python3_never_run(tmp_path):
+    repo = Repo(tmp_path)
+    commit_files(repo, {ENV_PROBE: ENV_PROBE_SOURCE})
+    fake, log = fake_tools(tmp_path)
     res = repo.gate(ENV_PROBE, env=dict(repo.env, PATH=str(fake) + ":" + repo.env["PATH"]))
+    assert res.returncode == 0, res.stderr
+    assert not log.exists(), log.read_text()
+
+
+def test_e2_without_the_sh_line_verification_git_still_ignores_caller_path(tmp_path):
+    # `<python> run-gate` skips the /bin/sh line: the env reset before load_hook is what holds
+    repo = Repo(tmp_path)
+    commit_files(repo, {ENV_PROBE: ENV_PROBE_SOURCE})
+    fake, log = fake_tools(tmp_path)
+    res = subprocess.run(["/opt/homebrew/bin/python3", repo.run_gate, ENV_PROBE], cwd=repo.root,
+                         env=dict(repo.env, PATH=str(fake) + ":" + repo.env["PATH"]),
+                         capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     assert not log.exists(), log.read_text()
 
@@ -72,7 +89,8 @@ def test_e2_caller_path_git_and_python3_never_run(tmp_path):
 def test_e2_started_by_another_python_reexecs_into_the_fixed_one(tmp_path):
     repo = Repo(tmp_path)
     commit_files(repo, {ENV_PROBE: "import sys\nprint(sys.executable)\n"})
-    res = subprocess.run(["/usr/bin/python3", repo.run_gate, ENV_PROBE], cwd=repo.root,
+    # already isolated (-I -S): only the interpreter check makes it re-exec
+    res = subprocess.run(["/usr/bin/python3", "-I", "-S", repo.run_gate, ENV_PROBE], cwd=repo.root,
                          env=repo.env, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     assert os.path.realpath(res.stdout.strip()) == os.path.realpath("/opt/homebrew/bin/python3")
