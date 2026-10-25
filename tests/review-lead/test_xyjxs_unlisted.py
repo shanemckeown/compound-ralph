@@ -218,6 +218,20 @@ class Rulings(unittest.TestCase):
         self.assertIn("BLOCKING=1 ESCALATE=0", out)
         self.assertIn("UNLISTED=2", out)
 
+    def test_an_earlier_round_note_severity_makes_a_dismissal_escalate(self):
+        """Own-gate r1 P2 (attempt 3): claim_sevs reads 'r1 P2' as a count, so dismissing the extra locations on a
+        P2 note passed with ESCALATE=0. The note's own severity decides, as any severity on the line does."""
+        for marker in ("open", "closed"):
+            prose = (f"r1 P2 lib/own.ts:10 + lib/extra.ts:40 {marker}: additional issue remains; "
+                     "P3 lib/example.ts:9 is a quoted example.")
+            f1 = {"id": "F1", "source_line": "P2 lib/own.ts:10 — own issue", "verdict": "act_on",
+                  "category": "other", "clinic_scenario": "reception, iPad, checkout", "demonstrated": "red test"}
+            rulings = ["UNLISTED lib/extra.ts:40: DISMISSED — a quoted example, not a finding",
+                       "UNLISTED lib/example.ts:9: DISMISSED — a quoted example, not a finding"]
+            code, out, _ = run(lead(rulings, [f1]), seat(prose, [("P2", "lib/own.ts:10", "own issue")]))
+            self.assertEqual(code, 0, (marker, out))
+            self.assertIn(" ESCALATE=2 ", out, marker)
+
     def test_a_second_location_carried_by_the_block_needs_no_ruling(self):
         prose = "P3 lib/copy.ts:10 typo; lib/pay.ts:40 double charge, as in the block."
         code, out, _ = run(lead(["UNLISTED lib/copy.ts:10: DISMISSED — cosmetic, not a finding"],

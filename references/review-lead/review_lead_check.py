@@ -1154,18 +1154,17 @@ def prose_claim_errors(p, lines, meta, prior):
         # LUCY-xyjxs attempt 2 (independent r1): a severity binds one path, so every other unmatched file:line on
         # a line main refused is its own UNLISTED item too, or a ruling on the bound one would wave the rest
         # through. A line whose claims all match the block is accepted as on main (its other paths are context).
-        # Attempt 3 (independent r2): the whole line is swept, an earlier-round note's head included, less the
-        # note's own reference (orphan_open_priors covers that one, as on main).
+        # Attempt 3 (independent r2): the whole line is swept, an earlier-round note's head included.
         if unlisted:
-            own_ref = note.start(3) + ref.start() if note and ref else None
             unlisted += [f"{m.group(1)}:{m.group(2)}" for m in repo_paths(line)
-                         if m.group(2) and m.start() != own_ref
-                         and not any(same_file(t[1], m.group(1)) and t[2] == m.group(2) for t in targets)]
+                         if m.group(2) and not any(same_file(t[1], m.group(1)) and t[2] == m.group(2)
+                                                   for t in targets)]
         for loc in dict.fromkeys(unlisted):
             # LUCY-xyjxs: not a refusal of the inputs. The lead must rule on it (unlisted_rulings); the
-            # highest severity anywhere on the line decides whether a dismissal escalates.
+            # highest severity anywhere on the line decides whether a dismissal escalates, an earlier-round
+            # note's own "rN Px" included (claim_sevs reads that one as a count; attempt 3 own-gate r1).
             item = UNLISTED.setdefault(loc, {"sev": "P3", "lines": []})
-            item["sev"] = min([item["sev"]] + [s.group(0) for s in claim_sevs(line)])
+            item["sev"] = min([item["sev"]] + [s.group(0) for s in claim_sevs(line)] + ([note.group(2)] if note else []))
             if line.strip() not in item["lines"]:
                 item["lines"].append(line.strip())
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
