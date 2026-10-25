@@ -30,13 +30,19 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     legacy {severity, text}; a review of the current tip may not, whatever its findings are graded;
   - G3: a prior ref matching no round-N finding. Every finding a ref could name alongside another
     distinct one escalates, whatever it is graded, unless it is graded fixed and every newest-round seat
-    closes that ref with evidence (LUCY-unykv, every_seat_closes);
+    closes that ref with evidence (LUCY-unykv, every_seat_closes). A path-only ref 'r<N> <sev> <path>' names
+    only a finding raised as '<sev> <path> — ...' with that exact path token (no normalisation); any other
+    finding, any round, that names the path or its file name anywhere makes it ambiguous and escalates, every
+    seat closing it or not (LUCY-cwpxu);
   - G4: an input file without exactly one well-formed REVIEWING echo line, unconditionally (builder
     evidence excepted: it carries none, D1);
   - G5: a prose severity + path, anywhere in the file (code spans read as plain text), that matches no
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
-    Lines that start like a finding but name no file may not outnumber the block's findings + prior
-    refs of that severity. Frozen: LEAD.md "Declared prose limits".
+    Lines that start like a finding but name no file, and P3s whose only path is a weak slash-word
+    ("user/owned/member", LUCY-16n7i, on an all-P3 line only), may not outnumber the block's findings + prior
+    refs of that severity; the weak ones alone may not outnumber the block's P3 findings (prior refs never
+    count, W1). On an all-P3 line a weak slash-word is never a note's reference (W2). A line carrying a P1 or
+    P2 binds slash-words as locations, as before. Frozen: LEAD.md "Declared prose limits".
 A `fixed` grade counts only when EVERY review of the newest round (at the current tip) closes it in its prior
 array (C5). Any review of the tip marking it "open" escalates it; a newest-round one with no entry leaves it not
 fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
@@ -81,6 +87,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -535,6 +542,121 @@ def leading_loc(finding):
     return m.group(1) if m else None
 
 
+def ref_loc(finding, files=None):
+    """What a prior ref names a finding by: its leading file:line, else (raised with no line, LUCY-cwpxu)
+    its exact path token (path_only_token), else None."""
+    return leading_loc(finding) or path_only_token(finding, files)
+
+
+# Path-only refs (LUCY-cwpxu attempt 3): exact, no normalisation on either side. A finding is eligible only as
+# "<SEV> <TOKEN> — ..." (or " - "), and a ref names it only by that TOKEN, byte for byte. Anything else, from a
+# wrapper to a link, an anchor or a prefix, is not eligible, so its path-only ref refuses (fail closed).
+PATH_ONLY_FINDING = re.compile(r"^(P[123]) (\S+) [—-] ")
+# Attempt 4 (F): '/'-joined segments, each (group), [param] or plain, the last one a plain file name (a Next.js
+# '[id].tsx' allowed), so a reference link '[src/a.ts][source]' or 'src/a.ts(12)' is not a token.
+PATH_ONLY_TOKEN = re.compile(r"(?:(?:\([\w.-]+\)|\[[\w.-]+\]|[\w.@-]+)/)*(?:\[\w+\]\.)?[\w.@-]+", re.ASCII)
+# A markdown reference definition ("[source]: src/a.ts#L12", "[id]:x", "> - [id]: x") can point a token anywhere:
+# no finding in its file is path-only (attempt 4, F). Any line whose content, past container marks, opens with
+# '[label]:' counts, a label running over lines included.
+REF_DEFINITION = re.compile(r"(?m)^[ \t>*+\-•\d.)]*\[[^\]]+\]:")
+# Where a legacy finding's continuation lines stop (attempt 4, E), besides a finding, section or verdict line: a
+# blank line, a bullet, an ATX heading ('#' then a space, so '#123' is text), a fence (no backtick after a ``` opener,
+# so an inline ```src/a.ts```:12 span is text) or an echo.
+CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#{1,6}(?:\s|$)|`{3,}[^`]*$|~{3,}|REVIEWING:)")
+# The token given a line right after it, past a URL query (src/a.ts?plain=1#L12) and closing marks or a comma
+# (`src/a.ts`:12, **src/a.ts**#L3): ':N', '#N', '#LN', '(N', '(line N'; or, past a dash too, 'line N', 'LN'
+# (attempt 4, E). Matched on squashed text.
+LINED_AFTER = (r"(?:\?[^#\s]{0,40})?(?:[`*_~'\"’”\])>,]{0,4}(?::\d|#l?\d|#l|\((?:lines?)?\d)"
+               r"|[`*_~'\"’”\])>,—–-]{0,4}(?:lines?\d|l\d))")
+
+
+def exact_token(tok):
+    """tok if it may be a path-only ref's file, else None: the token grammar, a letter or digit, no '..', no
+    _emphasis_ wrapper, no tally (P1/P2), and no leading ./ a/ or b/."""
+    ok = (PATH_ONLY_TOKEN.fullmatch(tok) and re.search(r"[A-Za-z0-9]", tok) and ".." not in tok
+          and not TALLY.fullmatch(tok)
+          and not (tok.startswith("_") and tok.endswith("_")) and not tok.startswith(("./", "a/", "b/")))
+    return tok if ok else None
+
+
+def squash(s):
+    """s for matching (attempt 4, G): NFKC, then every whitespace and Unicode format (Cf) character deleted, so a
+    path split across a line or carrying an invisible mark still matches. Lower-cased."""
+    s = unicodedata.normalize("NFKC", s)
+    return "".join(c for c in s if not c.isspace() and unicodedata.category(c) != "Cf").lower()
+
+
+_CONTEXT = [None, None]
+
+
+def finding_context(files):
+    """({finding: [its full texts]}, {findings no path-only ref may name}, {finding: {its full text in each file}})
+    over the inputs (attempt 4, E/F). A legacy finding's full text is its line plus every continuation line up to a
+    blank line, a bullet, the next finding, a heading, a fence or a section (a finding-shaped line that isn't a
+    parsed finding continues it); a block finding's is its text. A file with a markdown reference definition bars
+    all of its findings. The same finding in two files keeps both texts; the per-file variants (squashed, the
+    longest in each file) tell two findings that share a first line apart."""
+    key = tuple((str(x[0]), x[2]) for x in files)
+    if _CONTEXT[0] == key:
+        return _CONTEXT[1]
+    texts, barred, variants = {}, set(), {}
+    for x in files:
+        mine = set(x[1])
+        longest = {o: squash(o) for o in mine}
+        for o in mine:
+            texts.setdefault(o, [o])
+        if REF_DEFINITION.search(x[2]):
+            barred |= mine
+        lines = x[2].splitlines()
+        for i, line in enumerate(lines):
+            if not FINDING.match(line) or clean(line) not in mine:
+                continue
+            j = i + 1
+            while j < len(lines) and not (CONTINUATION_END.match(lines[j]) or SECTION.match(lines[j])
+                                          or VERDICT_HEAD.match(lines[j])
+                                          or (FINDING.match(lines[j]) and clean(lines[j]) in mine)):
+                j += 1
+            if j > i + 1:
+                full = "\n".join(lines[i:j])
+                texts[clean(line)].append(full)
+                if len(squash(full)) > len(longest[clean(line)]):
+                    longest[clean(line)] = squash(full)
+        for o, t in longest.items():
+            variants.setdefault(o, set()).add(t)
+    _CONTEXT[:] = [key, (texts, barred, variants)]
+    return texts, barred, variants
+
+
+def path_only_token(finding, files=None):
+    """The exact path token of a finding raised with no line ("P3 tests/a.test.ts — ..."), else None. Given the
+    inputs, also None when its file bars it (REF_DEFINITION) or any of its full texts gives the token a line after
+    all (LINED_AFTER: ':N', '#L', '(N' and the like, right after it, attempt 4, E)."""
+    m = PATH_ONLY_FINDING.match(finding)
+    tok = exact_token(m.group(2)) if m else None
+    if tok and files is not None:
+        texts, barred, _ = finding_context(files)
+        lined = re.compile(re.escape(squash(tok)) + LINED_AFTER)
+        if finding in barred or any(lined.search(squash(t)) for t in texts.get(finding, [finding])):
+            return None
+    return tok
+
+
+def path_needles(tok):
+    """What another finding naming tok would contain: the token and its file name, each also with route marks
+    ()[] dropped and edge punctuation trimmed. Squashed; extra needles only add escalations."""
+    out = set()
+    for t in (tok, tok.rsplit("/", 1)[-1]):
+        out |= {squash(t), squash(re.sub(r"[()\[\]]", "", t).strip(".-_@"))}
+    return out
+
+
+def names_path(o, tok, files=None):
+    """Finding o names tok anywhere (G3, LUCY-cwpxu): a plain substring of any of its full texts (attempt 4, E),
+    squashed, so a path split across a line or a URL still counts."""
+    texts = finding_context(files)[0].get(o, [o]) if files is not None else [o]
+    return any(n in squash(t) for t in texts for n in path_needles(tok))
+
+
 def decl_words(lines):
     """Verdict words declared in prose, ignoring a canonical finding's own description."""
     words = set()
@@ -643,6 +765,8 @@ def structured_findings(p, block):
 # A finding's leading location in block text, past optional `code` / **bold** markup.
 LEADING_LOC = re.compile(r"^[`*]*(" + LOC.pattern + r")")
 PRIOR_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(" + LOC.pattern + r")$")
+# A path-only ref, for a finding raised with no line number (LUCY-cwpxu): its token is exact_token's, byte for byte.
+PRIOR_PATH_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(\S+)$")
 
 
 def structured_prior(p, data):
@@ -661,14 +785,19 @@ def structured_prior(p, data):
             raise ValueError(f"{p}: {bad}")
         ref = norm(e["ref"]) if isinstance(e["ref"], str) else ""
         m = PRIOR_REF.match(ref)
+        loc = m.group(3) if m else None
         if not m:
-            raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>'")
+            m = PRIOR_PATH_REF.match(ref)
+            loc = exact_token(m.group(3)) if m else None
+            if not loc:
+                raise ValueError(f"{p}: {what} ref {ref!r} is not 'r<N> P<1-3> <file>:<line>' (or 'r<N> P<1-3> "
+                                 "<file>' for a finding raised with no line, the file exactly as that finding wrote it)")
         status, ev = e["status"], e["evidence"]
         if status not in ("closed", "open"):
             raise ValueError(f"{p}: {what} status {status!r} is not \"closed\" or \"open\"")
         if not isinstance(ev, str) or not norm(ev) or (status == "closed" and len(norm(ev)) < 8):
             raise ValueError(f"{p}: {what} needs evidence (how it was checked)")
-        key = (int(m.group(1)), m.group(2), m.group(3))
+        key = (int(m.group(1)), m.group(2), loc)
         if out.get(key, status) != status:
             raise ValueError(f"{p}: review-verdict prior marks {ref} both closed and open")
         out[key] = status
@@ -808,7 +937,8 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
 
 # A repo path in prose (LUCY-e3opf G5 AMENDED, B2), optional :line or :line-line, after a space or "(":
 #  - any token with a slash: "lib/x.ts", "services/worker", "app/(dashboard)/page.tsx:12", "~/x/lib/pay.ts",
-#    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path too: a false refusal, failing closed. A token whose
+#    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path token too; weak_path then reads it as a slash-word
+#    that locates nothing on an all-P3 line, its severity then a weak claim (LUCY-16n7i W1). A token whose
 #    every segment is a severity, a number or a hazard id ("P1/P2/P3", "9/10", "H-U1/H-U3") is a tally,
 #    never a file (TALLY);
 #  - a name with a 2-10 character extension starting with a letter: "tokens.ts", "schema.prisma",
@@ -834,6 +964,46 @@ def repo_paths(line):
     return [m for m in PATH_TOKEN.finditer(line) if not TALLY.fullmatch(m.group(1))]
 
 
+# Top-level dirs a slash-word may start with and still be a repo path (LUCY-16n7i). The checker never sees
+# the reviewed repo (its inputs live in Ops/reviews), so this is a fixed list: the AestheticcNext and ~/.claude
+# top-level dirs plus common app roots. Matched case-insensitively. A word listed here stays a strong path,
+# so a bigger list only fails closed.
+KNOWN_TOP_DIRS = frozenset("""
+    __tests__ aestheticc-zapier agents app archived attached_assets bin cache clinic-voice-service commands
+    components config content contexts csai docs docs-dev drizzle e2e home-images hooks invariants launchd
+    learning lib mcp-tiers migrations mobile mobile-portal ops pages prisma product prompts public references
+    scheduled-tasks scripts services skills skills-archived src strategy styles supabase templates tests
+    types utils voice-service
+""".split())
+_WORD = re.compile(r"[A-Za-z][A-Za-z-]*")
+# A slash-word must be a whole prose token: whitespace or quoting/bracketing before it, and whitespace,
+# punctuation or a sentence-ending "." after it. Anything else ("reports/patient+export.sql", "x=a/b") means
+# PATH_TOKEN stopped inside a longer token, which stays strong (own-gate r2).
+_WEAK_BEFORE = re.compile(r"(?:^|[\s(\[{\"'`*])$")
+_WEAK_AFTER = re.compile(r"(?:$|[\s,;:!?)\]}\"'`*]|\.(?:$|[\s)\]}\"'`*]))")
+
+
+def weak_path(m):
+    """True when a repo_paths match is a slash-word that may be prose ("user/owned/member", "and/or"), not a
+    file (LUCY-16n7i): no :line, two or more segments, every segment a plain word (letters and hyphens only:
+    no dot, digit, underscore, (group), [param], @, ~, or empty segment from a leading or trailing /), a
+    first segment that is not a known top-level dir, and a whole prose token (_WEAK_BEFORE/_WEAK_AFTER).
+    Anything else is a strong path."""
+    segs = m.group(1).split("/")
+    return (not m.group(2) and len(segs) > 1 and all(_WORD.fullmatch(s) for s in segs)
+            and segs[0].lower() not in KNOWN_TOP_DIRS
+            and bool(_WEAK_BEFORE.search(m.string[:m.start()])) and bool(_WEAK_AFTER.match(m.string, m.end())))
+
+
+def p3_relief(line, *own):
+    """True when a line may get the slash-word relief (LUCY-16n7i attempt 2, own-gate r2 lead): every path on
+    it is a weak slash-word and every severity on it (`own`: an earlier-round note's "rN Px", which CLAIM_SEV
+    reads as a count) is P3. A line carrying a P1 or P2 is bound exactly as on main, slash-words as locations,
+    so a P1/P2 can never fail open relative to main; a P3 never blocks landing (the m5lm7 shape)."""
+    return (all(weak_path(m) for m in repo_paths(line))
+            and all(s == "P3" for s in list(own) + [m.group(0) for m in CLAIM_SEV.finditer(line)]))
+
+
 # A severity standing alone: not the P1 in H-P1 or H-P0/P1, nor a count ("0 P1").
 CLAIM_SEV = re.compile(r"(?<![\w/-])(?<!\d\s)(?<!\dx\s)P[123]\b")
 # A note on an earlier round's finding: "- r1 P3 lib/x.ts:172 + :206-241 open: ...".
@@ -852,14 +1022,21 @@ def claim_sevs(line):
     return list(CLAIM_SEV.finditer(line))
 
 
-def line_claims(line, skip=None):
-    """[(severity, path, line or None)] a prose line claims: each standalone severity with the first
-    path after it (before the next severity), else the nearest path before it. No path, no claim. The
-    severity token starting at `skip` (an earlier-round note's own reference) is not a claim."""
+def line_claims(line, skip=None, relief=True):
+    """([(severity, path, line or None)], [severity]) for a prose line: each standalone severity with the
+    first path after it (before the next severity), else the nearest path before it. No path, no claim.
+    LUCY-16n7i: a line whose every path is a weak slash-word (weak_path) and whose every severity is P3
+    locates nothing, and its severities come back in the second list, as weak claims (W1), never ignored. A line with any strong path is
+    bound exactly as before, slash-words included, so a slash-word there still refuses as a location: no
+    severity on a mixed line borrows or escapes another path (own-gate r1/r2). relief=False (a fragment of a
+    line that has a strong path elsewhere) binds as before too. The severity token starting at `skip` (an
+    earlier-round note's own reference) is not a claim."""
     sevs = claim_sevs(line)
     paths = repo_paths(line)
     if not sevs or not paths:
-        return []
+        return [], []
+    if relief and all(weak_path(m) for m in paths) and all(s.group(0) == "P3" for s in sevs):
+        return [], [s.group(0) for s in sevs if s.start() != skip]
     out = []
     for k, s in enumerate(sevs):
         if s.start() == skip:
@@ -869,7 +1046,7 @@ def line_claims(line, skip=None):
         before = [m for m in paths if m.end() <= s.start()]
         m = after[0] if after else (before[-1] if before else paths[0])
         out.append((s.group(0), m.group(1), m.group(2)))
-    return out
+    return out, []
 
 
 def same_file(a, b):
@@ -914,37 +1091,70 @@ def prose_claim_errors(p, lines, meta, prior):
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
     unlocated = {"P1": [], "P2": [], "P3": []}
+    weak_claims = {"P1": [], "P2": [], "P3": []}
     for line in lines:
         if clean(line) in verbatim:
             continue
-        claims = []
+        claims, own = [], None
         note = EARLIER_NOTE.match(line)
+        # LUCY-16n7i W2: on an all-P3 line (p3_relief) a weak slash-word is never a note's reference: the note
+        # is read as a plain prose line, so every severity on it (its own "rN P3" included, which CLAIM_SEV
+        # reads as a count) is a weak claim, counted against block findings only (W1). A note carrying a P1 or
+        # P2 is read exactly as on main.
+        if note and repo_paths(note.group(3)) and p3_relief(line, note.group(2)):
+            weak_claims[note.group(2)].append(line.strip()[:100])
+            own, note = note.start(2), None  # counted once here, skipped below ("r1  P3": CLAIM_SEV reads it)
         if note:
             ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
-            claims = line_claims(tail)
+            # LUCY-16n7i: the slash-word relief is per whole line (own-gate r3) and all-P3 only, so a note whose
+            # reference names a strong path, or that carries a P1 or P2, binds its tail exactly as on main.
+            relief = p3_relief(line, note.group(2))
+            claims, weak = line_claims(tail, relief=relief)
             # The note's status word is never read: prose neither grades nor disputes (LUCY-e3opf B1, the
             # block is authoritative). Its reference, and any path-free severity in its text, names round
             # N's finding, so the block carries it or the raising review is an input (orphan_open_priors).
+            # With no reference, a slash-word severity is a weak claim (LUCY-16n7i W1).
             refs = [note.group(2)] if ref else []
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
+            else:
+                for sev in weak:
+                    weak_claims[sev].append(line.strip()[:100])
             for sev in refs:
                 if claim_error(sev, ref.group(1), ref.group(2), carried):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
-            claims = line_claims(line)
+            claims, weak = line_claims(line, skip=own)
             start = FINDING_START.match(line) or EXPLICIT_LABEL.match(line.lstrip(" -*•#>"))
+            # A P3 whose only path is a weak slash-word ("P3 user/owned/member gap") is a weak claim: counted
+            # against the block's findings below, never ignored (LUCY-16n7i). The line's starting severity is
+            # counted once.
+            for sev in weak:
+                weak_claims[sev].append(line.strip()[:100])
             if start and not claims:
-                unlocated[re.search(r"P[123]", start.group(0)).group(0)].append(line.strip()[:100])
+                first = re.search(r"P[123]", start.group(0)).group(0)
+                if first not in weak:
+                    unlocated[first].append(line.strip()[:100])
         for sev, path, ln in claims:
             why = claim_error(sev, path, ln, targets)
             if why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
+    # LUCY-16n7i W1: a weak claim may be a real extensionless path ("workers/billing"), so it needs a block
+    # FINDING of its severity, one each, never a prior ref: an unrelated closed prior must not absorb a new
+    # prose finding. Weak claims also join the lines naming no file in the findings + prior refs count.
+    # Only P3 lines get the relief (line_claims), so only P3 weak claims reach this count.
+    for sev, found in weak_claims.items():
+        have = sum(f["sev"] == sev for f in meta)
+        if len(found) > have:
+            raise ValueError(f"{p}: {len(found)} prose {sev} claim(s) name only a slash-word, not a file, and the "
+                             f"review-verdict block has {have} {sev} finding(s) (prior refs don't count): put "
+                             f"every finding in the block with its file_line: {found[0]}")
     for sev, found in unlocated.items():
         have = sum(f["sev"] == sev for f in meta) + sum(k[1] == sev for k in prior)
+        found = found + weak_claims[sev]
         if len(found) > have:
             raise ValueError(f"{p}: {len(found)} prose line(s) start with {sev} but name no file, and the "
                              f"review-verdict block has {have} {sev} finding(s) or prior ref(s): put every "
@@ -1093,7 +1303,7 @@ def tip_statuses(files, tip, rounds, sev, loc):
 def dispute(src, files):
     """Why reviews of the current tip disagree on an earlier finding (one closes a round that raised
     it, one keeps a round open), else None. Checked whatever the lead graded it (LUCY-e3opf)."""
-    loc = leading_loc(src)
+    loc = ref_loc(src, files)
     tip = current_tip(files)[0] if files else ""
     if not loc or not tip:
         return None
@@ -1132,7 +1342,8 @@ def orphan_open_priors(files, items=()):
                             "file_line (the legacy {severity, text} shape): re-run that seat with the strict "
                             "review-verdict shape")
         for (r, sev, loc), st in priors[x[0]].items():
-            if not any(round_of(y[0]) == r and any(o[:2] == sev and leading_loc(o) == loc
+            # Exact: a path-only ref names only a finding raised with no line there (LUCY-cwpxu).
+            if not any(round_of(y[0]) == r and any(o[:2] == sev and ref_loc(o, files) == loc
                                                                     for o in y[1]) for y in files):
                 errs.append(f"{Path(x[0]).name}: prior ref r{r} {sev} {loc} ({st}) matches no round-{r} finding "
                             f"in the --verdict reviews: pass the review that raised it so the lead covers it")
@@ -1161,8 +1372,27 @@ def finding_targets(x):
 
 def ref_ambiguity(files, r, sev, loc):
     """The distinct round-r findings a ref 'r<r> <sev> <loc>' could name (LUCY-e3opf G3). The same text
-    in two seats is one finding; two texts are two, and one ref can never close both."""
-    return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
+    in two seats is one finding; two texts are two, and one ref can never close both.
+
+    A path-only ref (LUCY-cwpxu) names the one round-r finding raised with exactly that token. Any other finding,
+    in any round, of any severity, that names the token or its file name anywhere (names_path) may be the same
+    defect, so it comes back alongside: fail closed, noise escalations accepted."""
+    if path_parts(loc)[1] is not None:
+        return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
+    named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o, files) == loc}
+    if len(named) != 1:
+        return sorted(named)
+    # (H, attempt 5): two findings in one review raised at this token, the same first line twice included, may be
+    # two defects. Counted from each file's own finding list, never deduped by first line: one ref can't close both.
+    same = named | {o for y in files for o in y[1] if names_path(o, loc, files)}
+    for y in files:
+        at = [o for o in y[1] if (m := PATH_ONLY_FINDING.match(o)) and squash(m.group(2)) == squash(loc)]
+        if len(at) > 1:
+            return sorted(same | set(at)) + [f"{next(iter(named))} ({len(at)} findings at {loc} in {Path(y[0]).name})"]
+    # One first line, continued differently in two seats, may be two findings: one ref can't close both.
+    if len(finding_context(files)[2].get(next(iter(named)), ())) > 1:
+        return sorted(named) + [f"{next(iter(named))} (continued differently in another review)"]
+    return sorted(named | {o for y in files for o in y[1] if names_path(o, loc, files)})
 
 
 def ambiguous_refs(files):
@@ -1190,6 +1420,8 @@ def every_seat_closes(src, files):
     mixed one keeps the escalation. fixed_errors still runs first: any review of the tip (an earlier round's
     included) marking it open is a dispute (escalated), and one raising it again refuses the run. The roster
     and statuses are fixed_errors' (B1, C5)."""
+    # leading_loc, never ref_loc: a path-only ref (LUCY-cwpxu) has no location every seat can speak for, so its
+    # ambiguity always escalates.
     loc, sev = leading_loc(src), src[:2]
     tip, newest = current_tip(files) if files else ("", None)
     rounds = sorted({round_of(x[0]) for x in files if src in x[1]})
@@ -1268,9 +1500,9 @@ def fixed_errors(tag, f, src, files):
         if r_later is None or r_x is None or r_later <= r_x:
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
-    loc, sev = leading_loc(src), src[:2]
+    loc, sev = ref_loc(src, files), src[:2]
     if not loc:
-        return [f"{tag}: fixed needs the finding to start with its file:line"]
+        return [f"{tag}: fixed needs the finding to start with its file:line (or, raised with no line, its file)"]
     # The current tip is what the newest review (by round) reviewed. A confirmation of an
     # older commit says nothing about the code that would land.
     tip, newest = current_tip(files)
@@ -1283,6 +1515,7 @@ def fixed_errors(tag, f, src, files):
     at_tip = [x for x in files if same_commit(echo_of(x[2]), tip)]
     for x in at_tip + [y for y in files if is_builder_evidence(y[0]) and builder_at_tip(y, files)]:
         for other in x[1]:
+            # A path-only loc (LUCY-cwpxu) never matches here: a tip finding naming it escalates (ref_ambiguity).
             if other[:2] == sev and loc in {leading_loc(other)} | {o.group(0) for o in LOC.finditer(other)}:
                 return [f"{tag}: {Path(x[0]).name} raises {sev} at {loc} again at the current tip: not fixed"]
     # Raised in several rounds: fixed_by must close every one of them.
