@@ -1341,3 +1341,40 @@ class CwpxuReal3bm73R7(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn(f'F8: fixed_by REVIEW_3bm73_astra-xhigh_r7_2026-10-24.md has no review-verdict prior entry '
                       f'{{"ref": "{self.PATH_REF}", "status": "closed"}}', out)
+
+
+class CwpxuWholeLeadingToken(unittest.TestCase):
+    """Own-gate r1 F1 (:516): the path is the whole leading token, never a prefix; dotfile names count."""
+    DOT = "P3 voice-service/.dockerignore — the build context ships the test fixtures — exclude them"
+
+    def test_ref_loc_takes_the_whole_token(self):
+        self.assertEqual(chk.ref_loc(self.DOT), "voice-service/.dockerignore")
+        self.assertEqual(chk.ref_loc("P3 `mobile/.gitignore` — x"), "mobile/.gitignore")
+        self.assertEqual(chk.ref_loc("P3 **tests/a.test.ts** — x"), "tests/a.test.ts")
+        self.assertIsNone(chk.ref_loc("P2 lib/a+foo.ts:12 — x"))
+        self.assertIsNone(chk.ref_loc("P2 lib/ — x"))
+        self.assertIsNone(chk.bare_path("voice-service/"))
+
+    def test_dotfile_line_less_finding_closed_by_its_path(self):
+        code, out = run_named(fixed_lead(self.DOT, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(self.DOT), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 voice-service/.dockerignore", "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+    def test_directory_ref_refused(self):
+        code, out = run_named(fixed_lead(self.DOT, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(self.DOT), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 voice-service/", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_prefix_ref_never_names_a_lined_finding(self):
+        src = "P2 lib/a+foo.ts:12 — retry charges twice — guard"
+        code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P2 lib/a", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("prior ref r1 P2 lib/a (closed) matches no round-1 finding", out)
+        self.assertNotIn("FIXED=", out)

@@ -509,12 +509,13 @@ def leading_loc(finding):
 
 def ref_loc(finding):
     """What a prior ref names a finding by: its leading file:line, else (raised with no line, LUCY-cwpxu)
-    its leading bare path, else None."""
+    its leading bare path, else None. The whole leading token must be the path: a prefix never is, so
+    'lib/a+foo.ts:12' and a cut-short 'mobile/' name nothing (fail closed)."""
     loc = leading_loc(finding)
     if loc:
         return loc
-    m = PATH_TOKEN.match(finding[3:].lstrip("`*"))
-    return bare_path(m.group(1)) if m and m.group(2) is None else None
+    m = re.match(r"[`*]*([^\s`*]+)", finding[3:])
+    return bare_path(m.group(1).rstrip(",;")) if m else None
 
 
 def ref_candidates(o, sev, loc):
@@ -641,9 +642,14 @@ PRIOR_PATH_REF = re.compile(r"^r(\d+)\s+(P[123])\s+(\S+)$")
 
 
 def bare_path(token):
-    """The token if it is a repo path with no :line (PATH_TOKEN, less tallies), else None."""
+    """The token if it is a repo path with no :line (PATH_TOKEN, less tallies, or one ending in a dotfile
+    name such as mobile/.gitignore), else None. A directory ('lib/') is not a finding's file."""
+    if token.endswith("/") or TALLY.fullmatch(token):
+        return None
     m = PATH_TOKEN.fullmatch(token)
-    return token if m and m.group(2) is None and not TALLY.fullmatch(token) else None
+    if m and m.group(2) is None:
+        return token
+    return token if re.fullmatch(rf"(?:~?/)?(?:{_SEG}/)*\.[\w-](?:[\w.-]*[\w-])?", token) else None
 
 
 def structured_prior(p, data):
