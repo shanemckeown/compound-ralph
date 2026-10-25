@@ -1679,3 +1679,53 @@ class CwpxuAttempt4OwnGateR2(CwpxuAttempt4):
                 self.assertEqual(code, 0, out)
                 self.assertIn("BLOCKING=0 ESCALATE=0", out)
                 self.assertIn("FIXED=2", out)
+
+
+class CwpxuAttempt5SameFileShare(CwpxuAttempt4):
+    """Attempt 5 (Orchestrator23 ruling (H), after independent r4 :619): two or more findings in any one review share
+    a path-only token, so a path-only ref to it escalates. Findings are counted from each file's own list, never
+    deduped by first line, so an identical first line continued differently in one file is two findings."""
+    R4 = "P3 src/a.ts — Missing regression coverage for the contraindication checker"
+
+    def one_file(self, *bullets, lead_srcs=None, extra_tip=()):
+        return run_named(leads_for(lead_srcs or [self.R4, self.R4], self.BY), [
+            ("REVIEW_x_sonnet_r1_a.md", self.legacy_r1(*bullets), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 src/a.ts", "closed")]), 2000), *extra_tip])
+
+    def test_r4_repro_identical_first_line_differing_continuations_escalates(self):
+        """The independent r4 repro: one file, '- P3 src/a.ts — Missing regression coverage…' twice with different
+        continuations, one 'r1 P3 src/a.ts' closure: was BLOCKING=0 ESCALATE=0 FIXED=2, now escalates."""
+        for a, b in (("\n  Add a timeout regression test.", "\n  Add an empty-response regression test."),
+                     ("\n  Add a timeout regression test.", "\n  Add a timeout regression test."),
+                     ("", "\n  Add an empty-response regression test."), ("", "")):
+            with self.subTest(a=a, b=b):
+                self.assert_escalated(self.one_file(self.R4 + a, self.R4 + b), n=2)
+
+    def test_two_closing_seats_still_escalate(self):
+        """Every newest seat closing it (LUCY-unykv) never forgives a path-only ambiguity."""
+        self.assert_escalated(self.one_file(self.R4 + "\n  on a timeout", self.R4 + "\n  on an empty response",
+                                            extra_tip=[("REVIEW_x_opus_r2_b.md",
+                                                        r2_file(prior=[("r1 P3 src/a.ts", "closed")]), 2100)]), n=2)
+
+    def test_same_token_other_wording_or_severity_in_one_file_escalates(self):
+        """Different first lines at one token in one file: escalates whatever the other's severity."""
+        for other in ("P3 src/a.ts — a second, different gap", "P2 src/a.ts — a second, different gap"):
+            with self.subTest(other=other):
+                self.assert_escalated(self.twin_file(other), n=2)
+
+    def twin_file(self, other):
+        extra = self.noted(other)
+        if other.startswith("P2"):
+            extra[0].update(verdict="consider", follow_up="src/a.ts second gap")
+        return run_named(fixed_lead(self.R4, self.BY, extra), [
+            ("REVIEW_x_sonnet_r1_a.md", self.legacy_r1(self.R4, other), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 src/a.ts", "closed")]), 2000)])
+
+    def test_format_mark_does_not_hide_the_twin(self):
+        """The (G) step applies: an invisible format character in the twin's token still counts as the token. (A
+        different first line is also caught by names_path, so this pins the outcome, not which route gives it.)"""
+        self.assert_escalated(self.twin_file("P3 src/a⁣.ts — a second, different gap"), n=2)
+
+    def test_one_finding_per_file_still_closes(self):
+        """Control: one finding at the token in one file (the 3bm73 shape) still closes."""
+        self.assert_closed(self.close(self.R4, "src/a.ts"))

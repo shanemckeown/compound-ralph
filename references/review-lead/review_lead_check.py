@@ -1298,6 +1298,13 @@ def ref_ambiguity(files, r, sev, loc):
     named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o, files) == loc}
     if len(named) != 1:
         return sorted(named)
+    # (H, attempt 5): two findings in one review raised at this token, the same first line twice included, may be
+    # two defects. Counted from each file's own finding list, never deduped by first line: one ref can't close both.
+    same = named | {o for y in files for o in y[1] if names_path(o, loc, files)}
+    for y in files:
+        at = [o for o in y[1] if (m := PATH_ONLY_FINDING.match(o)) and squash(m.group(2)) == squash(loc)]
+        if len(at) > 1:
+            return sorted(same | set(at)) + [f"{next(iter(named))} ({len(at)} findings at {loc} in {Path(y[0]).name})"]
     # One first line, continued differently in two seats, may be two findings: one ref can't close both.
     if len(finding_context(files)[2].get(next(iter(named)), ())) > 1:
         return sorted(named) + [f"{next(iter(named))} (continued differently in another review)"]
