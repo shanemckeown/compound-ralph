@@ -9,6 +9,7 @@ Run: ~/.claude/skills/land-batch/.venv/bin/python3 -m pytest scripts/git-hooks/ 
 import json
 import os
 import subprocess
+import sys
 import textwrap
 
 from test_reference_transaction import REAL_ROOT, Repo, commit_files
@@ -172,3 +173,18 @@ def test_e1_land_gate_remote_reaches_tier_gates_both_ways(tmp_path):
         assert res.returncode == 0, res.stderr
         seen[value] = json.loads(res.stdout)
     assert seen == {"1": True, "0": False}
+
+
+# r8 independent P2: a pg-lane-lock holder whose child runs a gate that takes the same lock
+# re-enters it. Dropping PG_LANE_LOCK_TOKEN made the nested lock wait on its own holder forever.
+def test_e1_nested_pg_lane_lock_reenters_through_run_gate(tmp_path):
+    repo = Repo(tmp_path)
+    lock = "scripts/pg-lane-lock.py"
+    commit_files(repo, {lock: (os.path.join(REAL_ROOT, lock),)})
+    env = dict(repo.env, PG_LANE_LOCK_DIR=str(tmp_path / "fleet"))
+    env.pop("PG_LANE_LOCK_TOKEN", None)
+    res = subprocess.run([sys.executable, "-I", str(repo.root / lock), "--",
+                          repo.run_gate, "--fail-exit", "2", lock, "--", "true"],
+                         cwd=repo.root, env=env, capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert "running nested lane directly" in res.stderr

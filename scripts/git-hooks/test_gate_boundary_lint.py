@@ -88,6 +88,15 @@ ENV_READ_RES = (re.compile(r"""environ\.get\(\s*["'](\w+)["']"""),
                 # (os.environ if env is None else env).get("X"), env["X"]: tier_gates.py:61
                 re.compile(r"""\.get\(\s*["']([A-Z][A-Z0-9_]+)["']"""),
                 re.compile(r"""(?:env|environ|environment)\[\s*["']([A-Z][A-Z0-9_]+)["']"""))
+# The same reads through a module constant: TOKEN_ENV = "PG_LANE_LOCK_TOKEN" then
+# os.environ.get(TOKEN_ENV) (pg-lane-lock.py:98, missed by r8's literal-only lint).
+CONST_RE = re.compile(r"""^[ \t]*(?:(?:const|let|var|export)\s+)*([A-Za-z_]\w*)\s*=\s*"""
+                      r"""["']([A-Z][A-Z0-9_]+)["']\s*;?\s*(?:#.*)?$""", re.M)
+ENV_READ_BY_NAME_RES = (
+    re.compile(r"""(?:environ|env|environment)\.get\(\s*([A-Za-z_]\w*)\s*[,)]"""),
+    re.compile(r"""(?:environ|env|environment)\[\s*([A-Za-z_]\w*)\s*\]"""),
+    re.compile(r"""getenv\(\s*([A-Za-z_]\w*)\s*[,)]"""),
+    re.compile(r"process\.env\[\s*([A-Za-z_]\w*)\s*\]"))
 # Upper-case keys the wider patterns find that are not environment variables.
 NOT_ENV = {"HEAD": "a dict key in discover.sh's inline python (ref name), not an env read"}
 
@@ -267,6 +276,15 @@ def load_run_gate():
 ENV_NAME_RE = re.compile(r"[A-Z_]*[A-Z][A-Z0-9_]*")  # env style; lowercase is a shell local
 
 
+def env_reads_in(text):
+    """Env names one file reads: literal keys, plus keys named by a NAME = 'LITERAL' constant."""
+    found = {name for r in ENV_READ_RES for name in r.findall(text)}
+    consts = dict(CONST_RE.findall(text))
+    found |= {consts[ident] for r in ENV_READ_BY_NAME_RES for ident in r.findall(text)
+              if ident in consts}
+    return {n for n in found if ENV_NAME_RE.fullmatch(n) and n not in NOT_ENV}
+
+
 def env_reads(root=REAL_ROOT):
     names = {}
     for rel in exported_code_files(root):
@@ -274,21 +292,38 @@ def env_reads(root=REAL_ROOT):
             continue  # a test's own fakes, never run by a gate
         with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        for r in ENV_READ_RES:
-            for name in r.findall(text):
-                if ENV_NAME_RE.fullmatch(name) and name not in NOT_ENV:
-                    names.setdefault(name, set()).add(rel)
+        for name in env_reads_in(text):
+            names.setdefault(name, set()).add(rel)
     return names
+
+
+def undecided_env(rg, names):
+    return {n: sorted(r) for n, r in names.items()
+            if not rg.env_allowed(n) and n not in rg.ENV_DROPPED}
 
 
 def test_e1_lint_every_env_var_a_gate_reads_is_allowed_or_dropped():
     rg = load_run_gate()
     names = env_reads()
     assert {"PGLITE_ENTRY", "LAND_BATCH_PGLITE_TARBALL", "LAND_BATCH_REF_SNAPSHOT",
-            "LAND_GATE_REMOTE"} <= set(names)
-    undecided = {n: sorted(r) for n, r in names.items()
-                 if not rg.env_allowed(n) and n not in rg.ENV_DROPPED}
-    assert undecided == {}
+            "LAND_GATE_REMOTE", "PG_LANE_LOCK_TOKEN"} <= set(names)
+    assert undecided_env(rg, names) == {}
+
+
+@pytest.mark.parametrize("source", [
+    'TOKEN_ENV = "P122J_UNLISTED_TOKEN"\nos.environ.get(TOKEN_ENV)\n',
+    'TOKEN_ENV = "P122J_UNLISTED_TOKEN"\nx = os.environ[TOKEN_ENV]\n',
+    'TOKEN_ENV = "P122J_UNLISTED_TOKEN"  # why\nos.getenv(TOKEN_ENV, "")\n',
+    'const TOKEN_ENV = "P122J_UNLISTED_TOKEN";\nprocess.env[TOKEN_ENV];\n',
+])
+def test_e1_lint_fails_a_constant_named_read_missing_from_the_allowlist(source):
+    rg = load_run_gate()
+    assert env_reads_in(source) == {"P122J_UNLISTED_TOKEN"}
+    assert undecided_env(rg, {"P122J_UNLISTED_TOKEN": {"x.py"}}) == {"P122J_UNLISTED_TOKEN": ["x.py"]}
+
+
+def test_e1_lint_ignores_a_name_that_is_not_a_string_constant():
+    assert env_reads_in("TOKEN_ENV = make_name()\nos.environ.get(TOKEN_ENV)\n") == set()
 
 
 def test_e1_lint_no_dropped_or_code_naming_var_is_allowed():
