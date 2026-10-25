@@ -146,3 +146,29 @@ def test_e4_morning_report_archive_only_runs_from_the_export(tmp_path):
     runtime = home / ".claude/hooks/night-batch"
     assert (runtime / "logs/morning-report.log").is_file()
     assert (runtime / "state").is_dir()
+
+
+# E1 own-gate r1: a lander variable a gate needs still crosses (LAND_GATE_REMOTE, SKILL.md:727)
+REMOTE_PROBE = "skills/land-batch/bin/remote_probe.py"
+REMOTE_PROBE_SOURCE = textwrap.dedent("""\
+    import importlib.util, json, os
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("tg", os.path.join(here, "tier_gates.py"))
+    tg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tg)
+    print(json.dumps(tg.plan(["scripts/migrate.mjs"]).get("cloudbuild_remote", False)))
+""")
+
+
+def test_e1_land_gate_remote_reaches_tier_gates_both_ways(tmp_path):
+    repo = Repo(tmp_path)
+    commit_files(repo, {"skills/land-batch/bin/tier_gates.py":
+                        (os.path.join(REAL_ROOT, "skills/land-batch/bin/tier_gates.py"),),
+                        "scripts/risk_tier.py": (os.path.join(REAL_ROOT, "scripts/risk_tier.py"),),
+                        REMOTE_PROBE: REMOTE_PROBE_SOURCE})
+    seen = {}
+    for value in ("1", "0"):
+        res = repo.gate(REMOTE_PROBE, env=dict(repo.env, LAND_GATE_REMOTE=value))
+        assert res.returncode == 0, res.stderr
+        seen[value] = json.loads(res.stdout)
+    assert seen == {"1": True, "0": False}

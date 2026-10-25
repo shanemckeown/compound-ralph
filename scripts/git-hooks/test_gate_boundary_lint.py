@@ -84,7 +84,12 @@ ENV_READ_RES = (re.compile(r"""environ\.get\(\s*["'](\w+)["']"""),
                 re.compile(r"""environ\[\s*["'](\w+)["']\s*\]"""),
                 re.compile(r"""getenv\(\s*["'](\w+)["']"""),
                 re.compile(r"process\.env\.(\w+)"),
-                re.compile(r"\$\{(\w+):?[-=]"))
+                re.compile(r"\$\{(\w+):?[-=]"),
+                # (os.environ if env is None else env).get("X"), env["X"]: tier_gates.py:61
+                re.compile(r"""\.get\(\s*["']([A-Z][A-Z0-9_]+)["']"""),
+                re.compile(r"""(?:env|environ|environment)\[\s*["']([A-Z][A-Z0-9_]+)["']"""))
+# Upper-case keys the wider patterns find that are not environment variables.
+NOT_ENV = {"HEAD": "a dict key in discover.sh's inline python (ref name), not an env read"}
 
 CLAUDE_RE = re.compile(r"(?<![\w.-])\.claude(?![\w-])")
 TAIL_SLASH_RE = re.compile(r"/([\w.*{}$@/-]*)")
@@ -271,7 +276,7 @@ def env_reads(root=REAL_ROOT):
             text = fh.read()
         for r in ENV_READ_RES:
             for name in r.findall(text):
-                if ENV_NAME_RE.fullmatch(name):
+                if ENV_NAME_RE.fullmatch(name) and name not in NOT_ENV:
                     names.setdefault(name, set()).add(rel)
     return names
 
@@ -279,7 +284,8 @@ def env_reads(root=REAL_ROOT):
 def test_e1_lint_every_env_var_a_gate_reads_is_allowed_or_dropped():
     rg = load_run_gate()
     names = env_reads()
-    assert {"PGLITE_ENTRY", "LAND_BATCH_PGLITE_TARBALL", "LAND_BATCH_REF_SNAPSHOT"} <= set(names)
+    assert {"PGLITE_ENTRY", "LAND_BATCH_PGLITE_TARBALL", "LAND_BATCH_REF_SNAPSHOT",
+            "LAND_GATE_REMOTE"} <= set(names)
     undecided = {n: sorted(r) for n, r in names.items()
                  if not rg.env_allowed(n) and n not in rg.ENV_DROPPED}
     assert undecided == {}
