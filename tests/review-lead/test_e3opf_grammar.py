@@ -1633,3 +1633,34 @@ class CwpxuAttempt4OwnGateR1(CwpxuAttempt4):
                                                raise_r1=self.legacy_r1(route, tail=f"\n{definition}\n")))
         self.assert_closed(self.close(route, "pages/clients/[id].tsx",
                                       raise_r1=self.legacy_r1(route, tail="\nthe [id] segment is the client id\n")))
+
+
+class CwpxuAttempt4OwnGateR2(CwpxuAttempt4):
+    """Attempt 4 own-gate r2 (Astra xhigh): an inline ```span``` is not a fence, and one first line continued
+    differently in two seats is two findings a single path-only ref can't close."""
+
+    def test_inline_triple_backtick_span_keeps_the_line(self):
+        for cont in ("```src/a.ts```:12", "```src/a.ts``` (line 12)"):
+            with self.subTest(cont=cont):
+                self.assert_refused(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A + "\n" + cont)))
+        # A real fence still ends the finding: its body is not the finding's text.
+        self.assert_closed(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A, tail="```ts\nsrc/a.ts:12\n```\n")))
+
+    def seats(self, cont_a, cont_b):
+        return run_named(leads_for([self.A, self.A]), [
+            ("REVIEW_x_sonnet_r1_a.md", self.legacy_r1(self.A + cont_a), 1000),
+            ("REVIEW_x_opus_r1_a.md", self.legacy_r1(self.A + cont_b), 1100),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 src/a.ts", "closed")]), 2000)])
+
+    def test_differing_continuations_escalate(self):
+        for a, b in (("\n  on a timeout", "\n  on an empty response"), ("\n  on a timeout", "")):
+            with self.subTest(a=a, b=b):
+                self.assert_escalated(self.seats(a, b), n=2)
+
+    def test_identical_continuations_close(self):
+        for cont in ("", "\n  on a timeout"):
+            with self.subTest(cont=cont):
+                code, out = self.seats(cont, cont)
+                self.assertEqual(code, 0, out)
+                self.assertIn("BLOCKING=0 ESCALATE=0", out)
+                self.assertIn("FIXED=2", out)

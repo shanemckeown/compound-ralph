@@ -554,8 +554,9 @@ PATH_ONLY_TOKEN = re.compile(r"(?:(?:\([\w.-]+\)|\[[\w.-]+\]|[\w.@-]+)/)*(?:\[\w
 # '[label]:' counts, a label running over lines included.
 REF_DEFINITION = re.compile(r"(?m)^[ \t>*+\-•\d.)]*\[[^\]]+\]:")
 # Where a legacy finding's continuation lines stop (attempt 4, E), besides a finding, section or verdict line: a
-# blank line, a bullet, an ATX heading ('#' then a space, so '#123' is text), a fence or an echo.
-CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#{1,6}(?:\s|$)|```|~~~|REVIEWING:)")
+# blank line, a bullet, an ATX heading ('#' then a space, so '#123' is text), a fence (no backtick after a ``` opener,
+# so an inline ```src/a.ts```:12 span is text) or an echo.
+CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#{1,6}(?:\s|$)|`{3,}[^`]*$|~{3,}|REVIEWING:)")
 # The token given a line right after it, past a URL query (src/a.ts?plain=1#L12) and closing marks or a comma
 # (`src/a.ts`:12, **src/a.ts**#L3): ':N', '#N', '#LN', '(N', '(line N'; or, past a dash too, 'line N', 'LN'
 # (attempt 4, E). Matched on squashed text.
@@ -583,16 +584,19 @@ _CONTEXT = [None, None]
 
 
 def finding_context(files):
-    """({finding: [its full texts]}, {findings no path-only ref may name}) over the inputs (attempt 4, E/F). A
-    legacy finding's full text is its line plus every continuation line up to a blank line, a bullet, the next
-    finding, a heading, a fence or a section (a finding-shaped line that isn't a parsed finding continues it); a block finding's is its text. A file with a markdown reference
-    definition bars all of its findings. The same finding in two files keeps both texts."""
+    """({finding: [its full texts]}, {findings no path-only ref may name}, {finding: {its full text in each file}})
+    over the inputs (attempt 4, E/F). A legacy finding's full text is its line plus every continuation line up to a
+    blank line, a bullet, the next finding, a heading, a fence or a section (a finding-shaped line that isn't a
+    parsed finding continues it); a block finding's is its text. A file with a markdown reference definition bars
+    all of its findings. The same finding in two files keeps both texts; the per-file variants (squashed, the
+    longest in each file) tell two findings that share a first line apart."""
     key = tuple((str(x[0]), x[2]) for x in files)
     if _CONTEXT[0] == key:
         return _CONTEXT[1]
-    texts, barred = {}, set()
+    texts, barred, variants = {}, set(), {}
     for x in files:
         mine = set(x[1])
+        longest = {o: squash(o) for o in mine}
         for o in mine:
             texts.setdefault(o, [o])
         if REF_DEFINITION.search(x[2]):
@@ -607,9 +611,14 @@ def finding_context(files):
                                           or (FINDING.match(lines[j]) and clean(lines[j]) in mine)):
                 j += 1
             if j > i + 1:
-                texts[clean(line)].append("\n".join(lines[i:j]))
-    _CONTEXT[:] = [key, (texts, barred)]
-    return texts, barred
+                full = "\n".join(lines[i:j])
+                texts[clean(line)].append(full)
+                if len(squash(full)) > len(longest[clean(line)]):
+                    longest[clean(line)] = squash(full)
+        for o, t in longest.items():
+            variants.setdefault(o, set()).add(t)
+    _CONTEXT[:] = [key, (texts, barred, variants)]
+    return texts, barred, variants
 
 
 def path_only_token(finding, files=None):
@@ -619,7 +628,7 @@ def path_only_token(finding, files=None):
     m = PATH_ONLY_FINDING.match(finding)
     tok = exact_token(m.group(2)) if m else None
     if tok and files is not None:
-        texts, barred = finding_context(files)
+        texts, barred, _ = finding_context(files)
         lined = re.compile(re.escape(squash(tok)) + LINED_AFTER)
         if finding in barred or any(lined.search(squash(t)) for t in texts.get(finding, [finding])):
             return None
@@ -1286,6 +1295,9 @@ def ref_ambiguity(files, r, sev, loc):
     named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o, files) == loc}
     if len(named) != 1:
         return sorted(named)
+    # One first line, continued differently in two seats, may be two findings: one ref can't close both.
+    if len(finding_context(files)[2].get(next(iter(named)), ())) > 1:
+        return sorted(named) + [f"{next(iter(named))} (continued differently in another review)"]
     return sorted(named | {o for y in files for o in y[1] if names_path(o, loc, files)})
 
 
