@@ -41,7 +41,9 @@ import time  # noqa: E402
 DRIFT = 3
 CATCH_UP_S = 2.0
 # A .py gate whose export disappears mid-run (only same-uid tampering can, given the pin) exits
-# with the caller's --fail-exit code, never a bare traceback's 1.
+# with the caller's --fail-exit code, never a bare traceback's 1. Exports are read-only (0555);
+# the exporter's remove_tree makes a directory writable before deleting it, so a writable root
+# means the export is partly gone even while the directory still exists.
 PY_BOOT = """import os, runpy, sys
 fail, root, p = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 sys.argv = sys.argv[3:]
@@ -51,7 +53,7 @@ try:
 except SystemExit:
     raise
 except BaseException:
-    if os.path.isdir(root):
+    if os.path.isdir(root) and not os.access(root, os.W_OK):
         raise
     sys.stderr.write('run-gate: live export %s vanished mid-run; refuse\\n' % root)
     sys.exit(fail)

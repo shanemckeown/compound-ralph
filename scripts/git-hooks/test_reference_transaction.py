@@ -789,6 +789,11 @@ def age_exports(repo, seconds=31 * 60):
             os.utime(os.path.join(repo.live, d), (t, t))
 
 
+def age_exports_of(repo, sha, seconds):
+    t = time.time() - seconds
+    os.utime(os.path.join(repo.live, sha), (t, t))
+
+
 def test_l2_keeps_three_exports(repo):
     for i in range(5):
         assert repo.commit("commands/closeout.md", f"x{i}\n").returncode == 0
@@ -1831,6 +1836,7 @@ def test_c3_paused_gate_survives_three_main_moves(repo, tmp_path, aged):
         for i in range(4):
             if aged:
                 age_exports(repo)  # only the pin can keep it now
+                age_exports_of(repo, pinned, 2 * 3600)  # oldest, so never among the kept ones
             assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
         assert repo.current() != pinned
         assert os.path.isdir(os.path.join(repo.live, pinned))
@@ -1881,3 +1887,55 @@ def test_c3_retention_clock_starts_when_an_export_is_superseded(repo):
     for i in range(3):
         assert repo.commit("commands/closeout.md", f"move {i}\n").returncode == 0
     assert os.path.isdir(os.path.join(repo.live, was_current))
+
+
+# r6 own-gate F1: a second exporter of the same tip reuses a valid export, never replaces it
+def test_c3_same_tip_exporter_keeps_the_export_a_gate_pinned(repo, tmp_path, monkeypatch):
+    commit_files(repo, {SLOW: SLOW_SOURCE, SLOW_SIBLING: "WHO = 'still here'\n"})
+    tip = commit_without_hook(repo, "a\n")
+    ip = InProcess(repo, monkeypatch)
+    real_write = ip.hook.write_blobs
+    gate = {}
+
+    def write_then_other_exporter_and_gate(root, tree):
+        real_write(root, tree)
+        res = subprocess.run([os.path.join(repo.common, "hooks", "reference-transaction"),
+                              "--export", tip], cwd=repo.root, env=repo.human_env(),
+                             capture_output=True, text=True)
+        assert res.returncode == 0, res.stderr
+        assert repo.current() == tip
+        gate["ino"] = os.stat(os.path.join(repo.live, tip)).st_ino
+        started, gate["go"] = tmp_path / "started", tmp_path / "go"
+        gate["proc"] = subprocess.Popen([repo.run_gate, "--fail-exit", "2", SLOW, str(started),
+                                         str(gate["go"])], cwd=repo.root, env=repo.env,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 20
+        while not started.exists():
+            assert gate["proc"].poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+
+    monkeypatch.setattr(ip.hook, "write_blobs", write_then_other_exporter_and_gate)
+    try:
+        assert ip.hook.export(tip) == 0
+        assert os.stat(os.path.join(repo.live, tip)).st_ino == gate["ino"]
+        assert not [d for d in os.listdir(repo.live) if d.startswith(".tmp-")]
+    finally:
+        gate["go"].write_text("go")
+        out, err = gate["proc"].communicate(timeout=30)
+    assert gate["proc"].returncode == 0, err
+    assert out.strip() == "still here"
+
+
+def test_c3_gate_whose_export_is_partly_removed_uses_fail_exit(repo, tmp_path):
+    """remove_tree makes a directory writable, then deletes it: a gate caught between the two
+    (root still there, sibling gone) is a lost export too."""
+    proc, go, pinned = start_slow_gate(repo, tmp_path, "--fail-exit", "2")
+    try:
+        root = os.path.join(repo.live, pinned)
+        load_hook().make_writable(root)
+        os.unlink(os.path.join(root, SLOW_SIBLING))
+    finally:
+        go.write_text("go")
+        out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 2, err
+    assert "vanished mid-run" in err

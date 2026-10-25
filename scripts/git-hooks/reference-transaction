@@ -459,9 +459,15 @@ def export(oid):
                 sys.stderr.write("LIVE EXPORT SKIPPED (LUCY-p122j): main moved past %s; "
                                  "the newer export publishes\n" % oid[:12])
                 return 0
-            if tmp is None and (not os.path.isdir(final) or export_drift(final, oid)):
-                tmp = build(live, oid)  # rare: removed or changed since the first look
-            if tmp is not None:
+            # Look again under the lock: another exporter of this same tip may have published
+            # it since, and a gate may already be running from (and pinning) that copy.
+            intact = os.path.isdir(final) and not export_drift(final, oid)
+            if intact and tmp is not None:
+                remove_tree(tmp)  # reuse the published copy; never replace a valid export
+                tmp = None
+            if not intact:
+                if tmp is None:
+                    tmp = build(live, oid)  # rare: removed or changed since the first look
                 if os.path.isdir(final):
                     remove_tree(final)  # drifted, so no gate can verify against it anyway
                 os.rename(tmp, final)
