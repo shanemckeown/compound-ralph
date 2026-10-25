@@ -956,8 +956,10 @@ def prose_claim_errors(p, lines, meta, prior):
     NOTE_REFS[str(p)] = set()
     unlocated = {"P1": [], "P2": [], "P3": []}
     weak_claims = {"P1": [], "P2": [], "P3": []}
+    claimed = set()  # indexes into meta of block findings a located or verbatim prose line already names
     for line in lines:
         if clean(line) in verbatim:
+            claimed |= {i for i, f in enumerate(meta) if f["canon"] == clean(line)}
             continue
         claims = []
         note = EARLIER_NOTE.match(line)
@@ -1004,16 +1006,22 @@ def prose_claim_errors(p, lines, meta, prior):
             why = claim_error(sev, path, ln, targets)
             if why:
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
+            claimed |= {i for i, f in enumerate(meta) if f["target"] and f["sev"] == sev
+                        and same_file(f["target"][0], path) and (ln is None or f["target"][1] == ln)}
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
     # LUCY-16n7i W1: a weak claim may be a real extensionless path ("workers/billing"), so it needs a block
     # FINDING of its severity, one each, never a prior ref: an unrelated closed prior must not absorb a new
     # prose finding. Weak claims also join the lines naming no file in the findings + prior refs count.
+    # Own-gate a2 r1: a P1 or P2 weak claim can't lean on a block finding another prose line already names
+    # by location, so a second, real P1 can't hide behind it. A P3 weak claim may (P3 never blocks): that is
+    # the m5lm7 shape, a located P3 and a slash-word line pointing back at it ("This is the P3 above").
     for sev, found in weak_claims.items():
-        have = sum(f["sev"] == sev for f in meta)
+        have = sum(f["sev"] == sev and (sev == "P3" or i not in claimed) for i, f in enumerate(meta))
         if len(found) > have:
             raise ValueError(f"{p}: {len(found)} prose {sev} claim(s) name only a slash-word, not a file, and the "
-                             f"review-verdict block has {have} {sev} finding(s) (prior refs don't count): put "
+                             f"review-verdict block has {have} {sev} finding(s) for them (prior refs, and a P1/P2 finding another "
+                             f"line names by file, don't count): put "
                              f"every finding in the block with its file_line: {found[0]}")
     for sev, found in unlocated.items():
         have = sum(f["sev"] == sev for f in meta) + sum(k[1] == sev for k in prior)

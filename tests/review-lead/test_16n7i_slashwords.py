@@ -202,6 +202,28 @@ class WeakClaimsNeedBlockFindings(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "2 prose line\\(s\\) start with P1 but name no file"):
             parse_text(strict_file("P1 workers/billing double-charges\nP1 the wrapped finding\n", one))
 
+    def test_a_block_finding_another_line_names_does_not_cover_a_weak_p1_or_p2(self):
+        # own-gate a2 r1 Astra: the block's one P1 belongs to the located face-map line; the prose
+        # workers/billing P1 is a second finding and must not lean on it. Same shape at P2.
+        for sev in ("P1", "P2"):
+            one = [(sev, "lib/face-map.ts:37", "two devices editing the same map overwrite each other — merge")]
+            prose = (f"{sev} lib/face-map.ts:37 — two devices editing the same map overwrite each other — merge\n"
+                     f"{sev} workers/billing double-charges when reception retries a terminal payment")
+            with self.assertRaisesRegex(ValueError, f"1 prose {sev} {self.SLASH}", msg=sev):
+                parse_text(strict_file(prose, one))
+            # A located line in other words names the finding too (the first line above is verbatim).
+            reworded = f"{sev} lib/face-map.ts:37 strokes are lost\n{sev} workers/billing double-charges"
+            with self.assertRaisesRegex(ValueError, f"1 prose {sev} {self.SLASH}", msg=sev):
+                parse_text(strict_file(reworded, one))
+            # An unnamed block finding still covers it.
+            self.assertEqual(len(parse_text(strict_file(f"{sev} workers/billing double-charges", one))), 1)
+
+    def test_a_weak_p3_may_point_back_at_a_named_p3(self):
+        # The m5lm7 shape: a located P3 line, then a slash-word line pointing back at it.
+        p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
+        prose = "P3 lib/auth/request-memo.ts:70 — H-D1 test gap\n" + M5LM7_17
+        self.assertEqual(len(parse_text(strict_file(prose, p3))), 1)
+
     def test_a_weak_note_with_a_finding_in_the_block_passes(self):
         p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
         self.assertEqual(len(parse_text(strict_file("- r1 P3 user/owned/member open: still a gap", p3))), 1)
