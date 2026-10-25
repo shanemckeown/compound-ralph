@@ -356,6 +356,10 @@ _HEADER_FIELD_RE = re.compile(r"\b(?:Bead|Branch)e?s?\b[*_`]*\s*[:|]", re.I)
 # ``"branch"``/``"bead"`` key: either one naming this bead identifies the file as its review.
 _BRANCH_LINE_RE = re.compile(r"branch|(?:long-)?goal/", re.I)
 _JSON_ID_RE = re.compile(r"[\"'](?:branch|bead)[\"']\s*:\s*[\"']([^\"']*)[\"']", re.I)
+# A markdown table row naming the bead, the tip and a veto token is a verdict row for it. Prose lines
+# are deliberately not read this way: every current review writer echoes the exact tip, so prose is
+# covered by that writer guarantee (Orchestrator23, 25 Oct).
+_TABLE_ROW_RE = re.compile(r"^\s*\|")
 
 
 def _names_bead_any_form(text: str, bead_id: str) -> bool:
@@ -372,8 +376,8 @@ def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> 
     quotes this bead, e.g. a harness review replaying its files as fixtures. True only when the
     file has a line-start REVIEWING echo, every such claim parses, no echo-shaped text on any line
     names this bead, is a bare HEAD or is at this tip, and neither the file name, any Bead: or
-    Branch: field, a "branch"/"bead" key, nor a branch line at this tip names the bead. Any doubt
-    keeps the veto (fail closed)."""
+    Branch: field, a "branch"/"bead" key, a branch line at this tip, nor a table row at this tip
+    with a veto token names the bead. Any doubt keeps the veto (fail closed)."""
     if _names_bead_any_form(Path(path).name, bead_id):
         return False
     tip_sha = tip_sha.lower()
@@ -386,6 +390,9 @@ def is_other_branch_review(path, body: str, bead_id: str, tip_sha: str = "") -> 
         if (_BRANCH_LINE_RE.search(line) and _names_bead_any_form(line, bead_id)
                 and _names_tip(line, tip_sha)):
             return False
+        if (_TABLE_ROW_RE.match(line) and _names_bead_any_form(line, bead_id)
+                and _names_tip(line, tip_sha) and _VETO_RE.search(line)):
+            return False   # a verdict row such as '| 3bm73-r3 | <tip> | FAIL |' (independent r3)
         found = _ECHO_ANY_RE.findall(line)
         for branch, sha in found:
             if (branch.upper() == "HEAD" or _names_bead_any_form(branch, bead_id)

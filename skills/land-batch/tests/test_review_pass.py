@@ -416,7 +416,7 @@ def test_txfbf_doubtful_echoes_keep_the_veto(tmp_path):
 def test_txfbf_real_harness_review_files_do_not_veto_3bm73(tmp_path):
     reviews = Path("/Users/shane/Documents/Obsidian/Aestheticc/Ops/reviews")
     names = [f"REVIEW_e3opf_structured_astra-high_r{n}_2026-10-24.md" for n in (3, 4, 5, 6)]
-    names += [f"REVIEW_txfbf_astra-high_independent_r{n}_2026-10-25.md" for n in (1, 2)]
+    names += [f"REVIEW_txfbf_astra-high_independent_r{n}_2026-10-25.md" for n in (1, 2, 3)]
     present = [n for n in names if (reviews / n).is_file()]
     if not present:
         import pytest
@@ -483,6 +483,33 @@ def test_txfbf_branch_lines_json_keys_and_line_start_claims_keep_the_veto(tmp_pa
     body = (f"REVIEWING: e3opf-structured @ 5acadb10c8\nBranch notes: fixture replay.\n"
             f"3bm73 r1-r6 replayed\nat tip {TX_TIP[:8]}: FAIL\n")
     assert _vetoes(tmp_path / "ok", "REVIEW_e3opf_r9.md", body) == []
+
+
+def test_txfbf_verdict_table_row_at_the_tip_keeps_the_veto_but_prose_does_not(tmp_path):
+    other = "REVIEWING: other-branch @ 1111111\n"
+    # (a) independent r3 seat B: a bare-branch verdict row, the Branch word only in the header row.
+    body = other + f"| Branch | New tip | Verdict |\n|---|---|---|\n| 3bm73-r3 | {TX_TIP} | FAIL |\n"
+    assert len(_vetoes(tmp_path / "a", "REVIEW_r3_branches_20261025.md", body)) == 1
+    root = tmp_path / "a" / "reviews"
+    ok, _ = lbs.independent_pass_for("AestheticcNext-3bm73", TX_TIP, reviews_dir=root,
+                                     comments_text=_comment("2025-10-22 09:30", f"PASS @{TX_TIP}"))
+    assert ok is False
+    # The r3 crafted P3 shapes keep their veto when one table row carries bead, tip and verdict.
+    # Their wrapped-across-lines variants stay a known residual (follow-up beads, not this rule).
+    for i, row in enumerate((f"| Branch / tip: | goal/aestheticcnext-3bm73 {TX_TIP[:10]} FAIL |",
+                             f'| "bead": "AestheticcNext-3bm73" | {TX_TIP[:9]} | VOID |')):
+        assert len(_vetoes(tmp_path / f"p{i}", "REVIEW_allure_followup_r9.md", other + row + "\n")) == 1, row
+    # (b) The same bead + tip + FAIL as a prose line stays exempt. The boundary is on purpose: prose
+    # is covered by the writer guarantee, every current writer echoes the exact tip (Orchestrator23,
+    # 25 Oct). This is txfbf independent r3's line 37.
+    body = other + ("**3bm73 @ `4f1c34f25e75593f87ca09fc2b4639c63b174e23`: 6 → 0**, removing exactly e3opf r3–r6 "
+                    "and txfbf r1/r2. All six genuine 3bm73 reviews at that tip are PASS without veto tokens. "
+                    "**No genuine 3bm73 FAIL exists there.**\n")
+    assert _vetoes(tmp_path / "b", "REVIEW_txfbf_astra-high_independent_r9.md", body) == []
+    # Controls: a table row missing the tip or the veto token stays exempt.
+    for i, row in enumerate(("| 3bm73-r3 | 1234567 | FAIL |", f"| 3bm73-r3 | {TX_TIP} | PASS |")):
+        body = other + row + f"\n3bm73 at {TX_TIP[:8]} replayed: FAIL\n"
+        assert _vetoes(tmp_path / f"c{i}", "REVIEW_e3opf_r9.md", body) == [], row
 
 
 def test_txfbf_lander_is_not_held_by_a_harness_review_quoting_the_bead(tmp_path):
