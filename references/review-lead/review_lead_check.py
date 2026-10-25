@@ -549,11 +549,18 @@ PATH_ONLY_FINDING = re.compile(r"^(P[123]) (\S+) [—-] ")
 # Attempt 4 (F): '/'-joined segments, each (group), [param] or plain, the last one a plain file name (a Next.js
 # '[id].tsx' allowed), so a reference link '[src/a.ts][source]' or 'src/a.ts(12)' is not a token.
 PATH_ONLY_TOKEN = re.compile(r"(?:(?:\([\w.-]+\)|\[[\w.-]+\]|[\w.@-]+)/)*(?:\[\w+\]\.)?[\w.@-]+", re.ASCII)
-# A markdown reference definition ("[source]: src/a.ts#L12") can point a token anywhere: no finding in its file
-# is path-only (attempt 4, F).
-REF_DEFINITION = re.compile(r"(?m)^\s*\[[^\]]+\]:\s")
-# Where a legacy finding's continuation lines stop (attempt 4, E), besides a finding, section or verdict line.
-CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#|```|~~~|REVIEWING:)")
+# A markdown reference definition ("[source]: src/a.ts#L12", "[id]:x", "> - [id]: x") can point a token anywhere:
+# no finding in its file is path-only (attempt 4, F). Any line whose content, past container marks, opens with
+# '[label]:' counts, a label running over lines included.
+REF_DEFINITION = re.compile(r"(?m)^[ \t>*+\-•\d.)]*\[[^\]]+\]:")
+# Where a legacy finding's continuation lines stop (attempt 4, E), besides a finding, section or verdict line: a
+# blank line, a bullet, an ATX heading ('#' then a space, so '#123' is text), a fence or an echo.
+CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#{1,6}(?:\s|$)|```|~~~|REVIEWING:)")
+# The token given a line right after it, past a URL query (src/a.ts?plain=1#L12) and closing marks or a comma
+# (`src/a.ts`:12, **src/a.ts**#L3): ':N', '#N', '#LN', '(N', '(line N'; or, past a dash too, 'line N', 'LN'
+# (attempt 4, E). Matched on squashed text.
+LINED_AFTER = (r"(?:\?[^#\s]{0,40})?(?:[`*_~'\"’”\])>,]{0,4}(?::\d|#l?\d|#l|\((?:lines?)?\d)"
+               r"|[`*_~'\"’”\])>,—–-]{0,4}(?:lines?\d|l\d))")
 
 
 def exact_token(tok):
@@ -577,8 +584,8 @@ _CONTEXT = [None, None]
 
 def finding_context(files):
     """({finding: [its full texts]}, {findings no path-only ref may name}) over the inputs (attempt 4, E/F). A
-    legacy finding's full text is its line plus every continuation line up to a blank line, the next bullet or
-    finding, a heading, a fence or a section; a block finding's is its text. A file with a markdown reference
+    legacy finding's full text is its line plus every continuation line up to a blank line, a bullet, the next
+    finding, a heading, a fence or a section (a finding-shaped line that isn't a parsed finding continues it); a block finding's is its text. A file with a markdown reference
     definition bars all of its findings. The same finding in two files keeps both texts."""
     key = tuple((str(x[0]), x[2]) for x in files)
     if _CONTEXT[0] == key:
@@ -595,8 +602,9 @@ def finding_context(files):
             if not FINDING.match(line) or clean(line) not in mine:
                 continue
             j = i + 1
-            while j < len(lines) and not (CONTINUATION_END.match(lines[j]) or FINDING_START.match(lines[j])
-                                          or SECTION.match(lines[j]) or VERDICT_HEAD.match(lines[j])):
+            while j < len(lines) and not (CONTINUATION_END.match(lines[j]) or SECTION.match(lines[j])
+                                          or VERDICT_HEAD.match(lines[j])
+                                          or (FINDING.match(lines[j]) and clean(lines[j]) in mine)):
                 j += 1
             if j > i + 1:
                 texts[clean(line)].append("\n".join(lines[i:j]))
@@ -607,12 +615,12 @@ def finding_context(files):
 def path_only_token(finding, files=None):
     """The exact path token of a finding raised with no line ("P3 tests/a.test.ts — ..."), else None. Given the
     inputs, also None when its file bars it (REF_DEFINITION) or any of its full texts gives the token a line after
-    all: ':<digit>', '#L' or '(<digit>' right after it (attempt 4, E)."""
+    all (LINED_AFTER: ':N', '#L', '(N' and the like, right after it, attempt 4, E)."""
     m = PATH_ONLY_FINDING.match(finding)
     tok = exact_token(m.group(2)) if m else None
     if tok and files is not None:
         texts, barred = finding_context(files)
-        lined = re.compile(re.escape(squash(tok)) + r"(?::\d|#l|\(\d)")
+        lined = re.compile(re.escape(squash(tok)) + LINED_AFTER)
         if finding in barred or any(lined.search(squash(t)) for t in texts.get(finding, [finding])):
             return None
     return tok

@@ -1600,3 +1600,36 @@ class CwpxuAttempt4(CwpxuExactToken):
                 self.assert_escalated(self.tip_mention(again, self.A, "src/a.ts"))
         code, out = self.tip_mention("P3 lib/b.ts:5 — src/а.ts still lacks it — add it", self.A, "src/a.ts")
         self.assertIn("FIXED=1", out)  # the residual, pinned so a fix shows up here
+
+
+class CwpxuAttempt4OwnGateR1(CwpxuAttempt4):
+    """Attempt 4 own-gate r1 (Astra xhigh): a line behind closing marks or a query, a '#123' continuation that
+    is not a heading, and reference definitions without a space or inside a container."""
+
+    def test_line_behind_closing_marks_refuses(self):
+        for cont in ("See `src/a.ts`:12", "see **src/a.ts**#L3", "src/a.ts?plain=1#L12", "src/a.ts, line 12",
+                     "src/a.ts (line 12)", "src/a.ts — L12", "src/a.ts#123"):
+            with self.subTest(cont=cont):
+                self.assert_refused(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A + "\n  " + cont)))
+
+    def test_numbered_description_still_closes(self):
+        a = "P3 src/a.ts — (1) the contraindication checker lacks a regression assertion — add it"
+        self.assert_closed(self.close(a, "src/a.ts"))
+
+    def test_issue_number_continuation_is_not_a_heading(self):
+        for cont in ("\n#123 in src/a.ts still lacks it", "\n#src/a.ts still lacks it", "\n  #123 src/a.ts"):
+            first = self.FIRST
+            raising = self.legacy_r1(self.A, first + cont)
+            with self.subTest(cont=cont):
+                self.assert_escalated(self.close(self.A, "src/a.ts", raise_r1=raising,
+                                                 lead=fixed_lead(self.A, self.BY, self.noted(first))))
+
+    def test_every_reference_definition_form_bars(self):
+        route = "P3 pages/clients/[id].tsx — the contraindication checker lacks a regression assertion — add it"
+        for definition in ("[id]:src/a.ts#L12", "[id]: src/a.ts#L12", "   [id]:<src/a.ts#L12>", "> [id]: src/a.ts#L12",
+                           "- [id]: src/a.ts#L12", "1. [id]: src/a.ts#L12", "[i\nd]: src/a.ts#L12"):
+            with self.subTest(definition=definition):
+                self.assert_refused(self.close(route, "pages/clients/[id].tsx",
+                                               raise_r1=self.legacy_r1(route, tail=f"\n{definition}\n")))
+        self.assert_closed(self.close(route, "pages/clients/[id].tsx",
+                                      raise_r1=self.legacy_r1(route, tail="\nthe [id] segment is the client id\n")))
