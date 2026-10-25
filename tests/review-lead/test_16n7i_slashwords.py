@@ -130,6 +130,18 @@ class G5SlashWords(unittest.TestCase):
                 parse_text(strict_file(line, [("P2", "lib/label.ts:3", "uses an unclear local variable")],
                                        prior=unrelated))
 
+    def test_an_earlier_note_with_a_strong_reference_binds_its_tail_as_before(self):
+        # own-gate r3 Astra: the relief is per whole line, so a note's strong reference disables it for the tail.
+        unrelated = [("r1 P1 lib/pay.ts:37", "closed")]
+        for prose in ("- r1 P1 lib/pay.ts:37 closed: P1 reports/patient-export exposes another clinic patient export",
+                      "- r1 P1 lib/pay.ts:37 closed: P1 reports/patient-export leaks; P1 team/member-list leaks"):
+            with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at reports/patient-export",
+                                        msg=prose):
+                parse_text(strict_file(prose, prior=unrelated))
+        # A note whose every path is a slash-word keeps the relief (counted, here with no P1 in the block).
+        with self.assertRaisesRegex(ValueError, "start with P1 but name no file"):
+            parse_text(strict_file("- r1 P3 the retry note open: P1 user/owned/member leak", self.P3))
+
     def test_a_slash_word_cut_out_of_a_longer_token_is_strong(self):
         # own-gate r2 Astra: PATH_TOKEN stops at '+', leaving 'reports/patient'; it is not a whole prose word.
         for token in ("reports/patient+export.sql-template", "reports/patient%20export", "x=reports/summary",

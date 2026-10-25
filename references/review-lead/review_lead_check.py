@@ -885,19 +885,20 @@ def claim_sevs(line):
     return list(CLAIM_SEV.finditer(line))
 
 
-def line_claims(line, skip=None):
+def line_claims(line, skip=None, relief=True):
     """([(severity, path, line or None)], [severity]) for a prose line: each standalone severity with the
     first path after it (before the next severity), else the nearest path before it. No path, no claim.
     LUCY-16n7i: a line whose every path is a weak slash-word (weak_path) locates nothing, and its severities
     come back in the second list, to be counted as unlocated, never ignored. A line with any strong path is
     bound exactly as before, slash-words included, so a slash-word there still refuses as a location: no
-    severity on a mixed line borrows or escapes another path (own-gate r1/r2). The severity token starting
-    at `skip` (an earlier-round note's own reference) is not a claim."""
+    severity on a mixed line borrows or escapes another path (own-gate r1/r2). relief=False (a fragment of a
+    line that has a strong path elsewhere) binds as before too. The severity token starting at `skip` (an
+    earlier-round note's own reference) is not a claim."""
     sevs = claim_sevs(line)
     paths = repo_paths(line)
     if not sevs or not paths:
         return [], []
-    if all(weak_path(m) for m in paths):
+    if relief and all(weak_path(m) for m in paths):
         return [], [s.group(0) for s in sevs if s.start() != skip]
     out = []
     for k, s in enumerate(sevs):
@@ -961,12 +962,14 @@ def prose_claim_errors(p, lines, meta, prior):
         if note:
             ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
-            claims, weak = line_claims(tail)
+            # LUCY-16n7i own-gate r3: the slash-word relief is per whole line, so a note whose reference (or
+            # any other part) names a strong path binds its tail exactly as on main.
+            relief = all(weak_path(m) for m in repo_paths(line))
+            claims, weak = line_claims(tail, relief=relief)
             # The note's status word is never read: prose neither grades nor disputes (LUCY-e3opf B1, the
-            # block is authoritative). Its reference, and any path-free severity in its text (a slash-word
-            # locates nothing, so it counts as path-free), names round N's finding, so the block carries it
-            # or the raising review is an input (orphan_open_priors). With no reference, a slash-word
-            # severity is unlocated (LUCY-16n7i).
+            # block is authoritative). Its reference, and any path-free severity in its text, names round
+            # N's finding, so the block carries it or the raising review is an input (orphan_open_priors).
+            # With no reference, a slash-word severity is unlocated (LUCY-16n7i).
             refs = [note.group(2)] if ref else []
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]

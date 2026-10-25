@@ -298,10 +298,12 @@ class G5RealFiles(unittest.TestCase):
         return text.replace("identity/idempotent", "identity, idempotent")
 
     def test_q2lod_cp2_seats_parse(self):
-        # B2 refused the server seat: its carry line says 'identity/idempotent' next to its P3. LUCY-16n7i:
-        # that slash-word is weak, so the P3 is counted as unlocated against the block's P3s, and the real
-        # file parses the same as the reworded one.
-        self.assertEqual(len(self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")), 5)
+        # B2: the server seat's carry line says 'identity/idempotent' next to its P3, a slash token, so the
+        # real file is refused (an accepted false refusal, listed on the bead); reworded it parses. LUCY-16n7i
+        # own-gate r3: still refused, because that note line also names a strong path (its reference), and the
+        # slash-word relief only applies to a line with no strong path.
+        with self.assertRaisesRegex(ValueError, "prior ref at identity/idempotent"):
+            self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
         self.assertEqual(len(parse_text(self.server_text())), 5)
         for name, n in (("NOTES_REVIEW_q2lod_cp2_astra-xhigh-app_2026-10-24.md", 4),
                         ("NOTES_REVIEW_q2lod_cp2_astra-xhigh-tests_2026-10-24.md", 2),
