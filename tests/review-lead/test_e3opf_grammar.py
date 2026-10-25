@@ -299,7 +299,9 @@ class G5RealFiles(unittest.TestCase):
 
     def test_q2lod_cp2_seats_parse(self):
         # B2: the server seat's carry line says 'identity/idempotent' next to its P3, a slash token, so the
-        # real file is refused (an accepted false refusal, listed on the bead); reworded it parses.
+        # real file is refused (an accepted false refusal, listed on the bead); reworded it parses. LUCY-16n7i
+        # own-gate r3: still refused, because that note line also names a strong path (its reference), and the
+        # slash-word relief only applies to a line with no strong path.
         with self.assertRaisesRegex(ValueError, "prior ref at identity/idempotent"):
             self.parse("NOTES_REVIEW_q2lod_cp2_astra-xhigh-server_2026-10-24.md")
         self.assertEqual(len(parse_text(self.server_text())), 5)
@@ -358,9 +360,9 @@ class OwnGateRound1(unittest.TestCase):
         for prose in ("No H-P0/P1 hazards apply", "Seen on localhost:3000 during the P3 check",
                       "Earlier P3 grading retained."):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
-        # LUCY-e3opf B2: any slash token is a path, so 'and/or' next to a severity is a claim (an accepted
-        # false refusal: it fails closed).
-        with self.assertRaisesRegex(ValueError, "prior ref at and/or"):
+        # LUCY-16n7i: a line carrying a P2 gets no slash-word relief, so 'and/or' is a location there, as on
+        # main (fails closed). An all-P3 line counts it instead.
+        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at and/or"):
             parse_text(self.file("No P2 and/or P3 items remain"))
 
     def test_backticked_bare_severity_is_a_claim(self):
@@ -412,7 +414,7 @@ class OwnGateRound2(unittest.TestCase):
                      [("P2", "lib/a.ts:37", "refresh hides the search input — keep it")])
         self.refuses("P1 Dockerfile:12 — fixture stripped", [("P1", "Dockerfile:11", "other — fix")])
         self.refuses("P1 .gcloudignore:5 — fixture stripped", [("P1", ".gcloudignore:4", "other — fix")])
-        self.assertEqual(chk.line_claims("P1 build.gradle:40 x"), [("P1", "build.gradle", "40")])
+        self.assertEqual(chk.line_claims("P1 build.gradle:40 x"), ([("P1", "build.gradle", "40")], []))
 
     def test_parenthesised_absolute_and_bare_paths_are_claims(self):
         nit = [("P3", "lib/label.ts:4", "label typo — fix")]
