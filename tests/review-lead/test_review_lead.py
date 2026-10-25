@@ -1730,8 +1730,11 @@ class E3opfStructuredPrior(unittest.TestCase):
             None,
             ["r1 P2 lib/pay.ts:37"],
             [dict(good, ref="r1 lib/pay.ts:37")],
-            # A path-only ref parses since LUCY-cwpxu; a token that is not a bare path never does.
-            [dict(good, ref="r1 P2 pay")],
+            # A path-only ref parses since LUCY-cwpxu (extensionless names too); a token that is not a
+            # repo-relative path never does.
+            [dict(good, ref="r1 P2 ../pay.ts")],
+            [dict(good, ref="r1 P2 /lib/pay.ts")],
+            [dict(good, ref="r1 P2 `lib/pay.ts`:37")],
             [dict(good, ref="r1 P2 lib/pay.ts:")],
             [dict(good, ref="r1 P2 lib/pay.ts more")],
             [dict(good, ref="r1 P2 P1/P2")],

@@ -1301,8 +1301,10 @@ class CwpxuPathOnlyRef(unittest.TestCase):
             ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
             ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")], verdict="FAIL",
                                                findings=[("P3", again[3:])]), 2000)])
-        self.assertEqual(code, 1, out)
-        self.assertIn("raises P3 at tests/a.test.ts again at the current tip: not fixed", out)
+        # r2 redesign: a path-only closure can't tell a re-raise from a new defect, so it escalates.
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
 
 
 class CwpxuReal3bm73R7(unittest.TestCase):
@@ -1353,7 +1355,7 @@ class CwpxuWholeLeadingToken(unittest.TestCase):
         self.assertEqual(chk.ref_loc("P3 **tests/a.test.ts** — x"), "tests/a.test.ts")
         self.assertIsNone(chk.ref_loc("P2 lib/a+foo.ts:12 — x"))
         self.assertIsNone(chk.ref_loc("P2 lib/ — x"))
-        self.assertIsNone(chk.bare_path("voice-service/"))
+        self.assertIsNone(chk.token_loc("voice-service/"))
 
     def test_dotfile_line_less_finding_closed_by_its_path(self):
         code, out = run_named(fixed_lead(self.DOT, "@D@/REVIEW_x_astra_r2_b.md"), [
@@ -1378,3 +1380,123 @@ class CwpxuWholeLeadingToken(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("prior ref r1 P2 lib/a (closed) matches no round-1 finding", out)
         self.assertNotIn("FIXED=", out)
+
+
+class CwpxuCanonicalPath(unittest.TestCase):
+    """Independent r1 (Astra high, 25 Oct): one canonical path on both sides, the whole leading location, any
+    tip mention vetoes, and any repo-relative file name parses."""
+
+    def test_canon_path(self):
+        for raw, want in [("./tests/a.test.ts", "tests/a.test.ts"), ("a/tests/a.test.ts", "tests/a.test.ts"),
+                          ("b/tests//a.test.ts", "tests/a.test.ts"), ("tests/./a.test.ts", "tests/a.test.ts"),
+                          ("Dockerfile", "Dockerfile"), ("main.c", "main.c"),
+                          ("app/(booking)/[id].tsx", "app/(booking)/[id].tsx")]:
+            self.assertEqual(chk.canon_path(raw), want, raw)
+        self.assertEqual(chk.canon_path("src/../src/a.ts"), "src/a.ts")
+        for raw in ["../a.ts", "src/../../a.ts", "/abs/a.ts", "tests/", "P1/P2", "12", "~/a.ts", "src/a.ts/"]:
+            self.assertIsNone(chk.canon_path(raw), raw)
+
+    def test_token_loc_unwraps_before_reading_the_line(self):
+        self.assertEqual(chk.token_loc("`src/a.ts`:12"), ("src/a.ts", "12"))
+        self.assertEqual(chk.token_loc("**src/a.ts**:12"), ("src/a.ts", "12"))
+        self.assertEqual(chk.token_loc("_src/a.ts_:12-14,"), ("src/a.ts", "12-14"))
+        self.assertEqual(chk.token_loc("(`./src/a.ts`)."), ("src/a.ts", None))
+
+    def test_equivalent_spellings_in_one_round_escalate(self):
+        """r1 :557 — tests/a.test.ts and ./tests/a.test.ts are one path: close one + note the other escalates both."""
+        other = "P3 ./tests/a.test.ts — the empty-record cache has no test — add one"
+        lead = fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md",
+                          extra=[{"id": "F2", "source_line": other, "verdict": "noted", "category": "other",
+                                  "reason": "test-only coverage gap, not user-facing"}])
+        code, out = run_named(lead, [("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC, other), 1000),
+                                     ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_dot_dot_spelling_counts_for_ambiguity_but_never_as_a_ref(self):
+        other = "P3 tests/../tests/a.test.ts — the empty-record cache has no test — add one"
+        lead = fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md",
+                          extra=[{"id": "F2", "source_line": other, "verdict": "noted", "category": "other",
+                                  "reason": "test-only coverage gap, not user-facing"}])
+        code, out = run_named(lead, [("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC, other), 1000),
+                                     ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+        code, out = run_named(fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 tests/../tests/a.test.ts", "closed")]), 2000)])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("FIXED=", out)
+
+    def test_canonical_ref_closes_a_dot_slash_finding(self):
+        src = "P3 ./tests/a.test.ts — the failed-fetch guard the contraindication checker relies on has no test"
+        code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[("r1 P3 `tests/a.test.ts`", "closed")]), 2000)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("BLOCKING=0 ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+    def test_same_path_in_another_round_escalates(self):
+        """No other finding at that path in ANY round, whatever its severity."""
+        later = "P3 tests/a.test.ts:30 — the success cell mocks the guard away — use the real one"
+        lead = leads_for([LL_SRC, later], by="@D@/REVIEW_x_astra_r3_b.md")
+        lead["findings"][1].update(verdict="noted", reason="test-only, not user-facing")
+        lead["findings"][1].pop("fixed_by")
+        code, out = run_named(lead, [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_a.md", r2_file(prior=[], verdict="FAIL", findings=[("P3", later[3:])], sha=SHA_A), 1500),
+            ("REVIEW_x_astra_r3_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+        self.assertIn("ESCALATE=2", out)
+        self.assertIn("FIXED=0", out)
+        # Whatever its severity: a P1 at the path makes the P3 path-only ref ambiguous too.
+        p1 = "P1 tests/a.test.ts:30 — x"
+        files = [("r1", [LL_SRC]), ("r2", [p1])]
+        files = [(f"REVIEW_x_{r}_a.md", fs, "") for r, fs in files]
+        self.assertEqual(chk.ref_ambiguity(files, 1, "P3", "tests/a.test.ts"), sorted([LL_SRC, p1]))
+
+    def test_wrapped_legacy_line_is_not_line_less(self):
+        """r1 :545 — `src/a.ts`:12 (or **src/a.ts**:12) has a line, so a path-only ref names nothing."""
+        for loc in ("`tests/a.test.ts`:12", "**tests/a.test.ts**:12", "**tests/a.test.ts:12**"):
+            src = f"P3 {loc} — the failed-fetch guard has no test — add one"
+            self.assertNotEqual(chk.ref_loc(src), "tests/a.test.ts", src)
+            code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
+                ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
+                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")]), 2000)])
+            self.assertEqual(code, 1, out)
+            self.assertIn("prior ref r1 P3 tests/a.test.ts (closed) matches no round-1 finding", out)
+            self.assertNotIn("FIXED=", out)
+
+    def tip_mention(self, again):
+        lead = fixed_lead(LL_SRC, "@D@/REVIEW_x_astra_r2_b.md",
+                          extra=[{"id": "F2", "source_line": again, "verdict": "noted", "category": "other",
+                                  "reason": "test-only coverage gap, not user-facing"}])
+        return run_named(lead, [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(LL_SRC), 1000),
+            ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(LL_REF, "closed")], verdict="FAIL",
+                                               findings=[("P3", again[3:])]), 2000)])
+
+    def test_bare_path_mention_at_the_tip_vetoes(self):
+        """r1 :1308 — a tip finding elsewhere saying 'tests/a.test.ts still lacks ...' escalates the closure."""
+        code, out = self.tip_mention("P3 lib/b.ts:5 — tests/a.test.ts still lacks the failed-fetch assertion — add it")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=1", out)
+        self.assertIn("FIXED=0", out)
+
+    def test_mention_is_token_bounded(self):
+        code, out = self.tip_mention("P3 lib/b.ts:5 — tests/a.test.tsx lacks the empty-state cell — add it")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=0", out)
+        self.assertIn("FIXED=1", out)
+
+    def test_extensionless_and_short_names_close(self):
+        """r1 :677 — honest line-less Dockerfile / main.c findings close by their exact path."""
+        for path in ("Dockerfile", "main.c", "voice-service/Makefile"):
+            src = f"P3 {path} — the build skips the contraindication checker's tests — run them"
+            code, out = run_named(fixed_lead(src, "@D@/REVIEW_x_astra_r2_b.md"), [
+                ("REVIEW_x_sonnet_r1_a.md", lineless_r1(src), 1000),
+                ("REVIEW_x_astra_r2_b.md", r2_file(prior=[(f"r1 P3 {path}", "closed")]), 2000)])
+            self.assertEqual(code, 0, out)
+            self.assertIn("BLOCKING=0 ESCALATE=0", out)
+            self.assertIn("FIXED=1", out)
