@@ -1242,7 +1242,10 @@ def verify_clearances(cleared_ids, escalate, comments, not_before):
         match = None
         for ts, body in comments:
             first = lines_of(body)[0].strip() if body else ""
-            if (first.upper().startswith("ORCHESTRATOR CLEARED") and token_in(cid, first)
+            # An UNLISTED id is a location, and 'UNLISTED:lib/x.ts' prefixes 'UNLISTED:lib/x.ts:9': whole token only.
+            named = (re.search(rf"(?<!\S){re.escape(cid)}(?![^\s,;)])", first) if f.get("_unlisted")
+                     else token_in(cid, first))
+            if (first.upper().startswith("ORCHESTRATOR CLEARED") and named
                     and (not follow_id or token_in(follow_id, first)) and ts >= not_before):
                 match = first
         if match is None:

@@ -112,6 +112,22 @@ class RealShapes(unittest.TestCase):
         self.assertEqual(code, 1, out)
 
 
+    def test_clearing_a_line_id_does_not_clear_its_bare_file_id(self):
+        """Own-gate r1 Astra P2 (:1246): 'UNLISTED:lib/x.ts' must not be cleared by a comment naming
+        'UNLISTED:lib/x.ts:9'."""
+        prose = "Example P2 lib/x.ts:9 — quoted\nAnother P2 lib/x.ts — quoted too"
+        dismissed = ["UNLISTED lib/x.ts:9: DISMISSED — a quoted example, not a finding",
+                     "UNLISTED lib/x.ts: DISMISSED — a quoted example, not a finding"]
+        comment = "[Encrypted-S] at 2026-10-25 06:30\n  ORCHESTRATOR CLEARED UNLISTED:lib/x.ts:9 quoted example\n"
+        both = ["UNLISTED:lib/x.ts:9", "UNLISTED:lib/x.ts"]
+        code, out, _ = run(lead(dismissed), seat(prose), comments=comment, cleared=both)
+        self.assertEqual(code, 1, out)
+        self.assertIn("--cleared-escalation UNLISTED:lib/x.ts: no bead comment", out)
+        code, out, _ = run(lead(dismissed), seat(prose), comments=comment, cleared=both[:1])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ESCALATE=1", out)
+
+
 class Rulings(unittest.TestCase):
     PROSE = "Also P2 lib/pay.ts:40 — the retry charges the card twice on a double tap"
 
