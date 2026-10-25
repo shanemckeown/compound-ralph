@@ -1501,3 +1501,102 @@ class CwpxuExactToken(unittest.TestCase):
     def test_same_text_in_two_seats_is_one_finding(self):
         files = [("REVIEW_x_sonnet_r1_a.md", [LL_SRC], ""), ("REVIEW_x_astra_r1_a.md", [LL_SRC], "")]
         self.assertEqual(chk.ref_ambiguity(files, 1, "P3", "tests/a.test.ts"), [LL_SRC])
+
+
+class CwpxuAttempt4(CwpxuExactToken):
+    """Attempt 4 (Manager re-plan after independent r3, 25 Oct). (E) a legacy finding's text runs on through its
+    continuation lines, both for the ambiguity haystack and for the eligible finding's own hidden line. (F) the
+    token's last segment is a plain file name, and a file with a markdown reference definition has no path-only
+    findings. (G) NFKC, and every Unicode format character deleted, before matching."""
+    A = "P3 src/a.ts — the contraindication checker lacks a regression assertion — add it"
+    FIRST = "P3 tests/regression.test.ts:20 — the missing assertion"
+
+    def legacy_r1(self, *bullets, tail=""):
+        return f"REVIEWING: goal/x @ {SHA_A}\nFAIL\n" + "".join(f"- {b}\n" for b in bullets) + tail
+
+    def noted(self, line):
+        return [{"id": "F2", "source_line": line, "verdict": "noted", "category": "other",
+                 "reason": "test-only assertion gap with no runtime effect"}]
+
+    def test_continuation_mention_escalates(self):
+        """Independent r3 :1227: a mention wrapped onto a continuation line is part of that finding."""
+        for cont in ("\n  src/a.ts still needs adding", " in src/a.\n  ts still needs adding",
+                     ".\n  See `src/a.ts`; the failure case is untested.", "\nsrc/a.ts, unindented, still counts"):
+            raising = self.legacy_r1(self.A, self.FIRST + cont)
+            first = (self.FIRST + cont).split("\n")[0]
+            with self.subTest(cont=cont):
+                self.assert_escalated(self.close(self.A, "src/a.ts", raise_r1=raising,
+                                                 lead=fixed_lead(self.A, self.BY, self.noted(first))))
+
+    def test_continuation_stops_at_a_boundary(self):
+        """A blank line, the next bullet, a heading, a fence or a section ends the finding: prose past it is not
+        a finding, so the honest closure still goes through."""
+        for tail in ("\nsrc/a.ts is mentioned in a later paragraph\n", "- src/a.ts in a non-finding bullet\n",
+                     "## Notes on src/a.ts\n", "```\nsrc/a.ts\n```\n", "VERIFIED OK\nsrc/a.ts checked\n"):
+            raising = self.legacy_r1(self.A, self.FIRST, tail=tail)
+            with self.subTest(tail=tail):
+                self.assert_closed(self.close(self.A, "src/a.ts", raise_r1=raising,
+                                              lead=fixed_lead(self.A, self.BY, self.noted(self.FIRST))))
+
+    def test_current_tip_wrapped_reraise_escalates(self):
+        """Independent r3 :1227: a blockless review of the current tip re-raising on a continuation line."""
+        later = f"REVIEWING: goal/x @ {SHA_B}\nFAIL\n- {self.FIRST} in\n  src/a.ts still needs adding\n"
+        lead = fixed_lead(self.A, "@D@/REVIEW_x_astra_r3_c.md", self.noted(self.FIRST + " in"))
+        self.assert_escalated(run_named(lead, [
+            ("REVIEW_x_sonnet_r1_a.md", lineless_r1(self.A), 1000),
+            ("REVIEW_x_opus_r2_b.md", later, 2000),
+            ("REVIEW_x_astra_r3_c.md", r2_file(prior=[("r1 P3 src/a.ts", "closed")]), 3000)]))
+
+    def test_own_continuation_line_refuses(self):
+        """The eligible finding's own text giving the token a line (':N', '#L', '(N)') makes it lined after all."""
+        for cont in ("see src/a.ts:12", "see src/a.ts#L12", "see src/a.ts(12)", "see src/a.ts :12",
+                     "see SRC/A.TS:12"):
+            with self.subTest(cont=cont):
+                self.assert_refused(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A + "\n  " + cont)))
+        self.assert_refused(self.close(self.A + " — at src/a.ts:12", "src/a.ts"))
+
+    def test_own_text_without_a_line_closes(self):
+        for cont in ("see src/a.ts for the checker", "src/a.ts: the checker", "src/a.tsx:12 is a sibling"):
+            with self.subTest(cont=cont):
+                self.assert_closed(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A + "\n  " + cont)))
+
+    def test_reference_link_tokens_are_not_tokens(self):
+        """Independent r3 :556: reference-style links and a trailing (N) are not plain tokens."""
+        for line in ("P3 [src/a.ts][source] — x", "P3 src/a.ts(12) — x", "P3 src/a.ts[12] — x", "P3 (src/a.ts) — x",
+                     "P3 [src/a.ts] — x", "P3 [src/a.ts][12] — x", "P3 src/[a.ts] — x", "P3 src/a.ts/(x) — x"):
+            self.assertIsNone(chk.path_only_token(line), line)
+        for line, tok in (("P3 app/(booking)/page.tsx — x", "app/(booking)/page.tsx"),
+                          ("P3 app/[id]/page.tsx — x", "app/[id]/page.tsx"),
+                          ("P3 pages/clients/[id].tsx — x", "pages/clients/[id].tsx")):
+            self.assertEqual(chk.path_only_token(line), tok, line)
+
+    def test_reference_link_repros_refuse(self):
+        for tok, definition in (("[src/a.ts][source]", "[source]: src/a.ts#L12"),
+                                ("[src/a.ts][source]", "[source]: src/other.ts#L12"),
+                                ("src/a.ts(12)", "")):
+            a = f"P3 {tok} — the contraindication checker lacks a regression assertion — add it"
+            with self.subTest(tok=tok):
+                self.assert_refused(self.close(a, tok, raise_r1=self.legacy_r1(a, tail=f"\n{definition}\n")))
+
+    def test_reference_definition_bars_the_file(self):
+        """Any reference definition in the raising file bars its plain tokens too (fail closed)."""
+        self.assert_refused(self.close(self.A, "src/a.ts",
+                                       raise_r1=self.legacy_r1(self.A, tail="\n[source]: src/a.ts#L12\n")))
+        self.assert_refused(self.close(self.A, "src/a.ts", raise_r1=lineless_r1(self.A) + "\n  [x]: lib/b.ts\n"))
+        self.assert_closed(self.close(self.A, "src/a.ts", raise_r1=self.legacy_r1(self.A, tail="\nsee [x] later\n")))
+
+    def test_route_file_names_close(self):
+        for path in ("pages/clients/[id].tsx", "app/(booking)/page.tsx", "app/[id]/page.tsx"):
+            src = f"P3 {path} — the contraindication checker's failed-read path has no test — add one"
+            with self.subTest(path=path):
+                self.assert_closed(self.close(src, path))
+
+    def test_format_and_compatibility_characters_escalate(self):
+        """(G): U+2063 and a soft hyphen are format characters; NFKC folds full-width letters and the division
+        slash. Cross-script homoglyphs (Cyrillic а) stay a documented crafted-only residual."""
+        for mention in ("src/a.⁣ts", "src/a.­ts", "ｓrc/a.ts", "src∕a.ts", "src/a․ts"):
+            again = f"P3 lib/b.ts:5 — {mention} still lacks the regression assertion — add it"
+            with self.subTest(mention=mention):
+                self.assert_escalated(self.tip_mention(again, self.A, "src/a.ts"))
+        code, out = self.tip_mention("P3 lib/b.ts:5 — src/а.ts still lacks it — add it", self.A, "src/a.ts")
+        self.assertIn("FIXED=1", out)  # the residual, pinned so a fix shows up here

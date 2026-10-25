@@ -81,6 +81,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -535,49 +536,102 @@ def leading_loc(finding):
     return m.group(1) if m else None
 
 
-def ref_loc(finding):
+def ref_loc(finding, files=None):
     """What a prior ref names a finding by: its leading file:line, else (raised with no line, LUCY-cwpxu)
     its exact path token (path_only_token), else None."""
-    return leading_loc(finding) or path_only_token(finding)
+    return leading_loc(finding) or path_only_token(finding, files)
 
 
 # Path-only refs (LUCY-cwpxu attempt 3): exact, no normalisation on either side. A finding is eligible only as
 # "<SEV> <TOKEN> — ..." (or " - "), and a ref names it only by that TOKEN, byte for byte. Anything else, from a
 # wrapper to a link, an anchor or a prefix, is not eligible, so its path-only ref refuses (fail closed).
 PATH_ONLY_FINDING = re.compile(r"^(P[123]) (\S+) [—-] ")
-PATH_ONLY_TOKEN = re.compile(r"[A-Za-z0-9._@()\[\]/-]+")
+# Attempt 4 (F): '/'-joined segments, each (group), [param] or plain, the last one a plain file name (a Next.js
+# '[id].tsx' allowed), so a reference link '[src/a.ts][source]' or 'src/a.ts(12)' is not a token.
+PATH_ONLY_TOKEN = re.compile(r"(?:(?:\([\w.-]+\)|\[[\w.-]+\]|[\w.@-]+)/)*(?:\[\w+\]\.)?[\w.@-]+", re.ASCII)
+# A markdown reference definition ("[source]: src/a.ts#L12") can point a token anywhere: no finding in its file
+# is path-only (attempt 4, F).
+REF_DEFINITION = re.compile(r"(?m)^\s*\[[^\]]+\]:\s")
+# Where a legacy finding's continuation lines stop (attempt 4, E), besides a finding, section or verdict line.
+CONTINUATION_END = re.compile(r"^\s*(?:$|[-*+•]\s|\d+[.)]\s|#|```|~~~|REVIEWING:)")
 
 
 def exact_token(tok):
     """tok if it may be a path-only ref's file, else None: the token grammar, a letter or digit, no '..', no
-    markdown link, no _emphasis_ wrapper, no empty segment, no tally (P1/P2), and no leading ./ a/ b/ or /."""
+    _emphasis_ wrapper, no tally (P1/P2), and no leading ./ a/ or b/."""
     ok = (PATH_ONLY_TOKEN.fullmatch(tok) and re.search(r"[A-Za-z0-9]", tok) and ".." not in tok
           and not TALLY.fullmatch(tok)
-          and "](" not in tok and "//" not in tok and not tok.endswith("/")
-          and not (tok.startswith("_") and tok.endswith("_")) and not tok.startswith(("./", "a/", "b/", "/")))
+          and not (tok.startswith("_") and tok.endswith("_")) and not tok.startswith(("./", "a/", "b/")))
     return tok if ok else None
 
 
-def path_only_token(finding):
-    """The exact path token of a finding raised with no line ("P3 tests/a.test.ts — ..."), else None."""
+def squash(s):
+    """s for matching (attempt 4, G): NFKC, then every whitespace and Unicode format (Cf) character deleted, so a
+    path split across a line or carrying an invisible mark still matches. Lower-cased."""
+    s = unicodedata.normalize("NFKC", s)
+    return "".join(c for c in s if not c.isspace() and unicodedata.category(c) != "Cf").lower()
+
+
+_CONTEXT = [None, None]
+
+
+def finding_context(files):
+    """({finding: [its full texts]}, {findings no path-only ref may name}) over the inputs (attempt 4, E/F). A
+    legacy finding's full text is its line plus every continuation line up to a blank line, the next bullet or
+    finding, a heading, a fence or a section; a block finding's is its text. A file with a markdown reference
+    definition bars all of its findings. The same finding in two files keeps both texts."""
+    key = tuple((str(x[0]), x[2]) for x in files)
+    if _CONTEXT[0] == key:
+        return _CONTEXT[1]
+    texts, barred = {}, set()
+    for x in files:
+        mine = set(x[1])
+        for o in mine:
+            texts.setdefault(o, [o])
+        if REF_DEFINITION.search(x[2]):
+            barred |= mine
+        lines = x[2].splitlines()
+        for i, line in enumerate(lines):
+            if not FINDING.match(line) or clean(line) not in mine:
+                continue
+            j = i + 1
+            while j < len(lines) and not (CONTINUATION_END.match(lines[j]) or FINDING_START.match(lines[j])
+                                          or SECTION.match(lines[j]) or VERDICT_HEAD.match(lines[j])):
+                j += 1
+            if j > i + 1:
+                texts[clean(line)].append("\n".join(lines[i:j]))
+    _CONTEXT[:] = [key, (texts, barred)]
+    return texts, barred
+
+
+def path_only_token(finding, files=None):
+    """The exact path token of a finding raised with no line ("P3 tests/a.test.ts — ..."), else None. Given the
+    inputs, also None when its file bars it (REF_DEFINITION) or any of its full texts gives the token a line after
+    all: ':<digit>', '#L' or '(<digit>' right after it (attempt 4, E)."""
     m = PATH_ONLY_FINDING.match(finding)
-    return exact_token(m.group(2)) if m else None
+    tok = exact_token(m.group(2)) if m else None
+    if tok and files is not None:
+        texts, barred = finding_context(files)
+        lined = re.compile(re.escape(squash(tok)) + r"(?::\d|#l|\(\d)")
+        if finding in barred or any(lined.search(squash(t)) for t in texts.get(finding, [finding])):
+            return None
+    return tok
 
 
 def path_needles(tok):
     """What another finding naming tok would contain: the token and its file name, each also with route marks
-    ()[] dropped and edge punctuation trimmed. Lower-cased; extra needles only add escalations."""
+    ()[] dropped and edge punctuation trimmed. Squashed; extra needles only add escalations."""
     out = set()
     for t in (tok, tok.rsplit("/", 1)[-1]):
-        out |= {t.lower(), re.sub(r"[()\[\]]", "", t).strip(".-_@").lower()}
+        out |= {squash(t), squash(re.sub(r"[()\[\]]", "", t).strip(".-_@"))}
     return out
 
 
-def names_path(o, tok):
-    """Finding line o names tok anywhere (G3, LUCY-cwpxu): a plain substring, case-insensitive, with all
-    whitespace and zero-width characters deleted, so a path split across a line or a URL still counts."""
-    hay = re.sub(r"[\s\u200b-\u200d\u2060\ufeff]+", "", o).lower()
-    return any(n in hay for n in path_needles(tok))
+def names_path(o, tok, files=None):
+    """Finding o names tok anywhere (G3, LUCY-cwpxu): a plain substring of any of its full texts (attempt 4, E),
+    squashed, so a path split across a line or a URL still counts."""
+    texts = finding_context(files)[0].get(o, [o]) if files is not None else [o]
+    return any(n in squash(t) for t in texts for n in path_needles(tok))
 
 
 def decl_words(lines):
@@ -1145,7 +1199,7 @@ def tip_statuses(files, tip, rounds, sev, loc):
 def dispute(src, files):
     """Why reviews of the current tip disagree on an earlier finding (one closes a round that raised
     it, one keeps a round open), else None. Checked whatever the lead graded it (LUCY-e3opf)."""
-    loc = ref_loc(src)
+    loc = ref_loc(src, files)
     tip = current_tip(files)[0] if files else ""
     if not loc or not tip:
         return None
@@ -1185,7 +1239,7 @@ def orphan_open_priors(files, items=()):
                             "review-verdict shape")
         for (r, sev, loc), st in priors[x[0]].items():
             # Exact: a path-only ref names only a finding raised with no line there (LUCY-cwpxu).
-            if not any(round_of(y[0]) == r and any(o[:2] == sev and ref_loc(o) == loc
+            if not any(round_of(y[0]) == r and any(o[:2] == sev and ref_loc(o, files) == loc
                                                                     for o in y[1]) for y in files):
                 errs.append(f"{Path(x[0]).name}: prior ref r{r} {sev} {loc} ({st}) matches no round-{r} finding "
                             f"in the --verdict reviews: pass the review that raised it so the lead covers it")
@@ -1221,10 +1275,10 @@ def ref_ambiguity(files, r, sev, loc):
     defect, so it comes back alongside: fail closed, noise escalations accepted."""
     if path_parts(loc)[1] is not None:
         return sorted({o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and leading_loc(o) == loc})
-    named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o) == loc}
+    named = {o for y in files if round_of(y[0]) == r for o in y[1] if o[:2] == sev and path_only_token(o, files) == loc}
     if len(named) != 1:
         return sorted(named)
-    return sorted(named | {o for y in files for o in y[1] if names_path(o, loc)})
+    return sorted(named | {o for y in files for o in y[1] if names_path(o, loc, files)})
 
 
 def ambiguous_refs(files):
@@ -1311,7 +1365,7 @@ def fixed_errors(tag, f, src, files):
         if r_later is None or r_x is None or r_later <= r_x:
             return [f"{tag}: fixed_by {Path(later[0]).name} is not newer than {Path(x[0]).name} "
                     f"(round {r_later} vs {r_x})"]
-    loc, sev = ref_loc(src), src[:2]
+    loc, sev = ref_loc(src, files), src[:2]
     if not loc:
         return [f"{tag}: fixed needs the finding to start with its file:line (or, raised with no line, its file)"]
     # The current tip is what the newest review (by round) reviewed. A confirmation of an
