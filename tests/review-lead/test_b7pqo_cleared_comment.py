@@ -207,6 +207,25 @@ class ClearedComment(unittest.TestCase):
         gate.FLEET_ROLE = self.tmp / "missing.py"
         self.assertRefused(self.run_gate(self.real + self.orch_line, self.clear_arg), "for the orchestrator only")
 
+    def test_verdict_rewritten_during_the_wait_revalidates_the_clearance(self):
+        """Same bytes, new mtime after the orchestrator line: the gate re-checks and writes nothing."""
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        bd_log = self.tmp / "bd.log"
+        (bin_dir / "bd").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{bd_log}'\n")
+        (bin_dir / "bd").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+        text = self.real + self.orch_line  # orchestrator line at 06:30
+        gate.chk.bead_comments_text = lambda bead: text
+        target = self.reviews / "REVIEW_9kwlw_opus-h2h_r2_2026-10-25.md"
+
+        def rewrite(_):
+            target.write_bytes(target.read_bytes())
+            os.utime(target, (1792910130, 1792910130))  # 2026-10-25 06:35:30 UTC
+        gate.time.sleep = rewrite
+        self.assertRefused(self.run_gate(text, self.clear_arg, dry=False), "after the verdict files")
+        self.assertFalse(bd_log.exists())
+
     # --- end to end through the lander ------------------------------------------------------
     def test_real_write_lands_and_without_the_gate_pass_the_status_still_holds(self):
         sys.path.insert(0, str(HERE.parent.parent / "skills" / "land-batch" / "bin"))

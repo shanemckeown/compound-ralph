@@ -323,19 +323,28 @@ def main(argv=None):
                 return refuse(f"finding {f.get('id') or '?'} is graded fixed but was raised by a review of tip "
                               f"{tip[:10]} itself (or by no input): only an earlier commit's finding can be fixed")
     sums = {str(v): md5(v) for v in verdicts}
-    if clears:
+    def clearance_errors():
+        """Verify every --cleared-comment against the comments and verdict mtimes as they are now;
+        on success the honoured set replaces cleared_comments. Run again after the wait."""
+        if not clears:
+            return None
         try:
             text = Path(a.comments_file).read_text() if a.comments_file else chk.bead_comments_text(a.bead)
         except (OSError, ValueError) as e:
-            return refuse(f"cannot read bead comments ({e})")
+            return f"cannot read bead comments ({e})"
         # verify_clearances' rule: bd minutes are UTC, so a clearing comment in the newest verdict
         # file's own minute may predate it and does not count.
         newest = max(v.stat().st_mtime for v in verdicts)
         floor = newest - newest % 60
         honoured, errs = verify_cleared_comments(text, tip, clears, floor if floor >= newest else floor + 60)
+        cleared_comments.clear()
         if errs:
-            return refuse("clearance not verified: " + "; ".join(errs))
-        cleared_comments |= honoured
+            return "clearance not verified: " + "; ".join(errs)
+        cleared_comments.update(honoured)
+        return None
+    err = clearance_errors()
+    if err:
+        return refuse(err)
     if newer_fail():
         return refuse(f"a FAIL review of this tip is not among the inputs ({newer_fail()[0]}): "
                       "gate every review of the tip together")
@@ -408,6 +417,10 @@ def main(argv=None):
     changed = [str(v) for v in verdicts if md5(v) != sums[str(v)]]
     if changed:
         return refuse(f"verdict file changed while waiting: {changed[0]}; nothing written")
+    # A verdict rewritten (same bytes, new mtime) during the wait can postdate the clearance.
+    err = clearance_errors()
+    if err:
+        return refuse(f"{err}; nothing written")
     if newer_fail():
         return refuse(f"a FAIL review arrived while waiting ({newer_fail()[0]}); nothing written")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
