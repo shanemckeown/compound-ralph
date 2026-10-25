@@ -37,7 +37,8 @@ The review-verdict grammar (LUCY-e3opf, attempts 3-4), each refused:
     block finding or prior ref by severity and file (and line, when given). Wording is never compared.
     Lines that start like a finding but name no file, and severities whose only path is a weak slash-word
     ("user/owned/member", LUCY-16n7i), may not outnumber the block's findings + prior refs of that
-    severity. Frozen: LEAD.md "Declared prose limits".
+    severity; the weak ones alone may not outnumber the block's findings (prior refs never count, W1).
+    A weak slash-word is never an earlier-round note's reference (W2). Frozen: LEAD.md "Declared prose limits".
 A `fixed` grade counts only when EVERY review of the newest round (at the current tip) closes it in its prior
 array (C5). Any review of the tip marking it "open" escalates it; a newest-round one with no entry leaves it not
 fixed (blocking). Prose never grades. Inputs (attempt 5), each refused:
@@ -810,7 +811,7 @@ def sweep_whole_response(p, text, mine, verdict, block=None, meta=None):
 # A repo path in prose (LUCY-e3opf G5 AMENDED, B2), optional :line or :line-line, after a space or "(":
 #  - any token with a slash: "lib/x.ts", "services/worker", "app/(dashboard)/page.tsx:12", "~/x/lib/pay.ts",
 #    "/Users/s/repo/lib/x.ts:4". So "and/or" is a path token too; weak_path then reads it as a slash-word
-#    that locates nothing, and its severity is counted as unlocated (LUCY-16n7i). A token whose
+#    that locates nothing, and its severity is a weak claim (LUCY-16n7i W1). A token whose
 #    every segment is a severity, a number or a hazard id ("P1/P2/P3", "9/10", "H-U1/H-U3") is a tally,
 #    never a file (TALLY);
 #  - a name with a 2-10 character extension starting with a letter: "tokens.ts", "schema.prisma",
@@ -889,7 +890,7 @@ def line_claims(line, skip=None, relief=True):
     """([(severity, path, line or None)], [severity]) for a prose line: each standalone severity with the
     first path after it (before the next severity), else the nearest path before it. No path, no claim.
     LUCY-16n7i: a line whose every path is a weak slash-word (weak_path) locates nothing, and its severities
-    come back in the second list, to be counted as unlocated, never ignored. A line with any strong path is
+    come back in the second list, as weak claims (W1), never ignored. A line with any strong path is
     bound exactly as before, slash-words included, so a slash-word there still refuses as a location: no
     severity on a mixed line borrows or escapes another path (own-gate r1/r2). relief=False (a fragment of a
     line that has a strong path elsewhere) binds as before too. The severity token starting at `skip` (an
@@ -954,11 +955,19 @@ def prose_claim_errors(p, lines, meta, prior):
     verbatim = {f["canon"] for f in meta}
     NOTE_REFS[str(p)] = set()
     unlocated = {"P1": [], "P2": [], "P3": []}
+    weak_claims = {"P1": [], "P2": [], "P3": []}
     for line in lines:
         if clean(line) in verbatim:
             continue
         claims = []
         note = EARLIER_NOTE.match(line)
+        # LUCY-16n7i W2: a weak slash-word is never a note's reference. A note whose every path is one is read
+        # as a plain prose line, so every severity on it (its own "rN Px" included, which CLAIM_SEV reads as a
+        # count) is a weak claim, counted against block findings only (W1): a closed prior at the slash-word
+        # can't absorb new findings in its tail, and an open note on one can't drop out.
+        if note and repo_paths(note.group(3)) and all(weak_path(m) for m in repo_paths(line)):
+            weak_claims[note.group(2)].append(line.strip()[:100])
+            note = None
         if note:
             ref = next(iter(repo_paths(note.group(3))), None)
             tail = note.group(5)
@@ -969,24 +978,24 @@ def prose_claim_errors(p, lines, meta, prior):
             # The note's status word is never read: prose neither grades nor disputes (LUCY-e3opf B1, the
             # block is authoritative). Its reference, and any path-free severity in its text, names round
             # N's finding, so the block carries it or the raising review is an input (orphan_open_priors).
-            # With no reference, a slash-word severity is unlocated (LUCY-16n7i).
+            # With no reference, a slash-word severity is a weak claim (LUCY-16n7i W1).
             refs = [note.group(2)] if ref else []
             if ref and not claims:
                 refs += [s.group(0) for s in claim_sevs(tail)]
             else:
                 for sev in weak:
-                    unlocated[sev].append(line.strip()[:100])
+                    weak_claims[sev].append(line.strip()[:100])
             for sev in refs:
                 if claim_error(sev, ref.group(1), ref.group(2), carried):
                     NOTE_REFS[str(p)].add((int(note.group(1)), sev, ref.group(1), ref.group(2), line.strip()[:100]))
         else:
             claims, weak = line_claims(line)
             start = FINDING_START.match(line) or EXPLICIT_LABEL.match(line.lstrip(" -*•#>"))
-            # A severity whose only path is a weak slash-word ("P1 user/owned/member leak") is unlocated:
-            # counted against the block below, never ignored, so a prose P1 can't hide behind prose
-            # slashes (LUCY-16n7i). The line's starting severity is counted once.
+            # A severity whose only path is a weak slash-word ("P1 user/owned/member leak") is a weak claim:
+            # counted against the block's findings below, never ignored, so a prose P1 can't hide behind
+            # prose slashes (LUCY-16n7i). The line's starting severity is counted once.
             for sev in weak:
-                unlocated[sev].append(line.strip()[:100])
+                weak_claims[sev].append(line.strip()[:100])
             if start and not claims:
                 first = re.search(r"P[123]", start.group(0)).group(0)
                 if first not in weak:
@@ -997,8 +1006,18 @@ def prose_claim_errors(p, lines, meta, prior):
                 raise ValueError(f"{p}: prose finding not in the review-verdict block ({why}): {line.strip()[:100]}")
     # A line that starts like a finding but names no file (its location wrapped to the next line, or
     # missing): the block must hold at least as many findings and prior refs of that severity.
+    # LUCY-16n7i W1: a weak claim may be a real extensionless path ("workers/billing"), so it needs a block
+    # FINDING of its severity, one each, never a prior ref: an unrelated closed prior must not absorb a new
+    # prose finding. Weak claims also join the lines naming no file in the findings + prior refs count.
+    for sev, found in weak_claims.items():
+        have = sum(f["sev"] == sev for f in meta)
+        if len(found) > have:
+            raise ValueError(f"{p}: {len(found)} prose {sev} claim(s) name only a slash-word, not a file, and the "
+                             f"review-verdict block has {have} {sev} finding(s) (prior refs don't count): put "
+                             f"every finding in the block with its file_line: {found[0]}")
     for sev, found in unlocated.items():
         have = sum(f["sev"] == sev for f in meta) + sum(k[1] == sev for k in prior)
+        found = found + weak_claims[sev]
         if len(found) > have:
             raise ValueError(f"{p}: {len(found)} prose line(s) start with {sev} but name no file, and the "
                              f"review-verdict block has {have} {sev} finding(s) or prior ref(s): put every "

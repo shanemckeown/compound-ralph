@@ -91,13 +91,13 @@ class G5SlashWords(unittest.TestCase):
     def test_weak_p1_with_no_p1_in_the_block_refuses(self):
         for prose in ("P1 user/owned/member leak", "Also a P1 user/owned/member leak on retry",
                       "- r1 P3 the retry note open: P1 user/owned/member leak"):
-            with self.assertRaisesRegex(ValueError, "start with P1 but name no file", msg=prose):
+            with self.assertRaisesRegex(ValueError, "P1 claim\\(s\\) name only a slash-word", msg=prose):
                 parse_text(strict_file(prose, self.P3))
 
     def test_weak_claims_count_per_severity(self):
         one = [("P1", "lib/pay.ts:3", "double charge — fix")]
         self.assertEqual(len(parse_text(strict_file("P1 user/owned/member leak", one))), 1)
-        with self.assertRaisesRegex(ValueError, "2 prose line\\(s\\) start with P1"):
+        with self.assertRaisesRegex(ValueError, "2 prose P1 claim\\(s\\) name only a slash-word"):
             parse_text(strict_file("P1 user/owned leak; P1 team/member leak", one))
 
     def test_known_dir_slash_word_is_a_path(self):
@@ -139,7 +139,7 @@ class G5SlashWords(unittest.TestCase):
                                         msg=prose):
                 parse_text(strict_file(prose, prior=unrelated))
         # A note whose every path is a slash-word keeps the relief (counted, here with no P1 in the block).
-        with self.assertRaisesRegex(ValueError, "start with P1 but name no file"):
+        with self.assertRaisesRegex(ValueError, "P1 claim\\(s\\) name only a slash-word"):
             parse_text(strict_file("- r1 P3 the retry note open: P1 user/owned/member leak", self.P3))
 
     def test_a_slash_word_cut_out_of_a_longer_token_is_strong(self):
@@ -160,6 +160,51 @@ class G5SlashWords(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, f"no review-verdict finding or prior ref at {loc}", msg=loc):
                 parse_text(strict_file(f"P1 {loc} exposes another clinic patient export",
                                        prior=[("r1 P1 lib/pay.ts:37", "closed")]))
+
+
+class WeakClaimsNeedBlockFindings(unittest.TestCase):
+    """Attempt 2 (W1/W2): the independent r1 repros. A weak claim may be a real extensionless path, so it is
+    counted against block findings only, one each; a prior ref, however unrelated or closed, never covers it."""
+    SLASH = "claim\\(s\\) name only a slash-word"
+
+    def test_an_unrelated_closed_prior_does_not_cover_a_weak_p1(self):
+        # independent r1 P1 (:901): 'workers/billing' is a real path written as plain words.
+        with self.assertRaisesRegex(ValueError, f"1 prose P1 {self.SLASH}"):
+            parse_text(strict_file("P1 workers/billing double-charges on retry",
+                                   prior=[("r1 P1 lib/pay.ts:37", "closed")]))
+
+    def test_a_weak_note_reference_absorbs_nothing(self):
+        # independent r1 P2 (:974): the note's weak reference is not a reference; every P1 on it is a weak claim.
+        prose = "- r1 P1 reports/summary closed: P1 exports/archive leaks; P1 team/member-list leaks"
+        with self.assertRaisesRegex(ValueError, f"3 prose P1 {self.SLASH}"):
+            parse_text(strict_file(prose, prior=[("r1 P1 reports/summary:10", "closed")]))
+        # The note's own severity counts too, so an open note on a slash-word can't drop out.
+        with self.assertRaisesRegex(ValueError, f"1 prose P1 {self.SLASH}"):
+            parse_text(strict_file("- r1 P1 workers/billing open: still double-charges",
+                                   prior=[("r1 P1 workers/billing:10", "closed")]))
+
+    def test_the_r3_note_tail_case_still_refuses(self):
+        # own-gate r3: a strong note reference binds the tail as on main (a location refusal, not a count).
+        with self.assertRaisesRegex(ValueError, "no review-verdict finding or prior ref at reports/patient-export"):
+            parse_text(strict_file("- r1 P1 lib/pay.ts:37 closed: P1 reports/patient-export leaks",
+                                   prior=[("r1 P1 lib/pay.ts:37", "closed")]))
+
+    def test_one_block_finding_per_weak_claim(self):
+        one = [("P1", "lib/pay.ts:3", "double charge — fix")]
+        self.assertEqual(len(parse_text(strict_file("P1 workers/billing double-charges", one))), 1)
+        with self.assertRaisesRegex(ValueError, f"2 prose P1 {self.SLASH}"):
+            parse_text(strict_file("P1 workers/billing double-charges\nP1 team/member-list leaks", one,
+                                   prior=[("r1 P1 lib/old.ts:9", "closed")]))
+
+    def test_weak_claims_and_fileless_lines_share_one_pool(self):
+        # A weak claim and a line naming no file can't both lean on one block finding.
+        one = [("P1", "lib/pay.ts:3", "double charge — fix")]
+        with self.assertRaisesRegex(ValueError, "2 prose line\\(s\\) start with P1 but name no file"):
+            parse_text(strict_file("P1 workers/billing double-charges\nP1 the wrapped finding\n", one))
+
+    def test_a_weak_note_with_a_finding_in_the_block_passes(self):
+        p3 = [("P3", "lib/auth/request-memo.ts:70", "H-D1 test gap — add a case")]
+        self.assertEqual(len(parse_text(strict_file("- r1 P3 user/owned/member open: still a gap", p3))), 1)
 
 
 class ReplayM5lm7(unittest.TestCase):

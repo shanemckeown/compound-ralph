@@ -360,9 +360,9 @@ class OwnGateRound1(unittest.TestCase):
         for prose in ("No H-P0/P1 hazards apply", "Seen on localhost:3000 during the P3 check",
                       "Earlier P3 grading retained."):
             self.assertEqual(parse_text(self.file(prose)), [], prose)
-        # LUCY-16n7i: 'and/or' is a weak slash-word, never a location. Its severities are unlocated, so with
-        # no P2 in the block the line still refuses (fails closed), now by count, not as a path.
-        with self.assertRaisesRegex(ValueError, "start with P2 but name no file"):
+        # LUCY-16n7i: 'and/or' is a weak slash-word, never a location. Its severities are weak claims, so with
+        # no P2 finding in the block the line still refuses (fails closed), now by count, not as a path.
+        with self.assertRaisesRegex(ValueError, "P2 claim\\(s\\) name only a slash-word"):
             parse_text(self.file("No P2 and/or P3 items remain"))
 
     def test_backticked_bare_severity_is_a_claim(self):
