@@ -35,20 +35,27 @@ def test_light_diff_runs_tsc_once_and_skips_pg_lane_and_cloudbuild():
 
 
 def test_full_diff_runs_tsc_then_the_whole_cloudbuild_simulation():
-    result = tg.plan(FULL)
+    # LUCY-r2ytt: the local simulation is now the LAND_GATE_REMOTE=0 fallback.
+    result = tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})
     assert result["tier"] == "full" and names(result) == ["tsc", "cloudbuild-full"]
     # The whole simulation (no --step) includes step #2, the pg lane inside the tarball.
     assert result["gates"][1]["cmd"].endswith("simulate-cloudbuild-test.sh")
+    # The default is the same two gates, with both Cloud Build lanes run remotely.
+    assert names(tg.plan(FULL)) == ["tsc", "cloudbuild-full"]
 
 
 def test_full_gates_are_sequential_and_pg_work_holds_the_lock():
     # 12 Oct: pg lane + test:cloudbuild run concurrently gave 9 false pg failures.
-    result = tg.plan(FULL)
+    result = tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})
     assert result["sequential"] is True
     pg = [g for g in result["gates"] if "cloudbuild" in g["name"] or "pg" in g["cmd"]]
     assert len(pg) == 1 and pg[0]["cmd"].startswith('python3 "$HOME/.claude/scripts/pg-lane-lock.py" --')
     for gate in result["gates"]:
         assert "&" not in gate["cmd"].replace("&&", "")
+    # Remote (the default) runs no pg work on the laptop, so it takes no lock, but stays sequential.
+    remote = tg.plan(FULL)
+    assert remote["sequential"] is True
+    assert all("pg-lane-lock" not in g["cmd"] and "&" not in g["cmd"].replace("&&", "") for g in remote["gates"])
 
 
 def test_beads_export_adds_the_config_effect_suite():
@@ -115,8 +122,10 @@ def test_fresh_scratch_has_node_modules_before_commit(tmp_path):
 
 def test_cloudbuild_gate_cannot_inherit_skip_pg_tests():
     # Astra round 2: SKIP_PG_TESTS=1 in the lander's shell would drop step #2 and still exit 0.
-    cmd = tg.plan(FULL)["gates"][-1]["cmd"]
+    cmd = tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})["gates"][-1]["cmd"]
     assert "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh" in cmd
+    # Remote: the runner forwards no lander environment to Cloud Build, so nothing to unset.
+    assert tg.plan(FULL)["gates"][-1]["cmd"] == REMOTE
 
 
 # LUCY-z3ykz.8: the push-time verdict. Independent review 13 Oct: `gates: []` with a matching
@@ -202,10 +211,13 @@ def test_land_gate_remote_switches_only_the_cloudbuild_cmd():
 
 
 def test_land_gate_remote_unset_uses_the_one_default_constant(monkeypatch):
-    assert tg.plan(FULL, env={})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]  # default off until acceptance
-    monkeypatch.setattr(tg, "REMOTE_DEFAULT", True)
+    assert tg.REMOTE_DEFAULT is True  # LUCY-r2ytt: on after the 26 Oct live acceptance
     assert tg.plan(FULL, env={})["gates"][1]["cmd"] == REMOTE
+    assert tg.plan(FULL, env={"LAND_GATE_REMOTE": ""})["gates"][1]["cmd"] == REMOTE
     assert tg.plan(FULL, env={"LAND_GATE_REMOTE": "0"})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]
+    monkeypatch.setattr(tg, "REMOTE_DEFAULT", False)
+    assert tg.plan(FULL, env={})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"]
+    assert tg.plan(FULL, env={"LAND_GATE_REMOTE": "1"})["gates"][1]["cmd"] == REMOTE
 
 
 def test_land_gate_remote_is_read_from_the_lander_environment(monkeypatch):
@@ -221,12 +233,13 @@ def test_remote_plan_passes_and_fails_the_push_check_like_the_local_one(tmp_path
     assert tg.push_problems(tier_plan, HEAD, tmp_path) == ["cloudbuild-full:137"]
 
 
-def test_unset_land_gate_remote_plan_is_exactly_the_pre_vxk2v_local_plan():
+def test_fallback_land_gate_remote_0_plan_is_exactly_the_pre_vxk2v_local_plan():
     # Review P4-1: no stray key, same gates, same cmd strings as main before LUCY-vxk2v.
+    # LUCY-r2ytt: unset now means remote, so only an explicit 0 (the outage fallback) is local.
     pre_vxk2v_cloudbuild = {"name": "cloudbuild-full",
                             "cmd": 'python3 "$HOME/.claude/scripts/pg-lane-lock.py" -- '
                                    "env -u SKIP_PG_TESTS bash scripts/ci/simulate-cloudbuild-test.sh"}
-    for env in ({}, {"LAND_GATE_REMOTE": ""}, {"LAND_GATE_REMOTE": "0"}):
+    for env in ({"LAND_GATE_REMOTE": "0"}, {"LAND_GATE_REMOTE": "off"}):
         full, light = tg.plan(FULL, env=env), tg.plan(LIGHT, env=env)
         assert set(full) == set(light) == {"tier", "reasons", "sequential", "gates"}
         assert full["gates"] == [tg.TSC, pre_vxk2v_cloudbuild]

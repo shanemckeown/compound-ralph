@@ -52,9 +52,9 @@ CLOUDBUILD = {"name": "cloudbuild-full",
 # `uv run --script` reads the script's inline metadata (PyYAML for its allow-list; system python3
 # has none). Without PyYAML the script refuses with exit 2; it never falls back to a text scan.
 CLOUDBUILD_REMOTE_CMD = 'uv run --script "$HOME/.claude/scripts/cloudbuild-gate-remote.py" --scratch .'
-# LAND_GATE_REMOTE=1 / =0 picks remote / local; unset uses this. The Manager flips it to True
-# after the live acceptance run; =0 stays the Cloud Build outage fallback.
-REMOTE_DEFAULT = False
+# LAND_GATE_REMOTE=1 / =0 picks remote / local; unset uses this. On since the LUCY-r2ytt live
+# acceptance (26 Oct); =0 stays the Cloud Build outage fallback.
+REMOTE_DEFAULT = True
 
 
 def gate_remote(env=None):

@@ -724,9 +724,9 @@ jq -r '"tier=\(.tier)", (.reasons[] | "  \(.)")' "$TIER_JSON"
 GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
 ~~~
 
-With `LAND_GATE_REMOTE=1` in the lander's shell (LUCY-vxk2v), `cloudbuild-full` runs `uv run --script ~/.claude/scripts/cloudbuild-gate-remote.py` instead: two Cloud Build lanes of `cloudbuild-gate.yaml` as the test-only `cloudbuild-gate` service account, the same evidence files, exit 137 = infra, exit 2 = config or account refused, and no Colima or pg-lane lock. `LAND_GATE_REMOTE=0` is the Cloud Build outage fallback (note "fallback used" in evidence); the tier JSON gains `cloudbuild_remote: true` only on the remote path.
+By default (LUCY-r2ytt, 26 Oct; `LAND_GATE_REMOTE` unset or `1`), `cloudbuild-full` runs `uv run --script ~/.claude/scripts/cloudbuild-gate-remote.py` instead: two Cloud Build lanes of `cloudbuild-gate.yaml` as the test-only `cloudbuild-gate` service account, the same evidence files, exit 137 = infra, exit 2 = config or account refused, and no Colima or pg-lane lock. `LAND_GATE_REMOTE=0` is the Cloud Build outage fallback (note "fallback used" in evidence); the tier JSON gains `cloudbuild_remote: true` only on the remote path.
 
-For a full tier run `colima start` first (step #2 needs Docker). Then run each gate in list order, detached,
+For a full tier on the `LAND_GATE_REMOTE=0` fallback run `colima start` first (step #2 needs Docker); the remote default needs neither Colima nor the pg-lane lock. Then run each gate in list order, detached,
 waiting for its exit file before starting the next (never two at once). Each gate's
 command already takes the pg-lane lock, so a full lane anywhere else on the laptop
 makes it wait:
