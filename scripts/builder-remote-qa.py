@@ -19,19 +19,20 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    landing gates). The project limit is read once per run:
    `gcloud beta quotas preferences describe ongoing-builds-20 --project=aestheticc
    --format=value(quotaConfig.grantedValue)`; a failed, empty or non-integer read means 10.
-   The cap for builder runs is limit - BUILDER_QA_RESERVE, so 10 -> 6 and 20 -> 16. The reserve
-   (for prod + landing) is never below MIN_RESERVE = 4: a lower BUILDER_QA_RESERVE is clamped,
-   and BUILDER_QA_MAX_INFLIGHT / --max-inflight can only LOWER the cap (a higher one is clamped
-   to limit - 4, with a note).
-   A run adds 2 builds. Admission is atomic laptop-wide: under an flock on RESERVATIONS it
-   lists the ongoing build ids, reconciles every pending reservation (an admitted builder whose
-   builds may not be visible yet) and admits only if ongoing + pending + 2 <= cap. Each build
-   counts once: listed as ongoing, or still pending, never both; a reservation's printed id
-   that is terminal frees its slot. A reservation is held until its ids show as ongoing or
-   terminal, or its owner pid exits (no age expiry: a slow upload keeps its slot). Otherwise
-   poll every --poll seconds up to --admit-wait, then fall back local. A failed list, or a
-   corrupt ledger (`FALLBACK local: reservation ledger unreadable (<reason>)`; the file is
-   moved aside with a timestamp), is infra: fall back local, never submit blind.
+   Admission is a slot semaphore: N = (limit - BUILDER_QA_RESERVE) // 2 runs (each run is 2
+   builds), so 10 -> 3 and 20 -> 8. The reserve (for prod + landing) is never below
+   MIN_RESERVE = 4: a lower BUILDER_QA_RESERVE is clamped, and BUILDER_QA_MAX_INFLIGHT /
+   --max-inflight (in builds) can only LOWER N (a higher one is clamped, with a note).
+   A run takes a free slot by flock(LOCK_EX | LOCK_NB) on SLOT_DIR/slot-<i> (i < N), polling
+   every --poll seconds up to --admit-wait, then falls back local. The locked fd stays open for
+   the whole run and is passed to the runner (pass_fds), so the kernel holds the slot until the
+   last process with the fd exits: SIGKILL, pid reuse and a runner that outlives this wrapper
+   are all covered with no bookkeeping. (uv passes the fd on to the runner; the runner's own
+   short gcloud calls do not inherit it, so the slot lives exactly as long as the runner.) The
+   holder note in the file is for humans only. No ledger or state file is kept.
+   Deny-only guard, while holding the slot: one `gcloud builds list --ongoing`; if ongoing + 2 >
+   the granted limit, or the list fails, the slot is dropped and the run falls back local. That
+   read can only deny, never admit beyond the slots, so a lagging list is harmless.
    Builders on other machines are not covered by the lock; this one laptop runs the fleet.
 3. Remote verdict: runner exit 0 WITH its `RESULT unit=SUCCESS pg=SUCCESS exit 0` line ->
    `REMOTE GREEN @<sha>`, exit 0. Exit 1 WITH a `FAILED LANE` line -> `REMOTE RED @<sha>` and
@@ -82,7 +83,7 @@ FALLBACK_LIMIT = 10  # the project's granted ongoing-builds limit when it cannot
 MIN_RESERVE = 4  # builds always kept free for prod builds and landing gates; never lower
 BUILDS_PER_RUN = 2  # the runner submits two lanes (unit + pg)
 GCLOUD_TIMEOUT = 90
-RESERVATIONS = Path.home() / ".claude" / "state" / "builder-remote-qa.reservations"
+SLOT_DIR = Path.home() / ".claude" / "state" / "builder-qa-slots"
 # The runner's SIGTERM path: SIGNAL_JOIN_BOUND (20 s) for hung submits, then a cancel per lane
 # (each a quick gcloud call, normally seconds). Wait well past both before SIGKILL.
 KILL_GRACE = 180
@@ -130,10 +131,11 @@ def parse_limit(result):
     return int(value), f"granted limit {int(value)}"
 
 
-def builder_cap(limit, env=None, override=None):
-    """(cap, note): the ongoing builds a builder run may bring the project to.
+def builder_slots(limit, env=None, override=None):
+    """(slots, note): N = (limit - reserve) // 2 concurrent builder runs (2 builds each).
 
-    The reserve never drops below MIN_RESERVE and an override can only lower the cap.
+    The reserve never drops below MIN_RESERVE; an override (BUILDER_QA_MAX_INFLIGHT or
+    --max-inflight, in builds) can only lower N.
     """
     env = os.environ if env is None else env
     notes = []
@@ -144,20 +146,20 @@ def builder_cap(limit, env=None, override=None):
         if reserve < MIN_RESERVE:
             notes.append(f"BUILDER_QA_RESERVE={reserve} clamped to {MIN_RESERVE}")
             reserve = MIN_RESERVE
-    ceiling = max(0, limit - reserve)
-    cap, how = ceiling, f"limit {limit} - reserve {reserve}"
+    ceiling = max(0, limit - reserve) // BUILDS_PER_RUN
+    slots, how = ceiling, f"(limit {limit} - reserve {reserve}) // {BUILDS_PER_RUN}"
     raw = override if override is not None else env.get("BUILDER_QA_MAX_INFLIGHT", "").strip()
     if str(raw).strip():
         try:
-            wanted = int(raw)
+            wanted = int(raw) // BUILDS_PER_RUN
         except ValueError:
             wanted = None
         if wanted is not None and 0 <= wanted <= ceiling:
-            cap, how = wanted, f"override (ceiling {ceiling})"
+            slots, how = wanted, f"override {raw} builds (ceiling {ceiling})"
         elif wanted is not None and wanted > ceiling:
-            notes.append(f"override {wanted} clamped to limit {limit} - reserve {reserve} = {ceiling}")
-    note = f"cap {cap} = {how}" + (f" ({'; '.join(notes)})" if notes else "")
-    return cap, note
+            notes.append(f"override {raw} builds clamped to {ceiling} slots")
+    note = f"{slots} slots = {how}" + (f" ({'; '.join(notes)})" if notes else "")
+    return slots, note
 
 
 def remote_verdict(code, output):
@@ -244,220 +246,97 @@ def ongoing_ids(gcloud):
     return {line.strip() for line in (out or "").splitlines() if line.strip()}
 
 
-def build_status(gcloud, build_id):
-    """A build's status (e.g. WORKING, SUCCESS), or None when it cannot be read."""
-    try:
-        code, out, _ = gcloud(["builds", "describe", build_id, f"--project={PROJECT}",
-                               f"--region={REGION}", "--format=value(status)", "--quiet"])
-    except Exception:  # noqa: BLE001 (unknown = still pending, the safe side)
-        return None
-    if code != 0:
-        return None
-    return (out or "").strip() or None
+class Slot:
+    """One held builder slot: an open fd with an exclusive flock on slot-<index>.
+
+    The kernel drops the lock only when every process holding a copy of the fd has exited or
+    closed it. The fd is inheritable and passed to the runner (pass_fds), so a SIGKILLed
+    wrapper whose runner is still uploading keeps the slot until the runner dies too.
+    """
+
+    def __init__(self, fd, index, path):
+        self.fd, self.index, self.path = fd, index, path
+
+    def release(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)  # this process's copy; children holding it keep the lock
+            except OSError:
+                pass
+            self.fd = None
 
 
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
+def slot_dir(env=None):
+    env = os.environ if env is None else env
+    return Path(env.get("BUILDER_QA_SLOT_DIR") or SLOT_DIR)
 
 
-class LedgerCorrupt(Exception):
-    """The reservation ledger cannot be trusted; admission fails closed."""
+def try_acquire(directory, slots, note=""):
+    """A Slot for the first of slot-0..slot-(slots-1) whose flock is free, or None.
 
-
-def entry_problem(entry):
-    """Why a ledger entry is malformed, or None."""
-    if not isinstance(entry, dict):
-        return f"entry {entry!r} is not an object"
-    pid = entry.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return f"entry pid {pid!r} is not a positive integer"
-    if not isinstance(entry.get("token"), str) or not entry["token"]:
-        return "entry token missing"
-    at = entry.get("at")
-    if not isinstance(at, (int, float)) or isinstance(at, bool):
-        return f"entry time {at!r} is not a number"
-    ids = entry.get("build_ids", [])
-    if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids):
-        return f"entry build_ids {ids!r} is not a list of ids"
+    Slot files with an index >= slots (left over from a higher limit) are ignored and never
+    deleted, since another run may still hold one. The note (pid, sha, time) is for humans;
+    admission never reads it.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    for index in range(slots):
+        path = directory / f"slot-{index}"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        os.set_inheritable(fd, True)
+        try:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, note.encode(), 0)
+        except OSError:
+            pass  # the note is cosmetic
+        return Slot(fd, index, path)
     return None
 
 
-RUNNING_STATUSES = {"QUEUED", "PENDING", "WORKING"}
+def admit(gcloud, slots, limit, wait, poll, sleep, clock, say, directory, note):
+    """(slot or None, waited seconds, reason).
 
-
-def reconcile(entries, listed, status_of):
-    """(entries to keep, pending build count). Pure apart from status_of(build_id).
-
-    An entry with no build ids yet is 2 pending builds. A printed id that is in the ongoing
-    list counts there, never also as pending. One that is terminal (a status outside
-    RUNNING_STATUSES) frees its slot. One that is neither (not visible yet, or unreadable) is
-    still pending. A lane whose id has not printed yet is pending too. An entry whose builds
-    are all listed or terminal is done and dropped.
+    1. Take a free slot (poll every `poll` s up to `wait` s). The slots are the admission.
+    2. Deny-only guard, while holding it: one `gcloud builds list --ongoing`. If ongoing + 2 >
+       the granted limit, or the list fails, drop the slot and fall back. This read can only
+       DENY a run the slots already admitted, never admit one beyond them, so a list that lags
+       behind recent submits is harmless here (it may let a run through that the slots allow;
+       it can never add a run the slots refused).
     """
-    keep, pending = [], 0
-    for entry in entries:
-        ids = entry.get("build_ids", [])
-        not_printed = max(0, BUILDS_PER_RUN - len(ids))
-        still = []
-        for build_id in ids:
-            if build_id in listed:
-                continue
-            status = status_of(build_id)
-            if status is None or status in RUNNING_STATUSES:
-                still.append(build_id)
-        if still or not_printed:
-            keep.append(entry)
-            pending += len(still) + not_printed
-    return keep, pending
-
-
-class Reservations:
-    """Laptop-wide pending-submit ledger: a JSON list in `path`, changed only under its flock.
-
-    An entry is held until its build ids are visible as ongoing or terminal (reconcile), or its
-    owner pid exits (release on exit, or dead-pid cleanup). There is no age-based expiry, so a
-    slow upload keeps its slot. A corrupt ledger fails closed (LedgerCorrupt) and is renamed
-    aside with a timestamp so the next run starts clean. A reused pid keeps a stale entry alive
-    (the safe side: it over-reserves, never under-reserves).
-    """
-
-    def __init__(self, path=None, now=time.time, alive=pid_alive):
-        self.path = Path(path or RESERVATIONS)
-        self.now, self.alive = now, alive
-        self.token = None
-
-    def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(self.path.with_name(self.path.name + ".lock"), "a+")
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        return handle
-
-    def _load(self):
-        """Entries whose owner is alive; raises LedgerCorrupt (file moved aside) when untrusted."""
-        try:
-            text = self.path.read_text()
-        except FileNotFoundError:
-            return []
-        except OSError as exc:
-            self._quarantine(f"unreadable: {exc}")
-        try:
-            entries = json.loads(text)
-        except ValueError as exc:
-            self._quarantine(f"not JSON: {exc}")
-        if not isinstance(entries, list):
-            self._quarantine("not a list")
-        for entry in entries:
-            problem = entry_problem(entry)
-            if problem:
-                self._quarantine(problem)
-        return [e for e in entries if self.alive(e["pid"])]  # a dead owner never submits
-
-    def _quarantine(self, reason):
-        stamp = time.strftime("%Y%m%dT%H%M%S")
-        aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}-{os.getpid()}")
-        try:
-            os.replace(self.path, aside)
-            where = f"moved aside to {aside}"
-        except OSError as exc:
-            where = f"left in place ({exc})"
-        raise LedgerCorrupt(f"{reason}; {where}")
-
-    def _save(self, entries):
-        tmp = self.path.with_name(self.path.name + f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps(entries))
-        os.replace(tmp, self.path)
-
-    def try_reserve(self, list_ids_fn, cap, status_fn=lambda build_id: None):
-        """Under the lock: (state, ongoing, pending, reason).
-
-        state is admitted / full / list-failed / ledger-corrupt; only admitted records us.
-        """
-        handle = self._locked()
-        try:
-            try:
-                entries = self._load()
-            except LedgerCorrupt as exc:
-                return "ledger-corrupt", None, None, str(exc)
-            listed = list_ids_fn()
-            if listed is None:
-                return "list-failed", None, None, "gcloud builds list failed"
-            statuses = {}
-
-            def status_of(build_id):
-                if build_id not in statuses:
-                    statuses[build_id] = status_fn(build_id)
-                return statuses[build_id]
-            entries, pending = reconcile(entries, set(listed), status_of)
-            count = len(listed)
-            admitted = count + pending + BUILDS_PER_RUN <= cap
-            if admitted:
-                self.token = f"{os.getpid()}-{time.monotonic_ns()}-{id(self)}"
-                entries.append({"pid": os.getpid(), "at": self.now(), "token": self.token,
-                                "build_ids": []})
-            self._save(entries)
-            return ("admitted" if admitted else "full"), count, pending, None
-        finally:
-            handle.close()  # drops the flock
-
-    def record_ids(self, build_ids):
-        """Our builds are submitted: keep the entry, now with ids, until the list shows them."""
-        ids = sorted(set(build_ids))
-        self._update(lambda entry: {**entry, "build_ids": ids})
-
-    def release(self):
-        """The owner is exiting (its builds are terminal or cancelled): drop its entry."""
-        self._update(lambda entry: None)
-        self.token = None
-
-    def _update(self, change):
-        if self.token is None:
-            return
-        handle = self._locked()
-        try:
-            try:
-                entries = self._load()
-            except LedgerCorrupt:
-                return  # moved aside; the next admission starts clean
-            out = []
-            for entry in entries:
-                if entry["token"] == self.token:
-                    entry = change(entry)
-                if entry is not None:
-                    out.append(entry)
-            self._save(out)
-        finally:
-            handle.close()
-
-
-def admit(gcloud, cap, wait, poll, sleep, clock, say, reservations):
-    """(admitted, waited seconds, reason). Reconciles, counts and reserves atomically per poll."""
     started = clock()
     announced = False
-    while True:
-        state, count, pending, why = reservations.try_reserve(
-            lambda: ongoing_ids(gcloud), cap, lambda build_id: build_status(gcloud, build_id))
+    slot = None
+    while slot is None:
+        slot = try_acquire(directory, slots, note) if slots > 0 else None
         waited = clock() - started
-        if state == "ledger-corrupt":
-            return False, waited, f"reservation ledger unreadable ({why})"
-        if state == "list-failed":
-            return False, waited, "gcloud builds list failed (cannot count ongoing builds; not submitting blind)"
-        sums = f"{count} ongoing + {pending} pending + {BUILDS_PER_RUN}"
-        if state == "admitted":
-            return True, waited, f"{sums} <= cap {cap}"
+        if slot is not None:
+            break
+        if slots <= 0:
+            return None, waited, "no builder slots (limit - reserve < 2 builds)"
         if waited >= wait:
-            return False, waited, f"admission: {sums} > cap {cap} after {waited:.0f}s wait"
+            return None, waited, f"admission: all {slots} builder slots busy after {waited:.0f}s wait"
         if not announced:
-            say(f"QUEUE: {sums} > cap {cap}; polling every {poll:.0f}s for up to {wait:.0f}s")
+            say(f"QUEUE: all {slots} builder slots busy; polling every {poll:.0f}s for up to {wait:.0f}s")
             announced = True
         sleep(poll)
+    try:
+        listed = ongoing_ids(gcloud)
+    except BaseException:  # an interrupt mid-guard: drop the slot now, not at process exit
+        slot.release()
+        raise
+    if listed is None:
+        slot.release()
+        return None, waited, "gcloud builds list failed (deny-only guard cannot read; not submitting blind)"
+    if len(listed) + BUILDS_PER_RUN > limit:
+        slot.release()
+        return None, waited, (f"deny-only guard: {len(listed)} ongoing + {BUILDS_PER_RUN} > granted "
+                              f"limit {limit}")
+    return slot, waited, f"slot {slot.index} of {slots}; {len(listed)} ongoing + {BUILDS_PER_RUN} <= {limit}"
 
 
 def git(*args, cwd=None):
@@ -550,12 +429,14 @@ class Child:
         self.proc = None
         self.grace = KILL_GRACE
         self.build_ids = {}
+        self.pass_fds = ()  # the held slot's fd, for the runner only
 
 
-def stream(command, cwd, env, say, child, grace=KILL_GRACE):
+def stream(command, cwd, env, say, child, grace=KILL_GRACE, pass_fds=()):
     """Run command in its own process group, echoing output line by line. Returns (code, output)."""
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
+                            pass_fds=tuple(pass_fds))
     child.proc, child.grace = proc, grace  # stays set on an exception, so main() can stop it
     lines = []
     for line in proc.stdout:
@@ -606,7 +487,9 @@ def stop_child(child, gcloud, say):
 
 def run_remote(scratch, say, child):
     command = ["uv", "run", "--script", str(RUNNER), "--scratch", str(scratch)]
-    return stream(command, str(scratch), dict(os.environ), say, child, grace=KILL_GRACE)
+    # The slot fd goes to the runner, so its lock lives as long as the runner does.
+    return stream(command, str(scratch), dict(os.environ), say, child, grace=KILL_GRACE,
+                  pass_fds=child.pass_fds)
 
 
 def run_local(scratch, worktree, say, child):
@@ -641,8 +524,7 @@ def _interrupt(signum, _frame):
 # ---------------------------------------------------------------- main
 
 def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scratch_maker=make_scratch,
-         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, reservations=None,
-         archive_check=None):
+         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, archive_check=None):
     out = out or sys.stdout
     env = os.environ if env is None else env
 
@@ -651,8 +533,8 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sha", default="HEAD")
-    ap.add_argument("--max-inflight", default=None, help="lower the cap (else BUILDER_QA_MAX_INFLIGHT; "
-                                                          "never above project limit - 4)")
+    ap.add_argument("--max-inflight", default=None, help="builds; can only lower the slot count (else "
+                                                          "BUILDER_QA_MAX_INFLIGHT; never above limit - 4)")
     ap.add_argument("--admit-wait", type=float, default=600)
     ap.add_argument("--poll", type=float, default=30)
     ap.add_argument("--keep-scratch", action="store_true")
@@ -664,14 +546,14 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
     record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "worktree": str(worktree), "mode": None,
               "verdict": None, "exit": None, "build_ids": child.build_ids, "queue_wait_s": 0,
               "reason": None}
-    reservations = reservations or Reservations(env.get("BUILDER_QA_RESERVATIONS"))
+    slots_dir = slot_dir(env)
     holder = {}
     sigs = (signal.SIGTERM, signal.SIGINT)
     previous = {sig: signal.signal(sig, _interrupt) for sig in sigs}
     try:
         try:
             code = _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say,
-                        record, child, holder, reservations, archive_check or sha_archive_problems)
+                        record, child, holder, slots_dir, archive_check or sha_archive_problems)
         except Interrupted as exc:
             for sig in sigs:
                 signal.signal(sig, signal.SIG_IGN)
@@ -689,10 +571,8 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
         # Finalise with signals ignored, so evidence and cleanup always complete.
         for sig in sigs:
             signal.signal(sig, signal.SIG_IGN)
-        try:
-            reservations.release()
-        except Exception as exc:  # noqa: BLE001 (a stale entry ages out; never changes the verdict)
-            say(f"reservation release failed: {exc}")
+        if holder.get("slot") is not None:
+            holder["slot"].release()  # process exit would drop it anyway
         scratch = holder.get("scratch")
         if scratch is not None and not args.keep_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -713,7 +593,7 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
 
 def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say, record, child,
-         holder, reservations, archive_check):
+         holder, slots_dir, archive_check):
     sha = git("rev-parse", "--verify", f"{args.sha}^{{commit}}", cwd=worktree).strip()
     record["sha"] = sha
     say(f"builder-remote-qa: sha {sha}")
@@ -728,7 +608,9 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     scratch = holder["scratch"] = scratch_maker(sha, worktree, exact=bool(differs))
 
     def fall_back(reason):
-        reservations.release()
+        if holder.get("slot") is not None:
+            holder["slot"].release()  # never hold a Cloud Build slot through a local lane
+            child.pass_fds = ()
         say(f"FALLBACK local: {reason}")
         record["reason"] = reason
         return _local(scratch, worktree, sha, local, say, record, child, mode="fallback")
@@ -741,13 +623,18 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
         return fall_back(f"archive would differ from sha ({'; '.join(differs)})")
 
     limit, limit_note = read_limit(gcloud)  # once per run, never cached across runs
-    cap, cap_note = builder_cap(limit, env, args.max_inflight)
-    record.update(limit=limit, cap=cap)
-    say(f"admission: {limit_note}; {cap_note}")
-    admitted, waited, why = admit(gcloud, cap, args.admit_wait, args.poll, sleep, clock, say, reservations)
+    slots, slots_note = builder_slots(limit, env, args.max_inflight)
+    record.update(limit=limit, slots=slots)
+    say(f"admission: {limit_note}; {slots_note}")
+    note = f"pid {os.getpid()} sha {sha} since {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+    slot, waited, why = admit(gcloud, slots, limit, args.admit_wait, args.poll, sleep, clock, say,
+                              slots_dir, note)
     record["queue_wait_s"] = round(waited, 1)
-    if not admitted:
+    if slot is None:
         return fall_back(why)
+    holder["slot"] = slot
+    record["slot"] = slot.index
+    child.pass_fds = (slot.fd,)
     say(f"admitted: {why} (queue wait {waited:.0f}s)")
 
     def remote_say(line):
@@ -755,9 +642,6 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
         match = LANE_BUILD.match(line)
         if match:
             child.build_ids[match.group(1)] = match.group(2)
-            if len(child.build_ids) >= BUILDS_PER_RUN:
-                # Held, now with its ids, until the list shows them (reconcile); not released.
-                reservations.record_ids(list(child.build_ids.values()))
 
     record["mode"] = "remote"
     try:
