@@ -220,6 +220,14 @@ def test_land_gate_remote_unset_uses_the_one_default_constant(monkeypatch):
     assert tg.plan(FULL, env={"LAND_GATE_REMOTE": "1"})["gates"][1]["cmd"] == REMOTE
 
 
+def test_only_explicit_off_words_select_the_local_fallback():
+    # LUCY-r2ytt review P4-4: an unrecognised value falls to the default (remote), never weaker.
+    for value in ("2", "maybe", "00", "-1", "remote", " "):
+        assert tg.plan(FULL, env={"LAND_GATE_REMOTE": value})["gates"][1]["cmd"] == REMOTE, value
+    for value in ("0", "off", "no", "false", " OFF ", "False"):
+        assert tg.plan(FULL, env={"LAND_GATE_REMOTE": value})["gates"][1]["cmd"] == tg.CLOUDBUILD["cmd"], value
+
+
 def test_land_gate_remote_is_read_from_the_lander_environment(monkeypatch):
     monkeypatch.setenv("LAND_GATE_REMOTE", "1")
     assert tg.plan(FULL)["gates"][1]["cmd"] == REMOTE

@@ -666,7 +666,9 @@ baseline is available:
    touching sensitive paths is ineligible for autonomous dispatch (reported in
    HELD/BLOCKED, never asked about), even if the apparent failure is elsewhere.
 3. A normal TypeScript/lint diagnostic or Jest assertion is eligible only after
-   a green baseline. Exit 134/137, heap-out-of-memory text, SIGABRT-style
+   a green baseline. A remote `cloudbuild-full` that is **gate-unavailable** (exit 2, 127, or
+   1 without a `FAILED LANE` line; see the remote gate paragraph) holds the whole batch
+   before this step and never reaches it. Exit 134/137, heap-out-of-memory text, SIGABRT-style
    crashes, or missing/malformed gate evidence are not code failures. For an
    infra-shaped failure, re-run the identical failed command once and preserve
    its separate retry artifacts. If it is still infra-shaped, hold it as
@@ -706,9 +708,10 @@ diff, never by the agent: one full candidate makes the batch full.
 - **full** (anything else, including lib/, app/api, pages/api, drizzle/, migrations,
   money/Stripe/prices, patient data/photos, consent, tenancy, comms/sending, auth,
   component logic files, scripts, test infra, package files, unknown paths): the same,
-  then the whole Cloud Build simulation (`test:cloudbuild`: steps #0, #2 = the full pg
-  lane inside the upload tarball, and #3) as one command under the laptop-wide pg-lane
-  lock. Never beside another pg lane: run concurrently on 12 Oct they gave 9 false pg
+  then the whole Cloud Build gate as one command: by default the two remote lanes of
+  `cloudbuild-gate.yaml` (below); on the `LAND_GATE_REMOTE=0` fallback, the local
+  simulation (`test:cloudbuild`: steps #0, #2 = the full pg lane inside the upload
+  tarball, and #3) under the laptop-wide pg-lane lock. Never beside another pg lane: run concurrently on 12 Oct they gave 9 false pg
   failures that passed solo.
 
 It runs once after the ordinary loop (on all of `GREEN_PENDING`), and once more on the
@@ -726,10 +729,12 @@ GATE_COUNT="$(jq -er '.gates | length' "$TIER_JSON")" || exit 1
 
 By default (LUCY-r2ytt, 26 Oct; `LAND_GATE_REMOTE` unset or `1`), `cloudbuild-full` runs `uv run --script ~/.claude/scripts/cloudbuild-gate-remote.py` instead: two Cloud Build lanes of `cloudbuild-gate.yaml` as the test-only `cloudbuild-gate` service account, the same evidence files, exit 137 = infra, exit 2 = config or account refused, and no Colima or pg-lane lock. `LAND_GATE_REMOTE=0` is the Cloud Build outage fallback (note "fallback used" in evidence); the tier JSON gains `cloudbuild_remote: true` only on the remote path.
 
+**Remote gate unavailable = HOLD the batch, never blame a candidate (LUCY-r2ytt review P3-1).** On the remote path, a `cloudbuild-full` exit of 2 (config or service account refused, which is also what expired or reauth-needed gcloud credentials or no network look like), 127 (uv missing), or 1 with no `FAILED LANE` line in the log (e.g. uv could not fetch PyYAML) is not a code failure. Hold every candidate in the batch as **gate-unavailable**: no baseline re-run, no culprit isolation, no kickback, no bead. Report it; re-run after `gcloud auth login` / reconnecting, or re-run the batch with `LAND_GATE_REMOTE=0` and note "fallback used". Only exit 1 with a `FAILED LANE` line is a red test result.
+
 For a full tier on the `LAND_GATE_REMOTE=0` fallback run `colima start` first (step #2 needs Docker); the remote default needs neither Colima nor the pg-lane lock. Then run each gate in list order, detached,
-waiting for its exit file before starting the next (never two at once). Each gate's
-command already takes the pg-lane lock, so a full lane anywhere else on the laptop
-makes it wait:
+waiting for its exit file before starting the next (never two at once). On the
+fallback each gate's command already takes the pg-lane lock, so a full lane anywhere
+else on the laptop makes it wait:
 
 ~~~bash
 GATE_I="${GATE_I:-0}"   # 0..GATE_COUNT-1; start the next only after this one's exit file is 0
