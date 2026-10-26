@@ -81,7 +81,9 @@ def run(repo, tmp_path, *, gcloud=None, remote=None, local=None, env=None, argv=
     calls = {"remote": 0, "local": 0}
     scratch = tmp_path / "scratch"
 
-    def scratch_maker(sha, worktree):
+    def scratch_maker(sha, worktree, exact=False):
+        if exact:
+            calls["exact"] = True
         scratch.mkdir(exist_ok=True)
         return scratch
 
@@ -560,3 +562,66 @@ def test_kill_grace_exceeds_the_runners_signal_bound():
     gr = importlib.util.module_from_spec(spec2)
     spec2.loader.exec_module(gr)
     assert bq.KILL_GRACE > gr.SIGNAL_JOIN_BOUND + 60
+
+
+# ---------------------------------------------------------------- finding 6: archive != sha
+
+def commit_file(repo, path, text):
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    subprocess.run(["git", "add", "-f", path], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", f"add {path}"], cwd=repo, check=True)
+
+
+def add_submodule_gitlink(repo):
+    subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"160000,{head(repo)},vendor/sub"],
+                   cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "gitlink"], cwd=repo, check=True)
+
+
+TRIGGERS = [
+    pytest.param(lambda r: commit_file(r, ".gitattributes", "tests/red.test.ts export-ignore\n"),
+                 ".gitattributes sets export-ignore", id="export-ignore"),
+    pytest.param(lambda r: commit_file(r, ".gitattributes", "VERSION export-subst\n"),
+                 ".gitattributes sets export-subst", id="export-subst"),
+    pytest.param(lambda r: commit_file(r, "assets/.gitattributes", "*.bin filter=lfs diff=lfs\n"),
+                 "assets/.gitattributes sets filter=lfs", id="lfs-nested"),
+    pytest.param(lambda r: commit_file(r, ".gitmodules", '[submodule "x"]\n\tpath = x\n'),
+                 ".gitmodules exists", id="gitmodules"),
+    pytest.param(add_submodule_gitlink, "submodule vendor/sub", id="submodule-gitlink"),
+]
+
+
+@pytest.mark.parametrize("make,reason", TRIGGERS)
+def test_archive_trigger_skips_remote_and_falls_back_on_an_exact_scratch(repo, tmp_path, make, reason):
+    make(repo)
+    gcloud = Gcloud()
+    code, out, calls, gcloud, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT),
+                                               local=(0, None))
+    assert calls["remote"] == 0 and calls["local"] == 1 and calls.get("exact") is True
+    assert "FALLBACK local: archive would differ from sha (" in out and reason in out
+    assert gcloud.calls == []  # never even admitted
+    assert records[-1]["mode"] == "fallback" and code == 0 and "REMOTE" not in out
+
+
+def test_clean_tree_has_no_archive_problems(repo):
+    commit_file(repo, ".gitattributes", "*.sh text eol=lf\n")
+    assert bq.sha_archive_problems(head(repo), repo) == []
+
+
+def test_exact_scratch_keeps_what_archive_drops(repo):
+    commit_file(repo, "tests/red.test.ts", "red\n")
+    commit_file(repo, ".gitattributes", "tests/red.test.ts export-ignore\nb.txt export-subst\n")
+    commit_file(repo, "b.txt", "$Format:%H$\n")
+    import shutil
+    archived = bq.make_scratch(head(repo), repo)
+    exact = bq.make_scratch(head(repo), repo, exact=True)
+    try:
+        assert not (archived / "tests" / "red.test.ts").exists()  # what finding 6 reproduced
+        assert (exact / "tests" / "red.test.ts").read_text() == "red\n"
+        assert (exact / "b.txt").read_text() == "$Format:%H$\n"
+        assert (exact / "a.txt").read_text() == "committed\n"
+    finally:
+        shutil.rmtree(archived)
+        shutil.rmtree(exact)

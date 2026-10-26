@@ -10,7 +10,10 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
 
 1. Resolve --sha to an exact commit. The scratch is `git archive <sha>` into a fresh temp dir,
    never the worktree, so every verdict names the tree it tested. A dirty worktree is not
-   tested: a note says the run covers the committed sha only.
+   tested: a note says the run covers the committed sha only. If the sha's tree has a
+   .gitattributes naming export-ignore / export-subst / filter=lfs, a .gitmodules or a
+   submodule, an archive would not be that tree: no remote run (`FALLBACK local: archive would
+   differ from sha (<reason>)`), and the local lane's scratch is an exact checkout-index copy.
 2. Admission (Cloud Build quota cloudbuild.googleapis.com/ongoing_builds, quota id
    OngoingBuildsPerProject, project aestheticc, region global; shared with prod builds and
    landing gates). The project limit is read once per run:
@@ -338,9 +341,60 @@ def git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
-def make_scratch(sha, worktree):
-    """A fresh dir holding exactly the tree of `sha` (git archive | tar -x)."""
+ARCHIVE_ATTRS = ("export-ignore", "export-subst", "filter=lfs")
+
+
+def archive_problems(entries, read_blob):
+    """Why `git archive <sha>` would not reproduce the sha's tree; [] when it does.
+
+    entries: (mode, type, object, path) rows of `git ls-tree -r --full-tree <sha>`;
+    read_blob(object) -> text. export-ignore drops files, export-subst rewrites bytes, an LFS
+    filter leaves pointer files, and a submodule is not archived at all.
+    """
+    problems = []
+    for _mode, kind, obj, path in entries:
+        name = path.rsplit("/", 1)[-1]
+        if kind == "commit":
+            problems.append(f"submodule {path}")
+        elif name == ".gitmodules":
+            problems.append(f"{path} exists")
+        elif name == ".gitattributes":
+            text = read_blob(obj)
+            problems += [f"{path} sets {attr}" for attr in ARCHIVE_ATTRS if attr in text]
+    return problems
+
+
+def tree_entries(sha, worktree):
+    rows = []
+    for line in git("ls-tree", "-r", "--full-tree", sha, cwd=worktree).splitlines():
+        meta, _, path = line.partition("\t")
+        mode, kind, obj = meta.split()
+        rows.append((mode, kind, obj, path))
+    return rows
+
+
+def sha_archive_problems(sha, worktree):
+    return archive_problems(tree_entries(sha, worktree),
+                            lambda obj: git("cat-file", "-p", obj, cwd=worktree))
+
+
+def make_scratch(sha, worktree, exact=False):
+    """A fresh dir holding the tree of `sha`. Default: git archive | tar -x (what the remote run
+    uploads). exact=True (archive_problems found a difference): read-tree into a throwaway index
+    and checkout-index, so export-* attributes cannot drop or rewrite files for the local lane."""
     scratch = Path(tempfile.mkdtemp(prefix=f"builder-qa-{sha[:12]}-"))
+    if exact:
+        index = scratch.parent / f"{scratch.name}.index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        try:
+            for args in (["read-tree", sha], ["checkout-index", "-a", "-f", f"--prefix={scratch}/"]):
+                subprocess.run(["git", *args], cwd=worktree, env=env, check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            shutil.rmtree(scratch, ignore_errors=True)
+            raise RuntimeError(f"exact checkout of {sha[:12]} failed: {exc.stderr!r}") from exc
+        finally:
+            index.unlink(missing_ok=True)
+        return scratch
     archive = subprocess.Popen(["git", "archive", "--format=tar", sha], cwd=worktree,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     untar = subprocess.run(["tar", "-x", "-C", str(scratch)], stdin=archive.stdout,
@@ -464,7 +518,8 @@ def _interrupt(signum, _frame):
 # ---------------------------------------------------------------- main
 
 def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scratch_maker=make_scratch,
-         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, reservations=None):
+         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, reservations=None,
+         archive_check=None):
     out = out or sys.stdout
     env = os.environ if env is None else env
 
@@ -493,7 +548,7 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
     try:
         try:
             code = _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say,
-                        record, child, holder, reservations)
+                        record, child, holder, reservations, archive_check or sha_archive_problems)
         except Interrupted as exc:
             for sig in sigs:
                 signal.signal(sig, signal.SIG_IGN)
@@ -535,7 +590,7 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
 
 def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say, record, child,
-         holder, reservations):
+         holder, reservations, archive_check):
     sha = git("rev-parse", "--verify", f"{args.sha}^{{commit}}", cwd=worktree).strip()
     record["sha"] = sha
     say(f"builder-remote-qa: sha {sha}")
@@ -546,7 +601,8 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     if dirty:
         say(f"NOTE: the worktree has uncommitted changes; this run tests the committed sha {sha[:12]} only")
     record["dirty"] = bool(dirty)
-    scratch = holder["scratch"] = scratch_maker(sha, worktree)
+    differs = archive_check(sha, worktree)  # finding 6: the upload must be the sha's exact tree
+    scratch = holder["scratch"] = scratch_maker(sha, worktree, exact=bool(differs))
 
     def fall_back(reason):
         reservations.release()
@@ -558,6 +614,8 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
         record["reason"] = "BUILDER_QA_REMOTE=0"
         say("mode local (BUILDER_QA_REMOTE=0)")
         return _local(scratch, worktree, sha, local, say, record, child, mode="local")
+    if differs:
+        return fall_back(f"archive would differ from sha ({'; '.join(differs)})")
 
     limit, limit_note = read_limit(gcloud)  # once per run, never cached across runs
     cap, cap_note = builder_cap(limit, env, args.max_inflight)
