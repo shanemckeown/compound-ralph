@@ -30,6 +30,17 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    are all covered with no bookkeeping. (uv passes the fd on to the runner; the runner's own
    short gcloud calls do not inherit it, so the slot lives exactly as long as the runner.) The
    holder note in the file is for humans only. No ledger or state file is kept.
+   Holders of slot files at index N..31 (from a higher limit, e.g. the quota was lowered while
+   runs were in flight) count as occupied, so at most N runs are ever held; the probe runs
+   under a short gate lock (SLOT_DIR/.admit). The slot directory is always
+   ~/.claude/state/builder-qa-slots; BUILDER_QA_SLOT_DIR is honoured only with
+   BUILDER_QA_TESTING=1 (otherwise ignored, with a note).
+   The slot is freed only once every submitted build is confirmed finished: after any run that
+   did not end in the runner's own green/red verdict (ceiling, interrupt, failed cancel, crash)
+   `gcloud builds describe` is polled every 30 s until both builds are TERMINAL, bounded by
+   createTime + the gate config's timeout + 10 min (Cloud Build has killed them by then).
+   Describe errors and unknown statuses keep holding. A second SIGTERM/SIGINT during that wait
+   ends the process (default action) and the kernel frees the slot: accepted.
    Deny-only guard, while holding the slot: one `gcloud builds list --ongoing`; if ongoing + 2 >
    the granted limit, or the list fails, the slot is dropped and the run falls back local. That
    read can only deny, never admit beyond the slots, so a lagging list is harmless.
@@ -70,6 +81,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -84,6 +96,7 @@ MIN_RESERVE = 4  # builds always kept free for prod builds and landing gates; ne
 BUILDS_PER_RUN = 2  # the runner submits two lanes (unit + pg)
 GCLOUD_TIMEOUT = 90
 SLOT_DIR = Path.home() / ".claude" / "state" / "builder-qa-slots"
+MAX_SLOT_INDEX = 32  # slot files up to here are probed, so holders from a higher limit count
 # The runner's SIGTERM path: SIGNAL_JOIN_BOUND (20 s) for hung submits, then a cancel per lane
 # (each a quick gcloud call, normally seconds). Wait well past both before SIGKILL.
 KILL_GRACE = 180
@@ -267,35 +280,143 @@ class Slot:
 
 
 def slot_dir(env=None):
+    """(directory, note). BUILDER_QA_SLOT_DIR is honoured only with BUILDER_QA_TESTING=1, so
+    every real launcher on this machine shares one semaphore."""
     env = os.environ if env is None else env
-    return Path(env.get("BUILDER_QA_SLOT_DIR") or SLOT_DIR)
+    override = env.get("BUILDER_QA_SLOT_DIR")
+    if override and env.get("BUILDER_QA_TESTING") == "1":
+        return Path(override), None
+    fixed = Path.home() / ".claude" / "state" / "builder-qa-slots"
+    note = f"BUILDER_QA_SLOT_DIR ignored (set BUILDER_QA_TESTING=1 to use it); slots in {fixed}" \
+        if override else None
+    return fixed, note
+
+
+def slot_held(path):
+    """True if another open file description holds slot `path` (a probe lock is dropped at once)."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # cannot probe: count it as held
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True  # EWOULDBLOCK: someone holds it
+    finally:
+        os.close(fd)  # closing drops any probe lock we did take
+    return False
 
 
 def try_acquire(directory, slots, note=""):
-    """A Slot for the first of slot-0..slot-(slots-1) whose flock is free, or None.
+    """A Slot below index `slots` whose flock is free, or None.
 
-    Slot files with an index >= slots (left over from a higher limit) are ignored and never
-    deleted, since another run may still hold one. The note (pid, sha, time) is for humans;
-    admission never reads it.
+    Under a short directory gate lock: holders of slot files at index slots..MAX_SLOT_INDEX-1
+    (left from a higher limit, e.g. the quota was lowered mid-run) count as occupied, so at
+    most `slots` runs are ever held in total. Those files are never deleted. The note (pid, sha,
+    time) is for humans; admission never reads it.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    for index in range(slots):
-        path = directory / f"slot-{index}"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            continue
-        os.set_inheritable(fd, True)
-        try:
-            os.ftruncate(fd, 0)
-            os.pwrite(fd, note.encode(), 0)
-        except OSError:
-            pass  # the note is cosmetic
-        return Slot(fd, index, path)
-    return None
+    gate = os.open(directory / ".admit", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        held_high = sum(slot_held(directory / f"slot-{i}") for i in range(slots, MAX_SLOT_INDEX))
+        free, held_low = [], 0
+        for index in range(slots):
+            if slot_held(directory / f"slot-{index}"):
+                held_low += 1
+            else:
+                free.append(index)
+        if held_low + held_high >= slots:
+            return None
+        for index in free:
+            path = directory / f"slot-{index}"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+            os.set_inheritable(fd, True)
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, note.encode(), 0)
+            except OSError:
+                pass  # the note is cosmetic
+            return Slot(fd, index, path)
+        return None
+    finally:
+        os.close(gate)
+
+
+TERMINAL_STATUSES = {"SUCCESS", "FAILURE", "INTERNAL_ERROR", "TIMEOUT", "CANCELLED", "EXPIRED"}
+DEFAULT_GATE_TIMEOUT = 2100
+TERMINAL_MARGIN = 600  # Cloud Build has killed a build by createTime + timeout + this
+TERMINAL_POLL = 30
+
+
+def gate_timeout(scratch):
+    """The gate config's top-level build timeout in seconds (2100 if it cannot be read)."""
+    try:
+        text = (Path(scratch) / "cloudbuild-gate.yaml").read_text()
+    except OSError:
+        return DEFAULT_GATE_TIMEOUT
+    match = re.search(r"^timeout:\s*['\"]?(\d+)s?['\"]?\s*$", text, re.M)
+    return int(match.group(1)) if match else DEFAULT_GATE_TIMEOUT
+
+
+def describe_build(gcloud, build_id):
+    """(status or None, createTime epoch or None). Any error reads as unknown."""
+    try:
+        code, out, _ = gcloud(["builds", "describe", build_id, f"--project={PROJECT}",
+                               f"--region={REGION}", "--format=json", "--quiet"])
+        if code != 0:
+            return None, None
+        build = json.loads(out)
+    except Exception:  # noqa: BLE001 (unknown = keep holding)
+        return None, None
+    if not isinstance(build, dict):
+        return None, None
+    created = None
+    try:
+        created = datetime.fromisoformat(str(build["createTime"]).replace("Z", "+00:00")).timestamp()
+    except (KeyError, ValueError, TypeError):
+        pass
+    return build.get("status"), created
+
+
+def hold_until_terminal(gcloud, build_ids, timeout, sleep, wall, say):
+    """Block (still holding the slot) until every build id is TERMINAL, or the hard bound passes.
+
+    The bound is the latest createTime + timeout + TERMINAL_MARGIN: Cloud Build has killed the
+    build by then. A build whose createTime cannot be read is bounded from now instead (later
+    than its real bound: the safe side). Describe errors and unknown statuses keep holding.
+    Returns True when all were confirmed terminal, False at the bound.
+    """
+    pending = dict.fromkeys(build_ids)
+    started = wall()
+    bounds = {}
+    announced = False
+    while True:
+        for build_id in list(pending):
+            status, created = describe_build(gcloud, build_id)
+            if created is not None:
+                bounds[build_id] = created + timeout + TERMINAL_MARGIN
+            if status in TERMINAL_STATUSES:
+                pending.pop(build_id)
+        if not pending:
+            return True
+        bound = max(bounds.get(b, started + timeout + TERMINAL_MARGIN) for b in pending)
+        if wall() >= bound:
+            say(f"HOLD: {', '.join(pending)} not confirmed terminal by the hard bound; releasing the slot")
+            return False
+        if not announced:
+            say(f"HOLD: keeping the builder slot until {', '.join(pending)} finish (polling every "
+                f"{TERMINAL_POLL}s, at most {max(0, bound - wall()):.0f}s more)")
+            announced = True
+        sleep(TERMINAL_POLL)
 
 
 def admit(gcloud, slots, limit, wait, poll, sleep, clock, say, directory, note):
@@ -521,10 +642,25 @@ def _interrupt(signum, _frame):
     raise Interrupted(signal.Signals(signum).name)
 
 
+def release_slot(holder, child, gcloud, sleep, wall, say):
+    """Close the held slot, first waiting (still holding it) until every build id the runner
+    printed is confirmed TERMINAL, unless the runner's own verdict already proved that."""
+    slot = holder.get("slot")
+    if slot is None or slot.fd is None:
+        return
+    ids = list(child.build_ids.values())
+    if ids and not holder.get("terminal_ok"):
+        timeout = gate_timeout(holder.get("scratch") or ".")
+        holder["terminal_ok"] = hold_until_terminal(gcloud, ids, timeout, sleep, wall, say)
+    slot.release()
+    child.pass_fds = ()
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scratch_maker=make_scratch,
-         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, archive_check=None):
+         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, archive_check=None,
+         wall=time.time):
     out = out or sys.stdout
     env = os.environ if env is None else env
 
@@ -546,14 +682,16 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
     record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "worktree": str(worktree), "mode": None,
               "verdict": None, "exit": None, "build_ids": child.build_ids, "queue_wait_s": 0,
               "reason": None}
-    slots_dir = slot_dir(env)
+    slots_dir, slots_dir_note = slot_dir(env)
+    if slots_dir_note:
+        say(f"NOTE: {slots_dir_note}")
     holder = {}
     sigs = (signal.SIGTERM, signal.SIGINT)
     previous = {sig: signal.signal(sig, _interrupt) for sig in sigs}
     try:
         try:
             code = _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say,
-                        record, child, holder, slots_dir, archive_check or sha_archive_problems)
+                        record, child, holder, slots_dir, archive_check or sha_archive_problems, wall)
         except Interrupted as exc:
             for sig in sigs:
                 signal.signal(sig, signal.SIG_IGN)
@@ -568,11 +706,15 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
             say(f"ERROR: {type(exc).__name__}: {exc}: no verdict @{record.get('sha', '?')}")
             record.update(verdict="error", reason=f"{type(exc).__name__}: {exc}")
             code = EXIT_LOCAL_UNAVAILABLE
+        # Hold the slot until any submitted build is confirmed finished. During this wait a
+        # second SIGTERM/SIGINT ends the process (default action), which is accepted: the
+        # kernel then drops the slot at exit, the one case where it can free early.
+        for sig in sigs:
+            signal.signal(sig, signal.SIG_DFL)
+        release_slot(holder, child, gcloud, sleep, wall, say)
         # Finalise with signals ignored, so evidence and cleanup always complete.
         for sig in sigs:
             signal.signal(sig, signal.SIG_IGN)
-        if holder.get("slot") is not None:
-            holder["slot"].release()  # process exit would drop it anyway
         scratch = holder.get("scratch")
         if scratch is not None and not args.keep_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -593,7 +735,7 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
 
 def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say, record, child,
-         holder, slots_dir, archive_check):
+         holder, slots_dir, archive_check, wall):
     sha = git("rev-parse", "--verify", f"{args.sha}^{{commit}}", cwd=worktree).strip()
     record["sha"] = sha
     say(f"builder-remote-qa: sha {sha}")
@@ -608,9 +750,9 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     scratch = holder["scratch"] = scratch_maker(sha, worktree, exact=bool(differs))
 
     def fall_back(reason):
-        if holder.get("slot") is not None:
-            holder["slot"].release()  # never hold a Cloud Build slot through a local lane
-            child.pass_fds = ()
+        # Never hold a Cloud Build slot through a local lane, but never free it while a
+        # submitted build may still run (a runner that hit its ceiling or a failed cancel).
+        release_slot(holder, child, gcloud, sleep, wall, say)
         say(f"FALLBACK local: {reason}")
         record["reason"] = reason
         return _local(scratch, worktree, sha, local, say, record, child, mode="fallback")
@@ -650,6 +792,8 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
         return fall_back(f"runner could not run: {type(exc).__name__}: {exc}")
     record["build_ids"].update(build_ids(output))
     verdict, reason = remote_verdict(code, output)
+    if verdict in ("green", "red"):
+        holder["terminal_ok"] = True  # the runner only exits 0/1 once both lanes are terminal
     if verdict == "green":
         record.update(verdict="remote-green", reason=reason)
         say(f"REMOTE GREEN @{sha}")
