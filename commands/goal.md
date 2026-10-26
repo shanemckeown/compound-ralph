@@ -472,6 +472,18 @@ and #3) runs once per landing batch whenever the batch's risk tier is full
 `npm run test:cloudbuild -- --step 0` yourself only to debug a test that reads a
 checked-in file or shells out to `git`.
 
+🔴 **Heavy runs go to Cloud Build (LUCY-ll8dh).** When `targeted-tests.py` would run the broad
+set or a pg set still over the cap, and the worktree is clean (commit first), it runs
+`~/.claude/scripts/builder-remote-qa.py` instead: both land-gate lanes on Cloud Build against
+the committed sha (full node + dom + pg, lint, tsc, build; ~25 min, so run the QA command in
+the background and wait for its exit; never kill it to retry). Related suites stay
+local. For a full pre-push run, run `python3 ~/.claude/scripts/builder-remote-qa.py` from the
+worktree root yourself; never a local full pg lane. Its last verdict line is the result:
+`REMOTE GREEN @<sha>` (exit 0) or `REMOTE RED @<sha>` + `FAILED LANE` (exit 1, a real red: fix
+it). Infra (refused, quota full past 10 min, gcloud/uv missing, timeout) prints `FALLBACK
+local: <reason>` and runs the local lane under the pg-lane lock; that `LOCAL GREEN/RED @<sha>`
+is the verdict. Infra is never green and never a code red. `BUILDER_QA_REMOTE=0` = all local.
+
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
 package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /
 `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` from the worktree

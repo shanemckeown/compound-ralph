@@ -20,8 +20,16 @@ plus staged, unstaged and untracked files. Then:
 Builders never run the full pg lane: the full lane
 runs once on the combined landing tree (/land-batch, serialised by pg-lane-lock.py)
 and again in Cloud Build. Exit code is the first failing step's.
+
+LUCY-ll8dh: the HEAVY steps (the BROAD node + dom set, or a pg set still over the cap)
+do not run on the laptop. One builder-remote-qa.py step replaces them: both Cloud Build
+lanes of the land gate on the committed HEAD (full node + dom + pg, lint, tsc, build),
+falling back to the local lane itself on infra. A remaining related node/dom step stays
+local. It needs a clean worktree (the remote run tests the committed sha only); dirty, or
+BUILDER_QA_REMOTE=0, the heavy steps run locally exactly as before.
 """
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -41,6 +49,22 @@ CONFIG_NAMES = ("jest.", "babel.", "next.config.", "tsconfig", "package.json",
 # Stems too common to find the importers of a deleted file by name.
 GENERIC_STEMS = {"index", "utils", "types", "route", "helpers", "constants", "config"}
 PG_CAP_FRACTION = float(os.environ.get("PG_TARGET_MAX_FRACTION", "0.5"))
+REMOTE_QA = SCRIPTS / "builder-remote-qa.py"
+BROAD_LABEL = "broad jest (node + dom)"
+
+
+def qa_remote():
+    """builder-remote-qa.qa_remote(): BUILDER_QA_REMOTE has one source of truth."""
+    spec = importlib.util.spec_from_file_location("builder_remote_qa", REMOTE_QA)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.qa_remote()
+
+
+def worktree_clean():
+    """No staged, unstaged or untracked change outside SKIP_PREFIX (not test inputs)."""
+    lines = git("status", "--porcelain", "--untracked-files=all").splitlines()
+    return not [line for line in lines if not line[3:].strip('"').startswith(SKIP_PREFIX)]
 
 
 def git(*args):
@@ -99,17 +123,34 @@ def pg_env():
     return {**node_env(), "RUN_PG_TESTS": "true", "TZ": "UTC"}
 
 
-def plan(files, broad, node_related, pg_related, pg_total, touched_pg):
+def plan(files, broad, node_related, pg_related, pg_total, touched_pg, remote_sha=None):
     """The (label, command, env) steps. Pure, so tests can assert on it.
 
     node_related: how many node/dom tests --findRelatedTests selects.
     pg_related / touched_pg: absolute pg suite paths; pg_related None = pg skipped.
+    remote_sha: set (remote on, clean worktree) -> the heavy steps become one
+    builder-remote-qa.py step on that sha; None -> today's all-local plan.
     """
+    steps, notes = local_plan(files, broad, node_related, pg_related, pg_total, touched_pg)
+    lock = str(SCRIPTS / "pg-lane-lock.py")
+    heavy = [label for label, command, _ in steps if label == BROAD_LABEL or lock in command]
+    if not remote_sha or not heavy:
+        return steps, notes
+    # The remote lanes run the full node + dom + pg sets: the broad and every pg step go.
+    kept = [step for step in steps if step[0] == "related jest"]
+    notes.append(f"heavy set ({', '.join(heavy)}) -> Cloud Build via builder-remote-qa.py on "
+                 f"{remote_sha[:12]} (full node + dom + pg, lint, tsc, build; local fallback on infra)")
+    command = [sys.executable, str(REMOTE_QA), "--sha", remote_sha]
+    return kept + [("heavy set on Cloud Build", command, node_env())], notes
+
+
+def local_plan(files, broad, node_related, pg_related, pg_total, touched_pg):
+    """Today's all-local steps (BUILDER_QA_REMOTE=0, a dirty worktree, or nothing heavy)."""
     notes = []
     if broad or not files or node_related == 0:
         why = broad or ["no related node/dom test"]
         notes.append("node/dom: BROAD set (full node + dom jest): " + "; ".join(why))
-        steps = [("broad jest (node + dom)", [*GATED, "jest"], node_env())]
+        steps = [(BROAD_LABEL, [*GATED, "jest"], node_env())]
     else:
         steps = [("related jest", [*GATED, "jest", "--findRelatedTests", *files], node_env())]
     if pg_related is None:
@@ -163,7 +204,15 @@ def main():
         root = os.getcwd()
         touched = [os.path.join(root, p) for p in paths if Path(p).is_file()]
         print(f"targeted-tests: {len(pg_related)} of {pg_total} pg suite(s) related")
-    steps, notes = plan(files, broad, node_related, pg_related, pg_total or 0, touched or [])
+    remote_sha = None
+    if qa_remote():
+        if worktree_clean():
+            remote_sha = git("rev-parse", "HEAD").strip()
+        else:
+            print("targeted-tests: worktree has uncommitted changes, so any heavy step runs "
+                  "locally (the remote run tests the committed sha only; commit to use Cloud Build)")
+    steps, notes = plan(files, broad, node_related, pg_related, pg_total or 0, touched or [],
+                        remote_sha)
     for note in notes:
         print(f"targeted-tests: {note}", flush=True)
     first_failure = 0
