@@ -23,13 +23,15 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    (for prod + landing) is never below MIN_RESERVE = 4: a lower BUILDER_QA_RESERVE is clamped,
    and BUILDER_QA_MAX_INFLIGHT / --max-inflight can only LOWER the cap (a higher one is clamped
    to limit - 4, with a note).
-   A run adds 2 builds. Admission is atomic laptop-wide: under an flock on RESERVATIONS, count
-   `gcloud builds list --ongoing`, add 2 per live pending reservation (another builder that is
-   admitted but whose builds are not visible yet; dead pids and entries older than
-   RESERVATION_TTL are dropped), and only if ongoing + pending + 2 <= cap record our own
-   reservation. Otherwise poll every --poll seconds up to --admit-wait, then fall back local.
-   The reservation is released once the runner has printed both build ids (they now count as
-   ongoing), or on any exit. A failed list is infra: fall back local, never submit blind.
+   A run adds 2 builds. Admission is atomic laptop-wide: under an flock on RESERVATIONS it
+   lists the ongoing build ids, reconciles every pending reservation (an admitted builder whose
+   builds may not be visible yet) and admits only if ongoing + pending + 2 <= cap. Each build
+   counts once: listed as ongoing, or still pending, never both; a reservation's printed id
+   that is terminal frees its slot. A reservation is held until its ids show as ongoing or
+   terminal, or its owner pid exits (no age expiry: a slow upload keeps its slot). Otherwise
+   poll every --poll seconds up to --admit-wait, then fall back local. A failed list, or a
+   corrupt ledger (`FALLBACK local: reservation ledger unreadable (<reason>)`; the file is
+   moved aside with a timestamp), is infra: fall back local, never submit blind.
    Builders on other machines are not covered by the lock; this one laptop runs the fleet.
 3. Remote verdict: runner exit 0 WITH its `RESULT unit=SUCCESS pg=SUCCESS exit 0` line ->
    `REMOTE GREEN @<sha>`, exit 0. Exit 1 WITH a `FAILED LANE` line -> `REMOTE RED @<sha>` and
@@ -81,7 +83,6 @@ MIN_RESERVE = 4  # builds always kept free for prod builds and landing gates; ne
 BUILDS_PER_RUN = 2  # the runner submits two lanes (unit + pg)
 GCLOUD_TIMEOUT = 90
 RESERVATIONS = Path.home() / ".claude" / "state" / "builder-remote-qa.reservations"
-RESERVATION_TTL = 1800  # a submit takes ~2 min; an older entry is a reused pid or a crash
 # The runner's SIGTERM path: SIGNAL_JOIN_BOUND (20 s) for hung submits, then a cancel per lane
 # (each a quick gcloud call, normally seconds). Wait well past both before SIGKILL.
 KILL_GRACE = 180
@@ -159,14 +160,6 @@ def builder_cap(limit, env=None, override=None):
     return cap, note
 
 
-def count_ongoing(result):
-    """Ongoing build count from `gcloud builds list --ongoing --format=value(id)`, or None."""
-    code, out, _ = result
-    if code != 0:
-        return None
-    return len([line for line in (out or "").splitlines() if line.strip()])
-
-
 def remote_verdict(code, output):
     """('green'|'red'|'infra', reason). Green and red each need the runner's own evidence line."""
     if code == 0 and GREEN_LINE.search(output or ""):
@@ -239,12 +232,28 @@ def read_limit(gcloud):
     return parse_limit(result)
 
 
-def ongoing(gcloud):
+def ongoing_ids(gcloud):
+    """The set of ongoing build ids, or None when the list cannot be read (infra)."""
     try:
-        return count_ongoing(gcloud(["builds", "list", "--ongoing", f"--project={PROJECT}",
-                                     f"--region={REGION}", "--format=value(id)", "--quiet"]))
+        code, out, _ = gcloud(["builds", "list", "--ongoing", f"--project={PROJECT}",
+                               f"--region={REGION}", "--format=value(id)", "--quiet"])
     except Exception:  # noqa: BLE001 (could not count = infra; Interrupted is not an Exception)
         return None
+    if code != 0:
+        return None
+    return {line.strip() for line in (out or "").splitlines() if line.strip()}
+
+
+def build_status(gcloud, build_id):
+    """A build's status (e.g. WORKING, SUCCESS), or None when it cannot be read."""
+    try:
+        code, out, _ = gcloud(["builds", "describe", build_id, f"--project={PROJECT}",
+                               f"--region={REGION}", "--format=value(status)", "--quiet"])
+    except Exception:  # noqa: BLE001 (unknown = still pending, the safe side)
+        return None
+    if code != 0:
+        return None
+    return (out or "").strip() or None
 
 
 def pid_alive(pid):
@@ -259,8 +268,66 @@ def pid_alive(pid):
     return True
 
 
+class LedgerCorrupt(Exception):
+    """The reservation ledger cannot be trusted; admission fails closed."""
+
+
+def entry_problem(entry):
+    """Why a ledger entry is malformed, or None."""
+    if not isinstance(entry, dict):
+        return f"entry {entry!r} is not an object"
+    pid = entry.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return f"entry pid {pid!r} is not a positive integer"
+    if not isinstance(entry.get("token"), str) or not entry["token"]:
+        return "entry token missing"
+    at = entry.get("at")
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return f"entry time {at!r} is not a number"
+    ids = entry.get("build_ids", [])
+    if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids):
+        return f"entry build_ids {ids!r} is not a list of ids"
+    return None
+
+
+RUNNING_STATUSES = {"QUEUED", "PENDING", "WORKING"}
+
+
+def reconcile(entries, listed, status_of):
+    """(entries to keep, pending build count). Pure apart from status_of(build_id).
+
+    An entry with no build ids yet is 2 pending builds. A printed id that is in the ongoing
+    list counts there, never also as pending. One that is terminal (a status outside
+    RUNNING_STATUSES) frees its slot. One that is neither (not visible yet, or unreadable) is
+    still pending. A lane whose id has not printed yet is pending too. An entry whose builds
+    are all listed or terminal is done and dropped.
+    """
+    keep, pending = [], 0
+    for entry in entries:
+        ids = entry.get("build_ids", [])
+        not_printed = max(0, BUILDS_PER_RUN - len(ids))
+        still = []
+        for build_id in ids:
+            if build_id in listed:
+                continue
+            status = status_of(build_id)
+            if status is None or status in RUNNING_STATUSES:
+                still.append(build_id)
+        if still or not_printed:
+            keep.append(entry)
+            pending += len(still) + not_printed
+    return keep, pending
+
+
 class Reservations:
-    """Laptop-wide pending-submit ledger: a JSON list in `path`, changed only under its flock."""
+    """Laptop-wide pending-submit ledger: a JSON list in `path`, changed only under its flock.
+
+    An entry is held until its build ids are visible as ongoing or terminal (reconcile), or its
+    owner pid exits (release on exit, or dead-pid cleanup). There is no age-based expiry, so a
+    slow upload keeps its slot. A corrupt ledger fails closed (LedgerCorrupt) and is renamed
+    aside with a timestamp so the next run starts clean. A reused pid keeps a stale entry alive
+    (the safe side: it over-reserves, never under-reserves).
+    """
 
     def __init__(self, path=None, now=time.time, alive=pid_alive):
         self.path = Path(path or RESERVATIONS)
@@ -274,60 +341,116 @@ class Reservations:
         return handle
 
     def _load(self):
+        """Entries whose owner is alive; raises LedgerCorrupt (file moved aside) when untrusted."""
         try:
-            entries = json.loads(self.path.read_text() or "[]")
-        except (OSError, ValueError):
-            entries = []
-        now = self.now()
-        return [e for e in entries if isinstance(e, dict) and self.alive(e.get("pid"))
-                and now - float(e.get("at", 0)) < RESERVATION_TTL]
+            text = self.path.read_text()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            self._quarantine(f"unreadable: {exc}")
+        try:
+            entries = json.loads(text)
+        except ValueError as exc:
+            self._quarantine(f"not JSON: {exc}")
+        if not isinstance(entries, list):
+            self._quarantine("not a list")
+        for entry in entries:
+            problem = entry_problem(entry)
+            if problem:
+                self._quarantine(problem)
+        return [e for e in entries if self.alive(e["pid"])]  # a dead owner never submits
+
+    def _quarantine(self, reason):
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}-{os.getpid()}")
+        try:
+            os.replace(self.path, aside)
+            where = f"moved aside to {aside}"
+        except OSError as exc:
+            where = f"left in place ({exc})"
+        raise LedgerCorrupt(f"{reason}; {where}")
 
     def _save(self, entries):
         tmp = self.path.with_name(self.path.name + f".tmp{os.getpid()}")
         tmp.write_text(json.dumps(entries))
         os.replace(tmp, self.path)
 
-    def try_reserve(self, count_ongoing_fn, cap):
-        """Under the lock: (admitted, ongoing, pending builds). Records us only when admitted."""
+    def try_reserve(self, list_ids_fn, cap, status_fn=lambda build_id: None):
+        """Under the lock: (state, ongoing, pending, reason).
+
+        state is admitted / full / list-failed / ledger-corrupt; only admitted records us.
+        """
         handle = self._locked()
         try:
-            entries = self._load()
-            count = count_ongoing_fn()
-            if count is None:
-                self._save(entries)
-                return None, None, None
-            pending = BUILDS_PER_RUN * len(entries)
+            try:
+                entries = self._load()
+            except LedgerCorrupt as exc:
+                return "ledger-corrupt", None, None, str(exc)
+            listed = list_ids_fn()
+            if listed is None:
+                return "list-failed", None, None, "gcloud builds list failed"
+            statuses = {}
+
+            def status_of(build_id):
+                if build_id not in statuses:
+                    statuses[build_id] = status_fn(build_id)
+                return statuses[build_id]
+            entries, pending = reconcile(entries, set(listed), status_of)
+            count = len(listed)
             admitted = count + pending + BUILDS_PER_RUN <= cap
             if admitted:
                 self.token = f"{os.getpid()}-{time.monotonic_ns()}-{id(self)}"
-                entries.append({"pid": os.getpid(), "at": self.now(), "token": self.token})
+                entries.append({"pid": os.getpid(), "at": self.now(), "token": self.token,
+                                "build_ids": []})
             self._save(entries)
-            return admitted, count, pending
+            return ("admitted" if admitted else "full"), count, pending, None
         finally:
             handle.close()  # drops the flock
 
+    def record_ids(self, build_ids):
+        """Our builds are submitted: keep the entry, now with ids, until the list shows them."""
+        ids = sorted(set(build_ids))
+        self._update(lambda entry: {**entry, "build_ids": ids})
+
     def release(self):
+        """The owner is exiting (its builds are terminal or cancelled): drop its entry."""
+        self._update(lambda entry: None)
+        self.token = None
+
+    def _update(self, change):
         if self.token is None:
             return
         handle = self._locked()
         try:
-            self._save([e for e in self._load() if e.get("token") != self.token])
-            self.token = None
+            try:
+                entries = self._load()
+            except LedgerCorrupt:
+                return  # moved aside; the next admission starts clean
+            out = []
+            for entry in entries:
+                if entry["token"] == self.token:
+                    entry = change(entry)
+                if entry is not None:
+                    out.append(entry)
+            self._save(out)
         finally:
             handle.close()
 
 
 def admit(gcloud, cap, wait, poll, sleep, clock, say, reservations):
-    """(admitted, waited seconds, reason). Counts and reserves atomically after every poll."""
+    """(admitted, waited seconds, reason). Reconciles, counts and reserves atomically per poll."""
     started = clock()
     announced = False
     while True:
-        admitted, count, pending = reservations.try_reserve(lambda: ongoing(gcloud), cap)
+        state, count, pending, why = reservations.try_reserve(
+            lambda: ongoing_ids(gcloud), cap, lambda build_id: build_status(gcloud, build_id))
         waited = clock() - started
-        if admitted is None:
+        if state == "ledger-corrupt":
+            return False, waited, f"reservation ledger unreadable ({why})"
+        if state == "list-failed":
             return False, waited, "gcloud builds list failed (cannot count ongoing builds; not submitting blind)"
         sums = f"{count} ongoing + {pending} pending + {BUILDS_PER_RUN}"
-        if admitted:
+        if state == "admitted":
             return True, waited, f"{sums} <= cap {cap}"
         if waited >= wait:
             return False, waited, f"admission: {sums} > cap {cap} after {waited:.0f}s wait"
@@ -633,7 +756,8 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
         if match:
             child.build_ids[match.group(1)] = match.group(2)
             if len(child.build_ids) >= BUILDS_PER_RUN:
-                reservations.release()  # both builds are submitted, so they count as ongoing now
+                # Held, now with its ids, until the list shows them (reconcile); not released.
+                reservations.record_ids(list(child.build_ids.values()))
 
     record["mode"] = "remote"
     try:

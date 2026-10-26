@@ -46,8 +46,9 @@ def repo(tmp_path):
 class Gcloud:
     """Scripted gcloud: a quota read and a sequence of `builds list --ongoing` counts."""
 
-    def __init__(self, ongoing=(0,), limit=(0, "10\n", ""), list_code=0):
+    def __init__(self, ongoing=(0,), limit=(0, "10\n", ""), list_code=0, statuses=None):
         self.ongoing, self.limit, self.list_code = list(ongoing), limit, list_code
+        self.statuses = statuses or {}
         self.calls = []
 
     def __call__(self, args):
@@ -58,7 +59,10 @@ class Gcloud:
             if self.list_code:
                 return self.list_code, "", "ERROR: (gcloud.builds.list) reauth needed"
             n = self.ongoing.pop(0) if len(self.ongoing) > 1 else self.ongoing[0]
-            return 0, "".join(f"b{i}\n" for i in range(n)), ""
+            ids = n if isinstance(n, (set, list, tuple)) else [f"b{i}" for i in range(n)]
+            return 0, "".join(f"{i}\n" for i in ids), ""
+        if args[:2] == ["builds", "describe"]:
+            return 0, self.statuses.get(args[2], "WORKING") + "\n", ""
         raise AssertionError(f"unexpected gcloud call {args}")
 
 
@@ -392,13 +396,14 @@ def concurrent_admissions(tmp_path, n, base_ongoing, cap=6):
     barrier = threading.Barrier(n)
     results = []
     lock = threading.Lock()
+    listed = {f"b{i}" for i in range(base_ongoing)}
 
     def worker():
         res = bq.Reservations(path)
         barrier.wait()
-        admitted, _, _ = res.try_reserve(lambda: base_ongoing, cap)
+        state, _, _, _ = res.try_reserve(lambda: listed, cap)
         with lock:
-            results.append(admitted)
+            results.append(state == "admitted")
     threads = [threading.Thread(target=worker) for _ in range(n)]
     for t in threads:
         t.start()
@@ -420,8 +425,8 @@ CHILD = r"""
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("bq", sys.argv[1])
 bq = importlib.util.module_from_spec(spec); spec.loader.exec_module(bq)
-admitted, _, _ = bq.Reservations(sys.argv[2]).try_reserve(lambda: 0, 6)
-print("ADMITTED" if admitted else "REFUSED", flush=True)
+state, _, _, _ = bq.Reservations(sys.argv[2]).try_reserve(lambda: set(), 6)
+print("ADMITTED" if state == "admitted" else "REFUSED", flush=True)
 sys.stdin.read()  # stay alive (a live pid) until the test closes stdin
 """
 
@@ -439,24 +444,137 @@ def test_concurrent_admissions_across_processes(tmp_path):
     assert answers.count("ADMITTED") == 3 and answers.count("REFUSED") == 3
 
 
-def test_dead_and_old_reservations_are_dropped(tmp_path):
+def entry(token, pid=None, ids=(), at=None):
+    return {"pid": pid or os.getpid(), "at": time.time() if at is None else at, "token": token,
+            "build_ids": list(ids)}
+
+
+def ledger(path, *entries):
+    path.write_text(json.dumps(list(entries)))
+
+
+def tokens(path):
+    return [e["token"] for e in json.loads(path.read_text())]
+
+
+def test_dead_pid_is_cleaned_up_with_or_without_ids(tmp_path):
     path = tmp_path / "res.json"
-    path.write_text(json.dumps([{"pid": 99999999, "at": time.time(), "token": "dead"},
-                                {"pid": os.getpid(), "at": time.time() - 99999, "token": "old"},
-                                {"pid": os.getpid(), "at": time.time(), "token": "live"}]))
-    admitted, _, pending = bq.Reservations(path).try_reserve(lambda: 0, 6)
-    assert (admitted, pending) == (True, 2)
-    tokens = [e["token"] for e in json.loads(path.read_text())]
-    assert "dead" not in tokens and "old" not in tokens and len(tokens) == 2
+    ledger(path, entry("dead-no-ids", pid=99999999), entry("dead-ids", pid=99999998, ids=["x1", "x2"]),
+           entry("live"))
+    state, _, pending, _ = bq.Reservations(path).try_reserve(lambda: set(), 6)
+    assert (state, pending) == ("admitted", 2)
+    assert "dead-no-ids" not in tokens(path) and "dead-ids" not in tokens(path)
+    assert len(tokens(path)) == 2
 
 
-def test_failed_count_reserves_nothing(tmp_path):
+def test_long_upload_past_30_minutes_keeps_its_reservation(tmp_path):
+    """A live owner whose builds are not visible yet holds its 2 slots however long the upload takes."""
     path = tmp_path / "res.json"
-    assert bq.Reservations(path).try_reserve(lambda: None, 6) == (None, None, None)
-    assert json.loads(path.read_text()) == []
+    clock = {"t": 1_000_000.0}
+    first = bq.Reservations(path, now=lambda: clock["t"])
+    assert first.try_reserve(lambda: set(), 6)[0] == "admitted"
+    ledger(path, *(json.loads(path.read_text()) + [entry("other", at=clock["t"])]))
+    clock["t"] += 3 * 3600  # three hours of upload
+    state, _, pending, _ = bq.Reservations(path, now=lambda: clock["t"]).try_reserve(lambda: set(), 6)
+    assert pending == 4 and state == "admitted"  # 0 + 4 + 2 = 6: both still held
+    assert bq.Reservations(path, now=lambda: clock["t"]).try_reserve(lambda: set(), 6)[0] == "full"
 
 
-def test_reservation_released_once_both_build_ids_print_and_on_exit(repo, tmp_path):
+def test_stale_list_does_not_admit_an_extra_pair(tmp_path):
+    """Three pairs admitted; the first pair's ids printed but the list does not show them yet."""
+    path = tmp_path / "res.json"
+    owners = [bq.Reservations(path) for _ in range(3)]
+    for owner in owners:
+        assert owner.try_reserve(lambda: set(), 6)[0] == "admitted"
+    owners[0].record_ids(["u-1", "p-1"])
+    state, count, pending, _ = bq.Reservations(path).try_reserve(lambda: set(), 6,
+                                                                 lambda build_id: "QUEUED")
+    assert (state, count, pending) == ("full", 0, 6)
+
+
+def test_build_listed_and_pending_is_counted_once(tmp_path):
+    path = tmp_path / "res.json"
+    owner = bq.Reservations(path)
+    owner.try_reserve(lambda: set(), 6)
+    owner.record_ids(["u-1", "p-1"])
+    # u-1 is visible; p-1 is still uploading: 1 ongoing + 1 pending, not 1 + 2.
+    state, count, pending, _ = bq.Reservations(path).try_reserve(lambda: {"u-1"}, 6,
+                                                                 lambda build_id: "QUEUED")
+    assert (count, pending, state) == (1, 1, "admitted")  # 1 + 1 + 2 = 4
+
+
+def test_all_ids_listed_drops_the_reservation(tmp_path):
+    path = tmp_path / "res.json"
+    owner = bq.Reservations(path)
+    owner.try_reserve(lambda: set(), 6)
+    owner.record_ids(["u-1", "p-1"])
+    state, count, pending, _ = bq.Reservations(path).try_reserve(lambda: {"u-1", "p-1"}, 6)
+    assert (count, pending) == (2, 0) and owner.token not in tokens(path)
+
+
+def test_terminal_build_releases_its_slot(tmp_path):
+    path = tmp_path / "res.json"
+    owner = bq.Reservations(path)
+    owner.try_reserve(lambda: set(), 6)
+    owner.record_ids(["u-1", "p-1"])
+    status = {"u-1": "SUCCESS", "p-1": "FAILURE"}
+    state, _, pending, _ = bq.Reservations(path).try_reserve(lambda: set(), 6, status.get)
+    assert pending == 0 and owner.token not in tokens(path)
+
+
+def test_unreadable_status_stays_pending(tmp_path):
+    path = tmp_path / "res.json"
+    owner = bq.Reservations(path)
+    owner.try_reserve(lambda: set(), 6)
+    owner.record_ids(["u-1", "p-1"])
+    assert bq.Reservations(path).try_reserve(lambda: set(), 6, lambda build_id: None)[2] == 2
+
+
+def test_one_lane_printed_still_holds_two(tmp_path):
+    path = tmp_path / "res.json"
+    owner = bq.Reservations(path)
+    owner.try_reserve(lambda: set(), 6)
+    owner.record_ids(["u-1"])
+    # cap 0: probes that never reserve, so each sees only the owner's entry
+    assert bq.Reservations(path).try_reserve(lambda: set(), 0, lambda b: "QUEUED")[2] == 2
+    assert bq.Reservations(path).try_reserve(lambda: {"u-1"}, 0, lambda b: "QUEUED")[1:3] == (1, 1)
+
+
+def test_failed_list_reserves_nothing(tmp_path):
+    path = tmp_path / "res.json"
+    res = bq.Reservations(path)
+    assert res.try_reserve(lambda: None, 6)[0] == "list-failed"
+    assert res.token is None and not path.exists()
+
+
+@pytest.mark.parametrize("content", [
+    "{not json", "", '{"pid": 1}', '[1, 2]', '[{"pid": "x", "at": 1, "token": "t"}]',
+    '[{"pid": 1, "at": 1}]', '[{"pid": 1, "at": "now", "token": "t"}]',
+    '[{"pid": 1, "at": 1, "token": "t", "build_ids": "u-1"}]',
+])
+def test_corrupt_ledger_fails_closed_and_is_moved_aside(tmp_path, content):
+    path = tmp_path / "res.json"
+    path.write_text(content)
+    res = bq.Reservations(path)
+    state, _, _, why = res.try_reserve(lambda: set(), 6)
+    assert state == "ledger-corrupt" and res.token is None
+    assert "moved aside" in why
+    aside = list(tmp_path.glob("res.json.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == content and not path.exists()
+
+
+def test_corrupt_ledger_means_fallback_with_zero_submits(repo, tmp_path):
+    (tmp_path / "res.json").write_text("[{garbage")
+    gcloud = Gcloud()
+    code, out, calls, gcloud, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT),
+                                               local=(1, "lint"))
+    assert calls["remote"] == 0 and calls["local"] == 1
+    assert "FALLBACK local: reservation ledger unreadable (" in out
+    assert not any(c[:2] == ["builds", "list"] for c in gcloud.calls)
+    assert code == 1 and "REMOTE" not in out
+
+
+def test_ids_recorded_when_both_print_and_entry_dropped_on_exit(repo, tmp_path):
     seen = {}
 
     def remote(scratch, say, child):
@@ -466,9 +584,10 @@ def test_reservation_released_once_both_build_ids_print_and_on_exit(repo, tmp_pa
         seen["after_two"] = json.loads((tmp_path / "res.json").read_text())
         return 0, "RESULT unit=SUCCESS pg=SUCCESS exit 0\n"
     code, _, _, _, records, _ = run(repo, tmp_path, remote=remote, local=(1, "x"))
-    assert len(seen["after_one"]) == 1 and seen["after_two"] == []
+    assert [e["build_ids"] for e in seen["after_one"]] == [[]]
+    assert [e["build_ids"] for e in seen["after_two"]] == [["p-2", "u-1"]]  # held, not released
     assert code == 0 and records[-1]["build_ids"] == {"unit": "u-1", "pg": "p-2"}
-    assert json.loads((tmp_path / "res.json").read_text()) == []
+    assert json.loads((tmp_path / "res.json").read_text()) == []  # owner exit releases
 
 
 def test_reservation_released_when_remote_infra_falls_back(repo, tmp_path):
