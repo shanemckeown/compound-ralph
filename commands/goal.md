@@ -29,7 +29,7 @@ Observed 2026-05-13 on `AestheticcNext-sdait` — fix shipped via Plan-Build-QA 
 
 `/do-bead` is retired (Ralph one-prompt loop, single model). Use `/goal` for everything from single beads to epic bundles.
 
-Plan + Build with Claude Opus; the own-gate review is `aestheticc-review code` (Codex Astra at xhigh, plus a fresh Opus head-to-head on money / patient data / tenancy). The seats are the Aestheticc/CLAUDE.md model table. The partnership loop catches what one-model loops miss.
+Plan + Build with Claude Opus; the own-gate review is `aestheticc-review code`: one seat, Codex Astra at high (xhigh on money / patient data / tenancy; one fresh Opus seat instead on a patient-data bead). The seats are the Aestheticc/CLAUDE.md model table. The partnership loop catches what one-model loops miss.
 
 Fired from a fresh /agent chat. The /agent view is the supervisor. Shane keeps 3-5 running, fires another when one drops out.
 
@@ -435,7 +435,7 @@ If checks break: fix in the same commit (amend) or a fixup commit. Don't proceed
 
 If Husky pre-push tsc hangs cold: warm via `python3 ~/.claude/scripts/gated-test-run.py tsc-heavy --noEmit` first (per `feedback_husky_tsc_cold_cache.md`).
 
-### Phase 4 — QA (`aestheticc-review code`: Astra xhigh, plus Opus head-to-head on money / patient data / tenancy)
+### Phase 4 — QA (`aestheticc-review code`: one seat, Astra high, xhigh on money / patient data / tenancy)
 
 Follow `~/.claude/skills/aestheticc-review/SKILL.md` mode `code`. The seats come from the
 Aestheticc/CLAUDE.md model table. GLM is not a seat: the old GLM-primary / Codex-fallback
@@ -566,16 +566,23 @@ set +e
 } > "$EVIDENCE_DIR/review-brief-round-N.txt"
 ```
 
-**Step 1: Astra at `xhigh` (always, except the claude route).** Check the route first (see
-"Claude route" right after this block); on `claude`, don't run this block. Run it in the
-foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
+**Step 1: the one seat, Astra (always, except the claude route; Shane 26 Oct: one seat only, no
+second Claude read, LUCY-nd3qz).** Check the route first (see "Claude route" right after this
+block); on `claude`, don't run this block. The effort is computed, never chosen by you:
+`~/.claude/scripts/review-effort.py` prints `high` only when `risk_tier.classify()` puts the diff in
+its `light` tier (UI, styling or copy only, no sensitive surface) and the bead carries no money /
+tenancy / patient-data label; anything else, and any error, is `xhigh`. Run it in the foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
 ```bash
+python3 ~/.claude/scripts/review-effort.py "$BEAD_ID" "$(git rev-parse HEAD)" \
+  > "$EVIDENCE_DIR/review-effort-round-N.txt" 2>&1
+EFFORT=$(head -1 "$EVIDENCE_DIR/review-effort-round-N.txt" | cut -d' ' -f1)
+[ "$EFFORT" = high ] || EFFORT=xhigh   # no output or anything else: fail closed
 set +e
 cat "$EVIDENCE_DIR/review-brief-round-N.txt" \
   | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 review round-N" codex exec \
     --cd "$(pwd)" \
-    -c model_reasoning_effort=xhigh \
+    -c model_reasoning_effort="$EFFORT" \
     --sandbox read-only \
     - > "$EVIDENCE_DIR/astra-verdict-round-N.log" \
     2> "$EVIDENCE_DIR/astra-stderr-round-N.log"
@@ -583,8 +590,8 @@ ASTRA_EXIT=$?
 set -e
 printf '%s\n' "$ASTRA_EXIT" > "$EVIDENCE_DIR/astra-exit-code-round-N.txt"
 VERDICT_LOG="$EVIDENCE_DIR/astra-verdict-round-N.log"
-REVIEWER="astra-xhigh"
-# xhigh is passed on THIS review call only; config default stays medium (Shane 2026-09-23).
+REVIEWER="astra-$EFFORT"
+# The effort is passed on THIS review call only; config default stays medium (Shane 2026-09-23).
 # No --ephemeral: if the 10-minute tool limit hits, resume the SAME session in the
 # foreground (`codex exec resume <session-id> "continue; finish the verdict" </dev/null`),
 # taking the id from the output. Never start a fresh session.
@@ -599,32 +606,26 @@ REVIEWER="astra-xhigh"
 Shell variables don't survive between Bash calls, so recompute the route here first:
 `python3 ~/.claude/scripts/claude_only_guard.py route "$BEAD_ID"` (line 1 `claude` or
 `astra`; save it to `$EVIDENCE_DIR/route-round-N.txt`). On `claude`, spawn a fresh-context Opus Agent (`model: opus`) on the same brief as the Astra-seat
-reviewer; it writes `$EVIDENCE_DIR/claude-seat1-round-N.md`. Step 2 below always runs too, so
-the gate is two independent Claude reviews. Set `REVIEWER="opus x2 (Claude-only, patient data)"`,
+reviewer; it writes `$EVIDENCE_DIR/claude-seat1-round-N.md`. That one Opus review is the whole
+gate: no second Claude read. Set `REVIEWER="opus (Claude-only, patient data)"`,
 write `fallback used: claude-only — <guard reason>` to
 `$EVIDENCE_DIR/fallback-round-N.txt` (so the Step 4 checker drops the Astra log), and say so
 in Phase 7. This is not "Astra unavailable": the hold rule below does not apply.
 
 **If Codex itself fails** (non-zero exit that a resume doesn't fix: auth, quota or network),
 don't swap seats silently:
-- **Money / patient-data / tenancy bead (Step 2 applies): hold.** Its gate is two
-  independent model families, and one Opus review can't stand in for both (CLAUDE.md:
-  "provider down → hold"). Commit the work, don't push, write
+- **Money / patient-data / tenancy bead (`review-effort.py` said `xhigh`): hold.** Its seat is Astra, and an
+  Opus review doesn't stand in for it (CLAUDE.md: "provider down → hold"). Commit the work,
+  don't push, write
   `held: Astra unavailable — <reason>` to `$EVIDENCE_DIR/fallback-round-N.txt`, and report
   `needs input: <BEAD_ID> review held, Astra unavailable` in Phase 7.
-- **Any other bead:** Step 2's Opus reviewer becomes the reviewer of record. Set
+- **Any other bead:** spawn one fresh-context Opus Agent (`model: opus`) on the same brief; it
+  writes `$EVIDENCE_DIR/claude-seat1-round-N.md` and is the reviewer of record. Set
   `REVIEWER="opus (Astra unavailable, fallback)"`, write `fallback used: <reason>` to
   `$EVIDENCE_DIR/fallback-round-N.txt`, and say so in Phase 7.
 
-**Step 2: fresh-context Opus head-to-head** — required when the plan's Hazards section hit
-any money (H-M*), patient-data (H-P*) or tenancy (H-T*) hazard, or when `touchesSensitive`
-fired. Spawn a separate Agent (`model: opus`) whose prompt is only the path to
-`$EVIDENCE_DIR/review-brief-round-N.txt`, plus: "trace each entry point to the write; where SQL
-decides the outcome, you MAY create a separate scratch worktree
-(`git worktree add <scratch> HEAD`) and run a pg test or revert a guard there — never edit
-this branch's worktree; remove the scratch worktree when done". It must not see Astra's
-output, and you must not read either verdict until both have finished. Save it to
-`$EVIDENCE_DIR/opus-h2h-round-N.md`. A P1/P2 from either reviewer counts.
+**Step 2 is retired (LUCY-nd3qz):** there is no second reviewer. The numbering stays because
+"Phase 4, Step 4" is cited elsewhere.
 
 **Step 3: non-vacuous check — you run it, not the reviewers** (Astra is read-only). In a
 scratch worktree at the tip, revert each new guard and confirm a test fails; confirm a
@@ -650,7 +651,7 @@ clinic has (*"we never need two device sync ever"*). After Steps 1-3 finish, spa
 > You are the review lead. Follow `~/.claude/references/review-lead/LEAD.md` exactly. bead: $BEAD_ID;
 > round: N; scope_lock: <true|false>; evidence dir: $EVIDENCE_DIR (bead, comments, plan and diff
 > are in `brief-inputs-round-N/`; this round's verdicts are `astra-verdict-round-N.log` (claude
-> route: `claude-seat1-round-N.md` instead) and, if present, `opus-h2h-round-N.md`; earlier rounds' verdicts and `lead-round-*.json` are alongside).
+> route or the Astra-unavailable fallback: `claude-seat1-round-N.md` instead), the one seat; earlier rounds' verdicts and `lead-round-*.json` are alongside).
 > Write your JSON to `$EVIDENCE_DIR/lead-round-N.json`.
 
 The lead reads `Aestheticc/Ops/personas/CLINIC_REALITY.md` and the learned
@@ -676,12 +677,11 @@ python3 ~/.claude/references/review-lead/review_lead_check.py \
        || echo --verdict "$EVIDENCE_DIR/astra-verdict-round-N.log" ) \
   --verdict "$EVIDENCE_DIR/mutants-round-N.txt" \
   $( [ -f "$EVIDENCE_DIR/claude-seat1-round-N.md" ] && echo --verdict "$EVIDENCE_DIR/claude-seat1-round-N.md" ) \
-  $( [ -f "$EVIDENCE_DIR/opus-h2h-round-N.md" ] && echo --verdict "$EVIDENCE_DIR/opus-h2h-round-N.md" ) \
   --out-dir "$EVIDENCE_DIR" --round N $( [ "$SCOPE_LOCK" = true ] && echo --scope-lock )
 ```
 
 The Astra log is left out only when `fallback-round-N.txt` says `fallback used` (non-sensitive
-beads; the Opus verdict is then the reviewer of record and must be present). A sensitive bead
+beads; the Opus verdict `claude-seat1-round-N.md` is then the reviewer of record and must be present). A sensitive bead
 never has a fallback: it holds. It refuses (exit 1) on an empty or unparseable verdict, a missing or invented finding, a
 reasonless dismissal, a P1 dismissed without a named pattern, an Act on with no scenario or
 demonstration, more than 5 blocking items, a missing premise from round 2, or a **Dismissed or
@@ -739,9 +739,9 @@ exist, and the output must record the command that actually ran. **All** of thes
 contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
 `fallback used` alongside a completed Opus verdict, **or** on the claude route (any bead,
 sensitive included) `fallback-round-N.txt` says `fallback used: claude-only` and
-`claude-seat1-round-N.md` is complete; (3) where Step 2 applies, both the Astra
-and the Opus verdicts are complete (no Astra-unavailable fallback exists for these; on the
-claude route, `claude-seat1-round-N.md` and `opus-h2h-round-N.md` are both complete); (4) `mutants-round-N.txt`
+`claude-seat1-round-N.md` is complete; (3) `review-effort-round-N.txt` exists and the Astra
+verdict ran at the effort it names (`xhigh` unless its first word is `high`) and is complete (no Astra-unavailable fallback exists for these; on the
+claude route, `claude-seat1-round-N.md` is the one complete seat); (4) `mutants-round-N.txt`
 exists; (5) `lead-round-N.json` exists and `review_lead_check.py` exited 0 on it.
 A model-returned PASS without those
 artifacts is QA FAILED. "Suite did not run" never equals "suite passed."

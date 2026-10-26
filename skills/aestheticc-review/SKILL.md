@@ -1,6 +1,6 @@
 ---
 name: aestheticc-review
-description: Aestheticc's own plan and code review for AestheticcNext beads and branches. It replaces the generic /review and /plan-eng-review for AestheticcNext work. It loads the four review personas and the Aestheticc hazard list, which is built from real review failures. Use when asked to "review this branch", "review this bead", "plan this bead", "adversarial review", "Astra review", "head-to-head review", "is this ready to land", or "/aestheticc-review", and in /goal Phase 2 (plan) and after every push (code). Modes are plan and code.
+description: Aestheticc's own plan and code review for AestheticcNext beads and branches. It replaces the generic /review and /plan-eng-review for AestheticcNext work. It loads the four review personas and the Aestheticc hazard list, which is built from real review failures. Use when asked to "review this branch", "review this bead", "plan this bead", "adversarial review", "Astra review", "is this ready to land", or "/aestheticc-review", and in /goal Phase 2 (plan) and after every push (code). Modes are plan and code.
 argument-hint: "plan <bead-id> | code <bead-id> [branch|sha]"
 ---
 
@@ -74,17 +74,22 @@ Write the plan to `.goal/PLAN.md`, or to the bead with `bd comment`. Never use `
 
 Run after every push. You need the bead ID, the branch and the tip SHA. The diff base is `origin/main`, unless the bead names a stacked base.
 
-**Step 1: independent Astra review (always, except patient-data beads).** First run
+**Step 1: the one independent seat (Shane, 26 Oct: one seat only, no second Claude read).** First run
 `python3 ~/.claude/scripts/claude_only_guard.py route <bead>`. If line 1 is `claude` (label
 `patient-data`, or anything in `~/.claude/scripts/claude-only-beads.json`; client business details
-alone may go to Astra), skip codex: this seat is a
-fresh-context Opus Agent on the same brief, and Step 2 runs as well, so the review is two
-independent Claude reviews (LUCY-b3hf5). `~/.claude/bin/codex` refuses the call anyway (exit 3),
-including from a detached scratch at the branch tip. Otherwise run Astra in the foreground,
-read-only, with stdin closed:
+alone may go to Astra), skip codex: the seat is ONE fresh-context Opus Agent on the same brief,
+not two (LUCY-b3hf5, LUCY-nd3qz). `~/.claude/bin/codex` refuses the call anyway (exit 3),
+including from a detached scratch at the branch tip. Otherwise the seat is Astra, run in the
+foreground, read-only, with stdin closed. The effort is computed, never chosen:
+`python3 ~/.claude/scripts/review-effort.py <bead> <tip>` (run in the scratch at the tip) prints `high`
+only when risk_tier.py's classifier puts the diff in its `light` tier (UI, styling or copy only) and no money /
+tenancy / patient-data label applies; otherwise `xhigh`. Any
+error, or any first word but `high`, is `xhigh`. Put its output line in the review file's VERIFIED OK:
 
 ```bash
-cd <scratch worktree at tip> && codex exec -c model_reasoning_effort=xhigh -s read-only \
+cd <scratch worktree at tip> && EFFORT=$(python3 ~/.claude/scripts/review-effort.py <bead> <tip> | tee "$SCRATCH/effort-<bead>.txt" | cut -d' ' -f1)
+[ "$EFFORT" = high ] || EFFORT=xhigh
+codex exec -c model_reasoning_effort="$EFFORT" -s read-only \
   "$(cat /path/to/review-brief.md)" </dev/null > "$SCRATCH/astra-<bead>.txt" 2>&1
 ```
 
@@ -112,12 +117,12 @@ Take the session ID from the output. Never start a fresh session. Never backgrou
 
 **Tests reviewers run: targeted only (LUCY-z3ykz.3).** To check a claim, run `python3 ~/.claude/scripts/targeted-tests.py` (related suites, by exact path) or a single named test file. Never run the full pg lane (the whole `pg-tests` project) or the Cloud Build simulation (`scripts/ci/simulate-cloudbuild-test.sh`): the heavy set runs once per landing batch, chosen by risk tier, on the combined tree. A scratch pg test of one SQL path (Step 2) is a single file, not the lane.
 
-**Step 2: fresh-context Opus head-to-head (money, patient data or tenancy beads only).** Run a separate fresh-context Opus agent with the same brief. It must trace code paths from each entry point to the write, run a scratch pg test against the real schema where SQL decides the outcome, and run mutations. The two reviewers must not see each other's output until both have finished.
+**Step 2: depth on money, patient data or tenancy (no second reviewer).** On those beads the seat traces code paths from each entry point to the write. Astra is read-only, so the Manager running the review (or the builder, in /goal) runs the scratch pg test against the real schema where SQL decides the outcome, in a detached scratch worktree, and hands the command, output and exit code to the seat as evidence. The seat checks that evidence; it never claims to have run it.
 
-**Step 3: non-vacuous check (both reviewers).** For each new guard, revert it in a scratch worktree and confirm a test goes red. Also confirm that a control case goes green both ways.
+**Step 3: non-vacuous check (Manager or builder runs it; the seat checks it).** For each new guard, revert it in a scratch worktree and confirm a test goes red. Also confirm that a control case goes green both ways.
 - A test whose mock always throws proves nothing (0mwa0 round 3).
 - A test that feeds a helper its inputs, and never drives the loop that produces them, proves nothing (c96ck round 4).
-- Record which mutants survived.
+- Record which mutants survived, and pass the record to the seat as evidence.
 
 **Step 4: landing check.** Run `git merge-tree $(git merge-base origin/main <tip>) origin/main <tip>` and also check the other pushed-not-landed branches. List the conflicts. VERSION, CHANGELOG, file-length-baseline and migration-number collisions are expected but must be named.
 
@@ -144,7 +149,7 @@ Then record it:
 ```bash
 bd comment <id> "<PASS|FAIL> @<full tip sha>
 <path of the Ops/reviews file>
-<ASTRA XHIGH|OPUS HEAD-TO-HEAD> REVIEW <YYYY-MM-DD> (tip <sha>): <PASS|FAIL> — <n> P1, <n> P2, <n> P3. <findings, copied verbatim>"
+<ASTRA HIGH|ASTRA XHIGH|OPUS> REVIEW <YYYY-MM-DD> (tip <sha>): <PASS|FAIL> — <n> P1, <n> P2, <n> P3. <findings, copied verbatim>"
 ```
 
 A FAIL comment in exactly that shape is the review's mirror, and `review-gate.sh` lets the review be gated after the lead's clearance. Any other FAIL, VOID or withdrawal comment on the tip vetoes it. A reviewer's raw `PASS @<tip>` line on its own never lands: `review-gate.sh` writes the landable pair.
@@ -250,7 +255,7 @@ Hazards live here, not in the personas. The personas are checked source document
 
 ## Metric: first independent review pass rate
 
-After every FIRST independent review of a bead (Astra or head-to-head, whichever finished first), append one line to `/Users/shane/Documents/Obsidian/Aestheticc/Ops/REVIEW_FIRST_PASS_LOG.md`:
+After every FIRST independent review of a bead (Astra, or the Opus seat on a patient-data bead), append one line to `/Users/shane/Documents/Obsidian/Aestheticc/Ops/REVIEW_FIRST_PASS_LOG.md`:
 
 ```
 | <YYYY-MM-DD> | <bead-id> | <PASS|FAIL> | <reviewer> | <tip sha> | <top hazard IDs hit> |

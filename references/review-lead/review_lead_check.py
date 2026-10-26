@@ -5,7 +5,8 @@ The lead (LEAD.md) is a model; this is the part that must hold without Shane. It
 lead's JSON against the reviewer verdicts, then writes the ONLY file the builder reads.
 
   review_lead_check.py --lead lead-round-N.json --verdict astra-verdict-round-N.log \
-      [--verdict opus-h2h-round-N.md] --out-dir "$EVIDENCE_DIR" --round N [--scope-lock]
+      --verdict mutants-round-N.txt --out-dir "$EVIDENCE_DIR" --round N [--scope-lock]
+  (one seat per round, LUCY-nd3qz: astra-verdict-round-N.log, or claude-seat1-round-N.md on the claude route)
 
 Refuses (exit 1, reasons on stderr) when:
   - a reviewer finding line is missing from the lead, duplicated, or invented;
@@ -61,6 +62,10 @@ Names never decide identity (attempt 6), each refused:
   - D1: a builder-evidence name carrying a REVIEWING echo or a review-verdict block. Builder evidence is
     echo-free, so it is exempt from G4;
   - D2: a name stating its round more than once (_r<N>_ and round-<N>, or two of one).
+Earlier-finding inputs (LUCY-shb7s, --earlier-input: own-gate seat files review-gate passes from the /goal evidence
+dir), each refused when it states a round not older than the newest seat round or echoes the tip; never a seat,
+never the tip, never fixed_by. Only they may mix round-<N> names with _r<N>_ seats, and only their echo may carry
+trailing words after an exact 40-hex sha.
 Duplicate path, H-D0 (LUCY-fuu2h, Shane 15 Oct 2026: "Yes, P2 blocks"):
   - a finding with category `duplicate_path`, or `H-D0` / "duplicate path" in its line, is graded P2
     whatever severity the reviewer wrote, so it can never be Noted;
@@ -209,6 +214,30 @@ BUILDER_EVIDENCE = re.compile(r"(?:mutants|qa-[\w-]+)-round-\d+\.(?:txt|log)")
 
 def is_builder_evidence(name):
     return bool(BUILDER_EVIDENCE.fullmatch(Path(str(name)).name))
+
+
+# Earlier-finding inputs (LUCY-shb7s): own-gate seat files from the /goal evidence dir, passed by review-gate with
+# --earlier-input. Their findings are covered and graded like any other, but they are never a seat, never the tip
+# and never fixed_by; each must echo a commit other than the tip, in a round older than the newest seat round
+# (check_rounds). Only they may mix /goal round-<N> names with _r<N>_ seats, and only their echo may carry trailing
+# words after an exact 40-hex sha (an /goal habit: "@ <sha> (own-gate, round 3)"); every seat's echo stays strict.
+EARLIER_INPUTS = set()
+LENIENT_ECHO = re.compile(r"[ \t]*REVIEWING:[ \t]*(\S+)[ \t]*@[ \t]*([0-9a-fA-F]{40})(?![0-9a-fA-F])[^\n]*")
+
+
+def is_earlier_input(name):
+    return str(Path(str(name)).resolve()) in EARLIER_INPUTS
+
+
+def strict_echo(text):
+    """An earlier input's text with its one REVIEWING line cut back to '<branch> @ <sha>' when that line names an
+    exact 40-hex sha; anything else is returned unchanged (and G4 judges it as before)."""
+    lines = text.split("\n")
+    at = [i for i, ln in enumerate(lines) if re.match(r"[ \t]*REVIEWING:", ln)]
+    m = LENIENT_ECHO.fullmatch(lines[at[0]]) if len(at) == 1 else None
+    if m:
+        lines[at[0]] = f"REVIEWING: {m.group(1)} @ {m.group(2)}"
+    return "\n".join(lines)
 
 
 def has_review_content(p, text):
@@ -410,7 +439,7 @@ def is_confirmation(line):
 
 
 ROUND_IN_NAME = re.compile(r"_r(\d+)(?=[_.])")
-# The /goal workflow's own names: astra-verdict-round-2.log, opus-h2h-round-3.md, mutants-round-2.txt.
+# The /goal workflow's own names: astra-verdict-round-2.log, claude-seat1-round-3.md, mutants-round-2.txt.
 ROUND_NATIVE = re.compile(r"(?:^|[_.-])round-(\d+)(?=[_.-]|$)")
 
 
@@ -427,8 +456,9 @@ def round_of(name):
 
 
 def review_seats(files):
-    """The inputs that are reviews: every one except builder evidence (C2), which never sets the round or tip."""
-    return [x for x in files if not is_builder_evidence(x[0])]
+    """The inputs that are reviews: every one except builder evidence (C2) and earlier-finding inputs (LUCY-shb7s),
+    which never set the round or tip."""
+    return [x for x in files if not is_builder_evidence(x[0]) and not is_earlier_input(x[0])]
 
 
 def check_rounds(files):
@@ -469,7 +499,19 @@ def check_rounds(files):
     if any(not same_commit(a, b) for a in shas for b in shas):
         return [f"the newest round {top} echoes different commits ({', '.join(sorted(s[:10] for s in shas))}): the "
                 "current tip is ambiguous; give each re-review of a new commit its own round"]
-    return []
+    # Earlier-finding inputs (LUCY-shb7s): older than every newest-round seat, and never a review of the tip.
+    errs = []
+    for x in files:
+        if not is_earlier_input(x[0]):
+            continue
+        n, e = Path(x[0]).name, echo_of(x[2])
+        if round_of(x[0]) >= top:
+            errs.append(f"{n}: an earlier-finding input states round {round_of(x[0])}, not older than the newest "
+                        f"seat round {top}: it can only carry findings from before the tip")
+        if not e or any(same_commit(e, s) for s in shas):
+            errs.append(f"{n}: an earlier-finding input must echo one commit other than the tip"
+                        + ("" if e else " (no single REVIEWING echo naming an exact sha)"))
+    return errs
 
 
 # A later round's line about an earlier round's finding: "- r1 P2 <file:line>[ and ...] closed: ...".
@@ -1507,6 +1549,9 @@ def fixed_errors(tag, f, src, files):
     later = next((x for x in files if str(Path(x[0]).resolve()) == str(Path(by).expanduser().resolve())), None)
     if later is None:
         return [f"{tag}: fixed_by {by} is not one of the --verdict files"]
+    if is_earlier_input(later[0]):
+        return [f"{tag}: fixed_by {Path(later[0]).name} is an earlier-finding input (own-gate), not an independent "
+                "review of the tip: it can never confirm a finding fixed"]
     if is_builder_evidence(later[0]):
         return [f"{tag}: fixed_by {Path(later[0]).name} is builder evidence (mutants file or QA log), not an "
                 "independent review: it can never confirm a finding fixed"]
@@ -1752,6 +1797,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--lead", required=True)
     ap.add_argument("--verdict", action="append", required=True)
+    ap.add_argument("--earlier-input", action="append", default=[], metavar="OWN_GATE_FILE",
+                    help="an own-gate seat file read only for its earlier findings (LUCY-shb7s): never a seat")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--scope-lock", action="store_true")
@@ -1767,10 +1814,16 @@ def main(argv=None):
     NOTE_REFS.clear()
     RUN_NOTES.clear()
     UNLISTED.clear()
+    EARLIER_INPUTS.clear()
+    EARLIER_INPUTS.update(str(Path(v).resolve()) for v in a.earlier_input)
     try:
+        if EARLIER_INPUTS & {str(Path(v).resolve()) for v in a.verdict}:
+            raise ValueError("a file is both a --verdict and an --earlier-input")
         lead = json.loads(Path(a.lead).read_text())
-        reviewer_lines = reviewer_findings(a.verdict)
-        files = [(v, reviewer_findings([v]), Path(v).read_text(errors="ignore")) for v in a.verdict]
+        inputs = a.verdict + a.earlier_input
+        reviewer_lines = reviewer_findings(inputs)
+        files = [(v, reviewer_findings([v]), Path(v).read_text(errors="ignore")) for v in inputs]
+        files = [(v, fs, strict_echo(t) if is_earlier_input(v) else t) for v, fs, t in files]
         pre = check_rounds(files) + builder_evidence_errors(files)
     except Exception as e:
         print(f"review-lead: REFUSED: cannot read inputs ({e})", file=sys.stderr)
@@ -1816,7 +1869,7 @@ def main(argv=None):
         except Exception as e:
             print(f"review-lead: REFUSED: cannot read bead comments ({e})", file=sys.stderr)
             return 1
-        newest = max(Path(v).stat().st_mtime for v in a.verdict)
+        newest = max(Path(v).stat().st_mtime for v in a.verdict + a.earlier_input)
         floor = datetime.fromtimestamp(newest, timezone.utc).replace(second=0, microsecond=0)
         not_before = floor if floor.timestamp() >= newest else floor + timedelta(minutes=1)
         cleared, cerrs = verify_clearances(a.cleared_escalation, escalate, parse_comments(text), not_before)
