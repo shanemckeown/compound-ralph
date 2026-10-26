@@ -1,0 +1,137 @@
+# Land gate (AestheticcNext-uqgwm): the full test gate, test-only. It builds no image, pushes
+# nothing and touches no Cloud Run service; tests/meta/cloudbuild-gate-deploys-nothing.test.ts
+# fails npm test if it ever gains a step that could. The runner submits it twice at once, with
+# _LANE=unit and _LANE=pg, so each lane gets a whole 32-vCPU builder (the unit lane is CPU-bound,
+# the pg lane is container I/O-bound, and together their workers would not fit in 32 GB).
+# Lint + typecheck ride the pg lane: its CPU sits idle waiting on Postgres, and tsc + lint
+# (192-267 s remotely) finish well inside pg-tests (333-393 s). The production build
+# (next-build) rides the pg lane too, after lint-typecheck (AestheticcNext-bullf).
+#
+# Step bodies are copied from cloudbuild.yaml; only the lane lines and --maxWorkers differ.
+# tests/meta/cloudbuild-parallel.test.ts fails if the two drift apart.
+#
+# _LANE is a Cloud Build substitution, expanded before bash runs. A shell variable here must
+# be written $$NAME, or Cloud Build rejects the build as an unknown substitution.
+timeout: 2100s
+options:
+  machineType: 'E2_HIGHCPU_32'
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _LANE: 'unit'
+
+steps:
+  # A lane name that matches neither guard would skip every test and go green, so refuse it.
+  - name: "node:20"
+    id: "npm-ci"
+    waitFor: ["-"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        case "$_LANE" in unit|pg) ;; *) echo "❌ _LANE must be unit or pg, got '$_LANE'"; exit 1 ;; esac
+        set -euo pipefail
+        npm ci --legacy-peer-deps
+
+  # Unit lane: node + dom Jest projects and mobile Jest, side by side. Lint + typecheck run
+  # in the pg lane (below), so tsc's 6 GB heap never competes with the DOM suites for CPU.
+  - name: "node:20"
+    id: "unit-tests"
+    waitFor: ["npm-ci"]
+    timeout: "900s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = unit ] || exit 0
+        set -euo pipefail
+        # 16 workers. Lint + tsc used to run beside this step and starved it: DOM suites hit the
+        # 5 s Jest timeout at 20 workers (runs 58be9d5d, 4dbfb829) and again at 12 (69807866,
+        # 9c17d03e, 272 s), so fewer workers was not the cure. With tsc moved to the pg lane only
+        # mobile Jest shares this builder; 16 leaves half the 32 vCPU for it and the jest parent,
+        # and 16 workers stay well inside 32 GB. Raise only after a measured run. tests/meta pins it.
+        npm test -- --forceExit --maxWorkers=16
+        echo "✅ All tests passed"
+
+  - name: "node:20"
+    id: "mobile-tests"
+    waitFor: ["npm-ci"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = unit ] || exit 0
+        set -euo pipefail
+        bash scripts/ci/run-mobile-tests.sh
+        echo "✅ mobile tests passed"
+
+  # pg lane: the whole pg-tests project, one testcontainers Postgres per suite on this
+  # builder (test-only land gate; deploys nothing; no image push), plus lint + typecheck.
+  - name: "node:20"
+    id: "pg-tests"
+    waitFor: ["npm-ci"]
+    timeout: "1200s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = pg ] || exit 0
+        set -euo pipefail
+        echo "🐘 PostgreSQL integration tests (pg-tests project) [BLOCKING]"
+        export TZ=UTC
+        export RUN_PG_TESTS=true
+        npx jest --selectProjects pg-tests --maxWorkers=14
+        echo "✅ pg-tests passed"
+
+  - name: "node:20"
+    id: "lint-typecheck"
+    waitFor: ["npm-ci"]
+    timeout: "600s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = pg ] || exit 0
+        set -euo pipefail
+        echo "🔎 Lint (blocking)"
+        npx next lint
+        echo "✅ Lint passed"
+        echo "🔎 TypeScript typecheck (blocking)"
+        node --max-old-space-size=6144 ./node_modules/typescript/bin/tsc --noEmit
+        echo "✅ Typecheck passed"
+
+  # Production build (AestheticcNext-bullf). Tests and tsc never bundle, so a client page that
+  # pulls a server-only module (sharp, child_process) into the browser bundle passed this gate
+  # and first failed in the prod image build (6c886c75). This runs the same `npm run build`
+  # (prebuild + next build) the image builder runs, with the same 6 GB heap. NEXT_PUBLIC_*
+  # values are inlined into the bundle, so placeholders build the same module graph: no
+  # secrets, and DATABASE_URL stays unset (lib/db.ts connects lazily). Gate-only: the deploy
+  # build already builds, so tests/meta/cloudbuild-parallel.test.ts lists it as GATE_ONLY.
+  # It waits for lint-typecheck: run beside pg-tests and tsc it starved all three (remote run
+  # c0f4d9a5: pg-tests 4m44s -> 8m16s, lint-typecheck 4m26s -> 9m50s, the build past 15 min).
+  # Alone it still needs about 10 min (run 85ffd17b: compiled in 5.0 min, static pages done a
+  # minute later, then about 3 min idle before build traces, a stall the image build shares),
+  # so it gets 900s and the lane 2100s, the runner's own ceiling.
+  - name: "node:20"
+    id: "next-build"
+    waitFor: ["lint-typecheck"]
+    timeout: "900s"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        [ "$_LANE" = pg ] || exit 0
+        set -euo pipefail
+        echo "🏗️  Production build (blocking)"
+        export NODE_OPTIONS=--max-old-space-size=6144
+        export NEXT_TELEMETRY_DISABLED=1
+        export NEXT_DISABLE_WEBPACK_CACHE=1
+        export NEXTAUTH_URL=https://aestheti.cc
+        export NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_land_gate_placeholder
+        export NEXT_PUBLIC_RECAPTCHA_SITE_KEY=land-gate-placeholder
+        export NEXT_PUBLIC_POSTHOG_KEY=phc_land_gate_placeholder
+        export NEXT_PUBLIC_SENTRY_DSN=
+        export NEXT_PUBLIC_SENTRY_ENVIRONMENT=land-gate
+        npm run build
+        echo "✅ Production build passed"

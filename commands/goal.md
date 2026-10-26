@@ -481,8 +481,10 @@ local. For a full pre-push run, run `python3 ~/.claude/scripts/builder-remote-qa
 worktree root yourself; never a local full pg lane. Its last verdict line is the result:
 `REMOTE GREEN @<sha>` (exit 0) or `REMOTE RED @<sha>` + `FAILED LANE` (exit 1, a real red: fix
 it). Infra (refused, quota full past 10 min, gcloud/uv missing, timeout) prints `FALLBACK
-local: <reason>` and runs the local lane under the pg-lane lock; that `LOCAL GREEN/RED @<sha>`
-is the verdict. Infra is never green and never a code red. `BUILDER_QA_REMOTE=0` = all local.
+local: <reason>` and runs every remote step locally (tsc, lint, node + dom, mobile, the pg lane
+under the pg-lane lock, build); that `LOCAL GREEN/RED @<sha>` is the verdict, and `LOCAL INFRA`
+(could not run) is neither: fix the setup and re-run. Infra is never green and never a code red.
+`BUILDER_QA_REMOTE=0` = all local. Admission keeps 4 Cloud Build slots for prod + landing always.
 
 **Memory sizing (AestheticcNext):** Run one-shot Jest/tsc through the guarded
 package scripts, or `python3 ~/.claude/scripts/gated-test-run.py jest <args>` /

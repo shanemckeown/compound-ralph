@@ -16,21 +16,33 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    landing gates). The project limit is read once per run:
    `gcloud beta quotas preferences describe ongoing-builds-20 --project=aestheticc
    --format=value(quotaConfig.grantedValue)`; a failed, empty or non-integer read means 10.
-   The cap for builder runs is limit - BUILDER_QA_RESERVE (default 4, for prod + landing),
-   so 10 -> 6 and 20 -> 16; BUILDER_QA_MAX_INFLIGHT (or --max-inflight) overrides the cap.
-   A run adds 2 builds: while `gcloud builds list --ongoing` + 2 > cap, poll every --poll
-   seconds up to --admit-wait, then fall back local. A failed list is infra: fall back local,
-   never submit blind. Count-then-submit is racy (two builders can both see room and briefly
-   overshoot by 2); acceptable, because the reserve still leaves prod and landing room.
+   The cap for builder runs is limit - BUILDER_QA_RESERVE, so 10 -> 6 and 20 -> 16. The reserve
+   (for prod + landing) is never below MIN_RESERVE = 4: a lower BUILDER_QA_RESERVE is clamped,
+   and BUILDER_QA_MAX_INFLIGHT / --max-inflight can only LOWER the cap (a higher one is clamped
+   to limit - 4, with a note).
+   A run adds 2 builds. Admission is atomic laptop-wide: under an flock on RESERVATIONS, count
+   `gcloud builds list --ongoing`, add 2 per live pending reservation (another builder that is
+   admitted but whose builds are not visible yet; dead pids and entries older than
+   RESERVATION_TTL are dropped), and only if ongoing + pending + 2 <= cap record our own
+   reservation. Otherwise poll every --poll seconds up to --admit-wait, then fall back local.
+   The reservation is released once the runner has printed both build ids (they now count as
+   ongoing), or on any exit. A failed list is infra: fall back local, never submit blind.
+   Builders on other machines are not covered by the lock; this one laptop runs the fleet.
 3. Remote verdict: runner exit 0 WITH its `RESULT unit=SUCCESS pg=SUCCESS exit 0` line ->
    `REMOTE GREEN @<sha>`, exit 0. Exit 1 WITH a `FAILED LANE` line -> `REMOTE RED @<sha>` and
    that line, exit 1. Anything else (2 refused, 137 infra, 127, a 1 with no FAILED LANE line,
    a 0 with no RESULT line, uv or gcloud missing, any exception) is infra: never green, never
    a code red. It prints `FALLBACK local: <reason>` and runs the local lane on the same
-   scratch (node_modules linked from the worktree): node + dom jest via gated-test-run.py, the
-   full pg lane under pg-lane-lock.py, then `npm run build`, stopping at the first red. Its
-   exit is the verdict: `LOCAL GREEN @<sha>` (0) or `LOCAL RED @<sha>` (that step's exit).
-   SIGTERM/SIGINT pass to the runner (it cancels its builds) and exit 130, with no fallback.
+   scratch (node_modules linked from the worktree). The local lane covers every step of both
+   remote lanes (LOCAL_STEPS names the cloudbuild-gate.yaml step ids each one stands for; a
+   test pins them): tsc-heavy, lint, node + dom jest, mobile jest, the full pg lane under
+   pg-lane-lock.py, then `npm run build`, stopping at the first failure. Its exit is the
+   verdict: `LOCAL GREEN @<sha>` (0), `LOCAL RED @<sha>` (that step's exit), or `LOCAL INFRA
+   @<sha>` (no node_modules, lock unavailable, command missing: still non-zero).
+   SIGTERM/SIGINT pass to the runner's process group (it cancels its builds) and exit 130 with
+   no fallback. If the runner has not exited after KILL_GRACE (longer than its own signal
+   join bound plus its cancels), its group is SIGKILLed and every build id it printed gets a
+   best-effort `gcloud builds cancel`.
 4. BUILDER_QA_REMOTE=0 forces local, =1 remote; unset or unrecognised = REMOTE_DEFAULT
    (tier_gates.gate_remote()'s pattern).
 5. Evidence: sha, mode, build ids, wall and queue-wait seconds on stdout, and one JSON line
@@ -41,6 +53,7 @@ Every gcloud call goes through one runner (CLOUDBUILD_GATE_GCLOUD names another 
 tests inject fakes into main().
 """
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
@@ -61,9 +74,16 @@ TIER_GATES = SCRIPTS.parent / "skills" / "land-batch" / "bin" / "tier_gates.py"
 PROJECT, REGION = "aestheticc", "global"
 QUOTA_PREFERENCE = "ongoing-builds-20"
 FALLBACK_LIMIT = 10  # the project's granted ongoing-builds limit when it cannot be read
-DEFAULT_RESERVE = 4  # builds kept free for prod builds and landing gates
+MIN_RESERVE = 4  # builds always kept free for prod builds and landing gates; never lower
 BUILDS_PER_RUN = 2  # the runner submits two lanes (unit + pg)
 GCLOUD_TIMEOUT = 90
+RESERVATIONS = Path.home() / ".claude" / "state" / "builder-remote-qa.reservations"
+RESERVATION_TTL = 1800  # a submit takes ~2 min; an older entry is a reused pid or a crash
+# The runner's SIGTERM path: SIGNAL_JOIN_BOUND (20 s) for hung submits, then a cancel per lane
+# (each a quick gcloud call, normally seconds). Wait well past both before SIGKILL.
+KILL_GRACE = 180
+# A local step exit that means "could not run", not "the code is red".
+LOCAL_INFRA_CODES = {3, 126, 127}  # pg-lane-lock unavailable, cannot execute, not found
 # BUILDER_QA_REMOTE=1 / =0 picks remote / local; unset uses this.
 REMOTE_DEFAULT = True
 LOG = Path.home() / ".claude" / "state" / "builder-remote-qa.jsonl"
@@ -80,8 +100,8 @@ BUILD_ENV = {"NODE_OPTIONS": "--max-old-space-size=6144", "NEXT_TELEMETRY_DISABL
              "NEXT_PUBLIC_SENTRY_DSN": "", "NEXT_PUBLIC_SENTRY_ENVIRONMENT": "land-gate"}
 
 
-class Interrupted(Exception):
-    """Raised by the SIGTERM/SIGINT handler."""
+class Interrupted(BaseException):
+    """Raised by the SIGTERM/SIGINT handler. BaseException, so no `except Exception` eats it."""
 
 
 # ---------------------------------------------------------------- pure plan functions
@@ -107,22 +127,33 @@ def parse_limit(result):
 
 
 def builder_cap(limit, env=None, override=None):
-    """(cap, note): the ongoing builds a builder run may bring the project to."""
+    """(cap, note): the ongoing builds a builder run may bring the project to.
+
+    The reserve never drops below MIN_RESERVE and an override can only lower the cap.
+    """
     env = os.environ if env is None else env
-    raw = override if override is not None else env.get("BUILDER_QA_MAX_INFLIGHT", "").strip()
-    if str(raw).strip():
-        try:
-            cap = int(raw)
-        except ValueError:
-            cap = None
-        if cap is not None and cap >= 0:
-            return cap, f"cap {cap} (override)"
-    reserve = DEFAULT_RESERVE
+    notes = []
+    reserve = MIN_RESERVE
     raw_reserve = env.get("BUILDER_QA_RESERVE", "").strip()
     if raw_reserve.isdigit():
         reserve = int(raw_reserve)
-    cap = max(0, limit - reserve)
-    return cap, f"cap {cap} = limit {limit} - reserve {reserve}"
+        if reserve < MIN_RESERVE:
+            notes.append(f"BUILDER_QA_RESERVE={reserve} clamped to {MIN_RESERVE}")
+            reserve = MIN_RESERVE
+    ceiling = max(0, limit - reserve)
+    cap, how = ceiling, f"limit {limit} - reserve {reserve}"
+    raw = override if override is not None else env.get("BUILDER_QA_MAX_INFLIGHT", "").strip()
+    if str(raw).strip():
+        try:
+            wanted = int(raw)
+        except ValueError:
+            wanted = None
+        if wanted is not None and 0 <= wanted <= ceiling:
+            cap, how = wanted, f"override (ceiling {ceiling})"
+        elif wanted is not None and wanted > ceiling:
+            notes.append(f"override {wanted} clamped to limit {limit} - reserve {reserve} = {ceiling}")
+    note = f"cap {cap} = {how}" + (f" ({'; '.join(notes)})" if notes else "")
+    return cap, note
 
 
 def count_ongoing(result):
@@ -151,14 +182,29 @@ def build_ids(output):
     return {lane: build for lane, build in LANE_BUILD.findall(output or "")}
 
 
+# Every cloudbuild-gate.yaml step id the local lane stands in for. npm-ci is the linked
+# node_modules (the worktree's install), the one remote step with no local twin.
+LOCAL_EQUIVALENT_OF_NPM_CI = "npm-ci"
+NO_PG = ("RUN_PG_TESTS", "PG_LANE_LOCK_TOKEN")
+# (label, gate step ids covered, command, env overrides, env removals); cheapest first.
+LOCAL_STEPS = (
+    ("tsc-heavy", ("lint-typecheck",), [*GATED, "tsc-heavy", "--noEmit"], {}, NO_PG),
+    ("lint", ("lint-typecheck",), ["npm", "run", "lint"], {}, NO_PG),
+    ("node + dom jest", ("unit-tests",), [*GATED, "jest"], {}, NO_PG),
+    ("mobile jest", ("mobile-tests",), ["bash", "scripts/ci/run-mobile-tests.sh"], {}, NO_PG),
+    ("full pg lane", ("pg-tests",), [*PG_LOCK, *GATED, "jest", "--selectProjects", "pg-tests"],
+     {"RUN_PG_TESTS": "true", "TZ": "UTC"}, ("SKIP_PG_TESTS", "PG_LANE_LOCK_TOKEN")),
+    ("npm run build", ("next-build",), ["npm", "run", "build"], BUILD_ENV, ("PG_LANE_LOCK_TOKEN",)),
+)
+
+
 def local_steps():
     """The local fallback lane, in order: (label, command, env overrides, env removals)."""
-    return [
-        ("node + dom jest", [*GATED, "jest"], {}, ("RUN_PG_TESTS", "PG_LANE_LOCK_TOKEN")),
-        ("full pg lane", [*PG_LOCK, *GATED, "jest", "--selectProjects", "pg-tests"],
-         {"RUN_PG_TESTS": "true", "TZ": "UTC"}, ("SKIP_PG_TESTS", "PG_LANE_LOCK_TOKEN")),
-        ("npm run build", ["npm", "run", "build"], dict(BUILD_ENV), ("PG_LANE_LOCK_TOKEN",)),
-    ]
+    return [(label, list(cmd), dict(over), rem) for label, _, cmd, over, rem in LOCAL_STEPS]
+
+
+def covered_gate_steps():
+    return {LOCAL_EQUIVALENT_OF_NPM_CI} | {sid for _, ids, *_ in LOCAL_STEPS for sid in ids}
 
 
 def step_env(base, overrides, removals):
@@ -185,7 +231,7 @@ def read_limit(gcloud):
     try:
         result = gcloud(["beta", "quotas", "preferences", "describe", QUOTA_PREFERENCE,
                          f"--project={PROJECT}", "--format=value(quotaConfig.grantedValue)", "--quiet"])
-    except Exception as exc:  # noqa: BLE001 (an unreadable limit is the fallback limit)
+    except Exception as exc:  # noqa: BLE001 (unreadable = the fallback limit; Interrupted is not an Exception)
         result = (127, "", str(exc))
     return parse_limit(result)
 
@@ -194,27 +240,96 @@ def ongoing(gcloud):
     try:
         return count_ongoing(gcloud(["builds", "list", "--ongoing", f"--project={PROJECT}",
                                      f"--region={REGION}", "--format=value(id)", "--quiet"]))
-    except Exception:  # noqa: BLE001 (could not count = infra)
+    except Exception:  # noqa: BLE001 (could not count = infra; Interrupted is not an Exception)
         return None
 
 
-def admit(gcloud, cap, wait, poll, sleep, clock, say):
-    """(admitted, waited seconds, reason). Counts again after every poll."""
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+class Reservations:
+    """Laptop-wide pending-submit ledger: a JSON list in `path`, changed only under its flock."""
+
+    def __init__(self, path=None, now=time.time, alive=pid_alive):
+        self.path = Path(path or RESERVATIONS)
+        self.now, self.alive = now, alive
+        self.token = None
+
+    def _locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path.with_name(self.path.name + ".lock"), "a+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return handle
+
+    def _load(self):
+        try:
+            entries = json.loads(self.path.read_text() or "[]")
+        except (OSError, ValueError):
+            entries = []
+        now = self.now()
+        return [e for e in entries if isinstance(e, dict) and self.alive(e.get("pid"))
+                and now - float(e.get("at", 0)) < RESERVATION_TTL]
+
+    def _save(self, entries):
+        tmp = self.path.with_name(self.path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(entries))
+        os.replace(tmp, self.path)
+
+    def try_reserve(self, count_ongoing_fn, cap):
+        """Under the lock: (admitted, ongoing, pending builds). Records us only when admitted."""
+        handle = self._locked()
+        try:
+            entries = self._load()
+            count = count_ongoing_fn()
+            if count is None:
+                self._save(entries)
+                return None, None, None
+            pending = BUILDS_PER_RUN * len(entries)
+            admitted = count + pending + BUILDS_PER_RUN <= cap
+            if admitted:
+                self.token = f"{os.getpid()}-{time.monotonic_ns()}-{id(self)}"
+                entries.append({"pid": os.getpid(), "at": self.now(), "token": self.token})
+            self._save(entries)
+            return admitted, count, pending
+        finally:
+            handle.close()  # drops the flock
+
+    def release(self):
+        if self.token is None:
+            return
+        handle = self._locked()
+        try:
+            self._save([e for e in self._load() if e.get("token") != self.token])
+            self.token = None
+        finally:
+            handle.close()
+
+
+def admit(gcloud, cap, wait, poll, sleep, clock, say, reservations):
+    """(admitted, waited seconds, reason). Counts and reserves atomically after every poll."""
     started = clock()
     announced = False
     while True:
-        count = ongoing(gcloud)
+        admitted, count, pending = reservations.try_reserve(lambda: ongoing(gcloud), cap)
         waited = clock() - started
-        if count is None:
+        if admitted is None:
             return False, waited, "gcloud builds list failed (cannot count ongoing builds; not submitting blind)"
-        if count + BUILDS_PER_RUN <= cap:
-            return True, waited, f"{count} ongoing + {BUILDS_PER_RUN} <= cap {cap}"
+        sums = f"{count} ongoing + {pending} pending + {BUILDS_PER_RUN}"
+        if admitted:
+            return True, waited, f"{sums} <= cap {cap}"
         if waited >= wait:
-            return False, waited, (f"admission: {count} ongoing + {BUILDS_PER_RUN} > cap {cap} "
-                                   f"after {waited:.0f}s wait")
+            return False, waited, f"admission: {sums} > cap {cap} after {waited:.0f}s wait"
         if not announced:
-            say(f"QUEUE: {count} ongoing + {BUILDS_PER_RUN} > cap {cap}; polling every {poll:.0f}s "
-                f"for up to {wait:.0f}s")
+            say(f"QUEUE: {sums} > cap {cap}; polling every {poll:.0f}s for up to {wait:.0f}s")
             announced = True
         sleep(poll)
 
@@ -250,16 +365,21 @@ def link_node_modules(scratch, worktree):
     return tier_gates.link_node_modules(scratch, worktree)
 
 
+
 class Child:
-    """The one running subprocess, so the signal path can pass the signal on."""
-    proc = None
+    """The one running subprocess (its own process group) and the build ids seen so far."""
+
+    def __init__(self):
+        self.proc = None
+        self.grace = KILL_GRACE
+        self.build_ids = {}
 
 
-def stream(command, cwd, env, say, child):
-    """Run command, echoing its output line by line. Returns (code, output)."""
+def stream(command, cwd, env, say, child, grace=KILL_GRACE):
+    """Run command in its own process group, echoing output line by line. Returns (code, output)."""
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
-    child.proc = proc  # stays set on an exception, so main()'s signal path can stop it
+                            stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+    child.proc, child.grace = proc, grace  # stays set on an exception, so main() can stop it
     lines = []
     for line in proc.stdout:
         lines.append(line)
@@ -269,21 +389,47 @@ def stream(command, cwd, env, say, child):
     return code, "".join(lines)
 
 
-def stop_child(child):
-    """SIGTERM the running child (the runner then cancels its own builds); kill it after 60 s."""
+def _signal_group(proc, sig):
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
+
+
+def stop_child(child, gcloud, say):
+    """SIGTERM the child's group (the runner cancels its own builds); after child.grace, SIGKILL
+    the group and best-effort `gcloud builds cancel` every build id it printed."""
     proc = child.proc
     if proc is None or proc.poll() is not None:
         return
-    proc.send_signal(signal.SIGTERM)
+    _signal_group(proc, signal.SIGTERM)
     try:
-        proc.wait(timeout=60)
+        proc.wait(timeout=child.grace)
+        return
     except subprocess.TimeoutExpired:
-        proc.kill()
+        pass
+    _signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    say(f"runner still running after {child.grace:.0f}s; group killed, cancelling "
+        f"{len(child.build_ids)} build(s) directly")
+    for build_id in child.build_ids.values():
+        try:
+            code, _, err = gcloud(["builds", "cancel", build_id, f"--project={PROJECT}",
+                                   f"--region={REGION}", "--quiet"])
+            say(f"cancel {build_id}: exit {code} {(err or '').strip()[-200:]}")
+        except Exception as exc:  # noqa: BLE001 (best effort)
+            say(f"cancel {build_id} failed: {exc}")
 
 
 def run_remote(scratch, say, child):
     command = ["uv", "run", "--script", str(RUNNER), "--scratch", str(scratch)]
-    return stream(command, str(scratch), dict(os.environ), say, child)
+    return stream(command, str(scratch), dict(os.environ), say, child, grace=KILL_GRACE)
 
 
 def run_local(scratch, worktree, say, child):
@@ -293,7 +439,8 @@ def run_local(scratch, worktree, say, child):
         return EXIT_LOCAL_UNAVAILABLE, "node_modules"
     for label, command, overrides, removals in local_steps():
         say(f"==> local {label}: {' '.join(command)}")
-        code, _ = stream(command, str(scratch), step_env(os.environ, overrides, removals), say, child)
+        code, _ = stream(command, str(scratch), step_env(os.environ, overrides, removals), say, child,
+                         grace=30)
         say(f"<== local {label}: exit {code}")
         if code != 0:
             return code, label
@@ -317,7 +464,7 @@ def _interrupt(signum, _frame):
 # ---------------------------------------------------------------- main
 
 def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scratch_maker=make_scratch,
-         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None):
+         sleep=time.sleep, clock=time.monotonic, out=None, env=None, cwd=None, reservations=None):
     out = out or sys.stdout
     env = os.environ if env is None else env
 
@@ -326,8 +473,8 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sha", default="HEAD")
-    ap.add_argument("--max-inflight", default=None, help="override the cap (else BUILDER_QA_MAX_INFLIGHT, "
-                                                          "else project limit - BUILDER_QA_RESERVE)")
+    ap.add_argument("--max-inflight", default=None, help="lower the cap (else BUILDER_QA_MAX_INFLIGHT; "
+                                                          "never above project limit - 4)")
     ap.add_argument("--admit-wait", type=float, default=600)
     ap.add_argument("--poll", type=float, default=30)
     ap.add_argument("--keep-scratch", action="store_true")
@@ -335,48 +482,60 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
 
     worktree = Path(cwd or os.getcwd())
     started = clock()
-    record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "worktree": str(worktree), "mode": None,
-              "verdict": None, "exit": None, "build_ids": {}, "queue_wait_s": 0, "reason": None}
     child = Child()
+    record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "worktree": str(worktree), "mode": None,
+              "verdict": None, "exit": None, "build_ids": child.build_ids, "queue_wait_s": 0,
+              "reason": None}
+    reservations = reservations or Reservations(env.get("BUILDER_QA_RESERVATIONS"))
     holder = {}
     sigs = (signal.SIGTERM, signal.SIGINT)
     previous = {sig: signal.signal(sig, _interrupt) for sig in sigs}
     try:
-        code = _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say,
-                    record, child, holder)
-    except Interrupted as exc:
+        try:
+            code = _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say,
+                        record, child, holder, reservations)
+        except Interrupted as exc:
+            for sig in sigs:
+                signal.signal(sig, signal.SIG_IGN)
+            stop_child(child, gcloud, say)
+            say(f"INTERRUPTED by {exc}: no verdict @{record.get('sha', '?')}")
+            record.update(verdict="interrupted", reason=str(exc))
+            code = EXIT_INTERRUPTED
+        except Exception as exc:  # noqa: BLE001 (a crash here is never a green)
+            for sig in sigs:
+                signal.signal(sig, signal.SIG_IGN)
+            stop_child(child, gcloud, say)
+            say(f"ERROR: {type(exc).__name__}: {exc}: no verdict @{record.get('sha', '?')}")
+            record.update(verdict="error", reason=f"{type(exc).__name__}: {exc}")
+            code = EXIT_LOCAL_UNAVAILABLE
+        # Finalise with signals ignored, so evidence and cleanup always complete.
         for sig in sigs:
             signal.signal(sig, signal.SIG_IGN)
-        stop_child(child)
-        say(f"INTERRUPTED by {exc}: no verdict @{record.get('sha', '?')}")
-        record.update(verdict="interrupted", reason=str(exc))
-        code = EXIT_INTERRUPTED
-    except Exception as exc:  # noqa: BLE001 (a crash here is never a green)
-        stop_child(child)
-        say(f"ERROR: {type(exc).__name__}: {exc}: no verdict @{record.get('sha', '?')}")
-        record.update(verdict="error", reason=f"{type(exc).__name__}: {exc}")
-        code = EXIT_LOCAL_UNAVAILABLE
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
+        try:
+            reservations.release()
+        except Exception as exc:  # noqa: BLE001 (a stale entry ages out; never changes the verdict)
+            say(f"reservation release failed: {exc}")
         scratch = holder.get("scratch")
         if scratch is not None and not args.keep_scratch:
             shutil.rmtree(scratch, ignore_errors=True)
         elif scratch is not None:
             say(f"scratch kept: {scratch}")
-    if code == 0 and record.get("verdict") not in ("remote-green", "local-green"):
-        code = EXIT_LOCAL_UNAVAILABLE  # belt and braces: 0 only with an observed green
-    record["exit"] = code
-    record["wall_s"] = round(clock() - started, 1)
-    say(f"EVIDENCE sha={record.get('sha')} mode={record['mode']} verdict={record['verdict']} "
-        f"builds={','.join(f'{k}:{v}' for k, v in record['build_ids'].items()) or '-'} "
-        f"wall={record['wall_s']}s queue_wait={record['queue_wait_s']}s")
-    append_log(record, env.get("BUILDER_QA_LOG"))
-    return code
+        if code == 0 and record.get("verdict") not in ("remote-green", "local-green"):
+            code = EXIT_LOCAL_UNAVAILABLE  # belt and braces: 0 only with an observed green
+        record["exit"] = code
+        record["wall_s"] = round(clock() - started, 1)
+        say(f"EVIDENCE sha={record.get('sha')} mode={record['mode']} verdict={record['verdict']} "
+            f"builds={','.join(f'{k}:{v}' for k, v in record['build_ids'].items()) or '-'} "
+            f"wall={record['wall_s']}s queue_wait={record['queue_wait_s']}s")
+        append_log(record, env.get("BUILDER_QA_LOG"))
+        return code
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock, say, record, child,
-         holder):
+         holder, reservations):
     sha = git("rev-parse", "--verify", f"{args.sha}^{{commit}}", cwd=worktree).strip()
     record["sha"] = sha
     say(f"builder-remote-qa: sha {sha}")
@@ -390,6 +549,7 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     scratch = holder["scratch"] = scratch_maker(sha, worktree)
 
     def fall_back(reason):
+        reservations.release()
         say(f"FALLBACK local: {reason}")
         record["reason"] = reason
         return _local(scratch, worktree, sha, local, say, record, child, mode="fallback")
@@ -403,25 +563,33 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     cap, cap_note = builder_cap(limit, env, args.max_inflight)
     record.update(limit=limit, cap=cap)
     say(f"admission: {limit_note}; {cap_note}")
-    admitted, waited, why = admit(gcloud, cap, args.admit_wait, args.poll, sleep, clock, say)
+    admitted, waited, why = admit(gcloud, cap, args.admit_wait, args.poll, sleep, clock, say, reservations)
     record["queue_wait_s"] = round(waited, 1)
     if not admitted:
         return fall_back(why)
     say(f"admitted: {why} (queue wait {waited:.0f}s)")
+
+    def remote_say(line):
+        say(line)
+        match = LANE_BUILD.match(line)
+        if match:
+            child.build_ids[match.group(1)] = match.group(2)
+            if len(child.build_ids) >= BUILDS_PER_RUN:
+                reservations.release()  # both builds are submitted, so they count as ongoing now
+
+    record["mode"] = "remote"
     try:
-        code, output = remote(scratch, say, child)
-    except Interrupted:
-        raise
-    except Exception as exc:  # noqa: BLE001 (uv missing, exec errors: infra)
+        code, output = remote(scratch, remote_say, child)
+    except Exception as exc:  # noqa: BLE001 (uv missing, exec errors: infra; Interrupted propagates)
         return fall_back(f"runner could not run: {type(exc).__name__}: {exc}")
-    record["build_ids"] = build_ids(output)
+    record["build_ids"].update(build_ids(output))
     verdict, reason = remote_verdict(code, output)
     if verdict == "green":
-        record.update(mode="remote", verdict="remote-green", reason=reason)
+        record.update(verdict="remote-green", reason=reason)
         say(f"REMOTE GREEN @{sha}")
         return EXIT_GREEN
     if verdict == "red":
-        record.update(mode="remote", verdict="remote-red", reason=reason)
+        record.update(verdict="remote-red", reason=reason)
         say(f"REMOTE RED @{sha}")
         say(reason)
         return EXIT_RED
@@ -436,9 +604,13 @@ def _local(scratch, worktree, sha, local, say, record, child, mode):
         say(f"LOCAL GREEN @{sha}")
         return EXIT_GREEN
     code = code or EXIT_RED  # a failed step that somehow exited 0 is still not green
-    record["verdict"] = "local-red"
     record["failed_step"] = failed
-    say(f"LOCAL RED @{sha}: {failed} exit {code}")
+    if code in LOCAL_INFRA_CODES or failed == "node_modules":
+        record["verdict"] = "local-infra"
+        say(f"LOCAL INFRA @{sha}: {failed} exit {code} (could not run; not a test result)")
+    else:
+        record["verdict"] = "local-red"
+        say(f"LOCAL RED @{sha}: {failed} exit {code}")
     return code
 
 
