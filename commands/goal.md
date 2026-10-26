@@ -569,9 +569,9 @@ set +e
 **Step 1: the one seat, Astra (always, except the claude route; Shane 26 Oct: one seat only, no
 second Claude read, LUCY-nd3qz).** Check the route first (see "Claude route" right after this
 block); on `claude`, don't run this block. The effort is computed, never chosen by you:
-`~/.claude/scripts/review-effort.py` prints `high` for an ordinary bead and `xhigh` when any changed
-path is sensitive (risk_tier SENSITIVE / PATIENT_DOMAINS, auth, migrations, consent/PII, GDPR) or the
-bead carries a money / tenancy / patient-data label; any error is `xhigh`. Run it in the foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
+`~/.claude/scripts/review-effort.py` prints `high` only when `risk_tier.classify()` puts the diff in
+its `light` tier (UI, styling or copy only, no sensitive surface) and the bead carries no money /
+tenancy / patient-data label; anything else, and any error, is `xhigh`. Run it in the foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
 ```bash
 python3 ~/.claude/scripts/review-effort.py "$BEAD_ID" "$(git rev-parse HEAD)" \

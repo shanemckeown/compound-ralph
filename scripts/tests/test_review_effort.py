@@ -70,6 +70,26 @@ class ReviewEffort(unittest.TestCase):
         self.assertEqual(len(line.splitlines()), 1, line)
         return line.split()[0], line
 
+    def test_css_and_copy_only_diff_is_high(self):
+        tip = self.tip_with("styles/theme.css", "content/help/booking.mdx")
+        word, line = self.effort("AestheticcNext-ui1", tip)
+        self.assertEqual(word, "high", line)
+
+    def test_ui_component_that_writes_data_is_xhigh(self):
+        tip = self.tip_with("components/ui/Button.tsx")
+        (self.repo / "components/ui/Button.tsx").write_text("const r = fetch('/api/clients')\n")
+        git(self.repo, "commit", "-qam", "writes")
+        tip = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                             text=True, check=True).stdout.strip()
+        word, line = self.effort("AestheticcNext-ui1", tip)
+        self.assertEqual(word, "xhigh", line)
+
+    def test_light_diff_with_a_money_label_is_xhigh(self):
+        tip = self.tip_with("styles/theme.css")
+        word, line = self.effort("AestheticcNext-pay1", tip)
+        self.assertEqual(word, "xhigh", line)
+        self.assertIn("area:payments", line)
+
     def test_ordinary_ui_only_diff_is_high(self):
         tip = self.tip_with("components/ui/Button.tsx", "app/globals.css")
         word, line = self.effort("AestheticcNext-ui1", tip)
@@ -77,7 +97,13 @@ class ReviewEffort(unittest.TestCase):
 
     def test_sensitive_path_is_xhigh(self):
         for p in ("lib/stripe/refund.ts", "drizzle/migrations/0412_x.sql", "lib/auth/session.ts",
-                  "components/clients/Notes.tsx", "lib/gdpr/erase-client.ts"):
+                  "components/clients/Notes.tsx", "lib/gdpr/erase-client.ts",
+                  # Independent review r2 (LUCY-nd3qz): each came out high under the old denylist.
+                  "lib/clients/hard-delete-client.ts", "lib/clients/medical-history-guard.ts",
+                  "pages/api/clients/[id]/medical-history.ts", "pages/api/appointments/[id].ts",
+                  "lib/pos/till.ts", "lib/terminal/reader.ts", "lib/prescriptions/issue.ts",
+                  "lib/appointments/cancel.ts", "pages/api/kiosk/submit.ts", "lib/loyalty/points.ts",
+                  "lib/packages/redeem.ts"):
             with self.subTest(p):
                 tip = self.tip_with(p)
                 word, line = self.effort("AestheticcNext-ui1", tip)
@@ -127,7 +153,8 @@ class ReviewEffort(unittest.TestCase):
     def test_lists_are_imported_from_risk_tier_not_copied(self):
         src = SCRIPT.read_text()
         self.assertIn('import_module("risk_tier")', src)
-        self.assertNotRegex(src, r"(?m)^(SENSITIVE|PATIENT_DOMAINS) = ")
+        self.assertIn(".classify(", src)
+        self.assertNotRegex(src, r"(?m)^(SENSITIVE|PATIENT_DOMAINS|LIGHT_PREFIXES) = ")
 
 
 if __name__ == "__main__":

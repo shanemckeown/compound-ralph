@@ -82,7 +82,8 @@ not two (LUCY-b3hf5, LUCY-nd3qz). `~/.claude/bin/codex` refuses the call anyway 
 including from a detached scratch at the branch tip. Otherwise the seat is Astra, run in the
 foreground, read-only, with stdin closed. The effort is computed, never chosen:
 `python3 ~/.claude/scripts/review-effort.py <bead> <tip>` (run in the scratch at the tip) prints `high`
-for an ordinary bead and `xhigh` on a sensitive path or a money / tenancy / patient-data label; any
+only when risk_tier.py's classifier puts the diff in its `light` tier (UI, styling or copy only) and no money /
+tenancy / patient-data label applies; otherwise `xhigh`. Any
 error, or any first word but `high`, is `xhigh`. Put its output line in the review file's VERIFIED OK:
 
 ```bash
