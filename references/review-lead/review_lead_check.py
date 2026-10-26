@@ -5,7 +5,8 @@ The lead (LEAD.md) is a model; this is the part that must hold without Shane. It
 lead's JSON against the reviewer verdicts, then writes the ONLY file the builder reads.
 
   review_lead_check.py --lead lead-round-N.json --verdict astra-verdict-round-N.log \
-      [--verdict opus-h2h-round-N.md] --out-dir "$EVIDENCE_DIR" --round N [--scope-lock]
+      --verdict mutants-round-N.txt --out-dir "$EVIDENCE_DIR" --round N [--scope-lock]
+  (one seat per round, LUCY-nd3qz: astra-verdict-round-N.log, or claude-seat1-round-N.md on the claude route)
 
 Refuses (exit 1, reasons on stderr) when:
   - a reviewer finding line is missing from the lead, duplicated, or invented;
@@ -410,7 +411,7 @@ def is_confirmation(line):
 
 
 ROUND_IN_NAME = re.compile(r"_r(\d+)(?=[_.])")
-# The /goal workflow's own names: astra-verdict-round-2.log, opus-h2h-round-3.md, mutants-round-2.txt.
+# The /goal workflow's own names: astra-verdict-round-2.log, claude-seat1-round-3.md, mutants-round-2.txt.
 ROUND_NATIVE = re.compile(r"(?:^|[_.-])round-(\d+)(?=[_.-]|$)")
 
 
