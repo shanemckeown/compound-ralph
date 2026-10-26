@@ -558,3 +558,96 @@ class ReviewGateAstraR25(_GateCase):
             f"  {ln}\n" for ln in (f"FAIL @{TIP}", str(self.verdict), line)) + "\n" + CLEARED)
         code, out = self.run_gate()
         self.assertEqual(code, 1, out)
+
+
+class OwnGateEarlierInputs(_GateCase):
+    """LUCY-shb7s: own-gate seat files in the /goal evidence dir count as earlier-finding inputs only. An
+    independent Ops/reviews seat at the tip that closes their refs gates; they never approve on their own."""
+
+    SHA2 = "2222222222222222222222222222222222222222"
+    SHA3 = "3333333333333333333333333333333333333333"
+    F2 = "P2 lib/pay.ts:37 — reception's card retry charges the client twice — guard the retry"
+    F3 = "P2 lib/x.ts:12 — the receipt shows the wrong total — recompute it"
+
+    def own_gate(self, name, sha, finding, mtime):
+        ev = self.tmp / "evidence"
+        ev.mkdir(exist_ok=True)
+        p = ev / name
+        p.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {sha}\nFAIL\n{finding}\nVERIFIED OK\n- tests\n")
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def setup_history(self, r7_status=("closed", "closed")):
+        r2 = self.own_gate("REVIEW_q41ar_astra_r2_x.md", self.SHA2, self.F2, R10_MTIME - 7200)
+        r3 = self.own_gate("REVIEW_q41ar_astra_r3_x.md", self.SHA3, self.F3, R10_MTIME - 3600)
+        self.verdict.unlink()
+        self.verdict = self.reviews / "REVIEW_q41ar_astra-high_r7_2026-10-26.md"
+        prior = [{"ref": ref, "status": st, "evidence": "pg test drives the path at this tip, green"}
+                 for ref, st in zip(("r2 P2 lib/pay.ts:37", "r3 P2 lib/x.ts:12"), r7_status)]
+        self.verdict.write_text(
+            f"REVIEWING: goal/aestheticcnext-q41ar @ {TIP}\nPASS\nVERIFIED OK\n- both earlier findings re-checked\n"
+            "UNVERIFIED\n- live\n```review-verdict\n"
+            + json.dumps({"verdict": "PASS", "findings": [], "prior": prior}) + "\n```\n")
+        os.utime(self.verdict, (R10_MTIME, R10_MTIME))
+        (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
+        self.lead.write_text(json.dumps({
+            "bead": BEAD, "round": 7, "scope_lock": False,
+            "premise": {"premise": None, "rounds_failed_on_it": 0, "action": None},
+            "findings": [{"id": f"F{i}", "source_line": src, "verdict": "fixed", "fixed_by": str(self.verdict),
+                          "category": "other"} for i, src in ((1, self.F2), (2, self.F3))]}))
+        self.comments.write_text("")
+        return r2, r3
+
+    def test_mixed_history_closed_by_independent_seat_passes(self):
+        r2, r3 = self.setup_history()
+        code, out = self.run_gate(verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=2", out)
+        self.assertEqual(self.bd_log.read_text().splitlines()[2], f"PASS @{TIP}")
+
+    def test_own_gate_only_history_refused(self):
+        r2, r3 = self.setup_history()
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("no --verdict is an", out)
+        self.assertIn("REVIEW_*.md file", out)
+
+    def test_independent_seat_leaving_an_own_gate_ref_open_blocks(self):
+        r2, r3 = self.setup_history(r7_status=("closed", "open"))
+        lead = json.loads(self.lead.read_text())
+        lead["findings"][1] = {"id": "F2", "source_line": self.F3, "verdict": "act_on", "category": "other",
+                               "clinic_scenario": "reception prints the receipt at checkout and the total is wrong",
+                               "ordinary_use": "one receptionist, one checkout",
+                               "demonstrated": "the r7 seat keeps r3 P2 lib/x.ts:12 open at this tip"}
+        self.lead.write_text(json.dumps(lead))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("checker is not clean (BLOCKING=1", out)
+        self.assertNotIn("DRY RUN, clean", out)
+        self.assertEqual(self.gate_files(), [])
+
+    def test_own_gate_seat_alone_never_passes(self):
+        # One own-gate PASS of the tip itself, no findings: still not an independent review.
+        own = self.tmp / "evidence" / "claude-seat1-round-7.md"
+        own.parent.mkdir(exist_ok=True)
+        own.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {TIP}\nPASS\nVERIFIED OK\n- tests\nUNVERIFIED\n- live\n"
+                       "```review-verdict\n" + json.dumps({"verdict": "PASS", "findings": [], "prior": []}) + "\n```\n")
+        os.utime(own, (R10_MTIME, R10_MTIME))
+        (self.out / "review-file.md5").write_text(hashlib.md5(own.read_bytes()).hexdigest() + "\n")
+        lead = json.loads(self.lead.read_text())
+        lead["findings"] = []
+        self.lead.write_text(json.dumps(lead))
+        code, out = self.run_gate(verdicts=[own], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("own-gate review cannot record a PASS", out)
+        self.assertEqual(self.gate_files(), [])
+        self.assertFalse(self.bd_log.exists())
+
+    def test_own_gate_seat_at_the_tip_cannot_be_graded_fixed(self):
+        # An own-gate file echoing the tip is not an earlier input: a finding it raised can't be fixed at the tip.
+        r2, r3 = self.setup_history()
+        r3.write_text(r3.read_text().replace(self.SHA3, TIP))
+        os.utime(r3, (R10_MTIME - 3600, R10_MTIME - 3600))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("raised by a review of tip", out)

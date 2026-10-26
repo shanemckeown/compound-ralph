@@ -368,6 +368,20 @@ def main(argv=None):
             return refuse(f"{v.name} echoes more than one commit ({sorted(set(echoed))[:2]}): one review, one commit")
         if not tip.startswith(echoed[0]):
             earlier.append(v)
+    # LUCY-shb7s: an own-gate seat (a --verdict outside Ops/reviews, e.g. the /goal evidence dir) rides along
+    # ONLY as an earlier-finding input, so a review of the tip can grade its findings fixed. It never joins
+    # `independent` or `at_tip`, so it can never approve the tip or be fixed_by (LUCY-zyybo). It counts only with
+    # exactly one REVIEWING echo naming another commit, naming this bead; anything else stays out, so a finding
+    # it raised can't be graded fixed. Builder evidence (echo-free) never counts.
+    for v in verdicts:
+        if v in independent or chk.is_builder_evidence(v.name):
+            continue
+        body = v.read_text(errors="ignore")
+        echo_lines = re.findall(r"(?m)^\s*REVIEWING:.*$", body)
+        echoed = [m.group(1).lower() for m in REVIEWING.finditer(body)]
+        if (len(echo_lines) == 1 and len(echoed) == 1 and not tip.startswith(echoed[0])
+                and lbs.mentions_bead(body, a.bead)):
+            earlier.append(v)
     # A review of an earlier round's commit may ride along only to have its findings graded (a
     # carried escalation, or "fixed" by a review of the tip); approval needs a review of the tip
     # itself, and an earlier review must predate every review of the tip.
