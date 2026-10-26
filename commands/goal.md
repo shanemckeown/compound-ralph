@@ -568,12 +568,16 @@ set +e
 
 **Step 1: the one seat, Astra (always, except the claude route; Shane 26 Oct: one seat only, no
 second Claude read, LUCY-nd3qz).** Check the route first (see "Claude route" right after this
-block); on `claude`, don't run this block. Effort is `high`, and `xhigh` when the plan's Hazards
-section hit any money (H-M*), patient-data (H-P*) or tenancy (H-T*) hazard, or `touchesSensitive`
-fired. Run it in the foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
+block); on `claude`, don't run this block. The effort is computed, never chosen by you:
+`~/.claude/scripts/review-effort.py` prints `high` for an ordinary bead and `xhigh` when any changed
+path is sensitive (risk_tier SENSITIVE / PATIENT_DOMAINS, auth, migrations, consent/PII, GDPR) or the
+bead carries a money / tenancy / patient-data label; any error is `xhigh`. Run it in the foreground and read-only, with the brief on stdin. Never background it (`feedback_codex_exec_background_stdin_hang`).
 
 ```bash
-EFFORT=high   # xhigh on a money / patient-data / tenancy bead (above)
+python3 ~/.claude/scripts/review-effort.py "$BEAD_ID" "$(git rev-parse HEAD)" \
+  > "$EVIDENCE_DIR/review-effort-round-N.txt" 2>&1
+EFFORT=$(head -1 "$EVIDENCE_DIR/review-effort-round-N.txt" | cut -d' ' -f1)
+[ "$EFFORT" = high ] || EFFORT=xhigh   # no output or anything else: fail closed
 set +e
 cat "$EVIDENCE_DIR/review-brief-round-N.txt" \
   | ~/.claude/scripts/fleet-guarded.sh codex "$BEAD_ID phase4 review round-N" codex exec \
@@ -610,7 +614,7 @@ in Phase 7. This is not "Astra unavailable": the hold rule below does not apply.
 
 **If Codex itself fails** (non-zero exit that a resume doesn't fix: auth, quota or network),
 don't swap seats silently:
-- **Money / patient-data / tenancy bead (the `xhigh` beads): hold.** Its seat is Astra, and an
+- **Money / patient-data / tenancy bead (`review-effort.py` said `xhigh`): hold.** Its seat is Astra, and an
   Opus review doesn't stand in for it (CLAUDE.md: "provider down → hold"). Commit the work,
   don't push, write
   `held: Astra unavailable — <reason>` to `$EVIDENCE_DIR/fallback-round-N.txt`, and report
@@ -735,8 +739,8 @@ exist, and the output must record the command that actually ran. **All** of thes
 contains `0`, **or**, for a non-sensitive bead only, `fallback-round-N.txt` says
 `fallback used` alongside a completed Opus verdict, **or** on the claude route (any bead,
 sensitive included) `fallback-round-N.txt` says `fallback used: claude-only` and
-`claude-seat1-round-N.md` is complete; (3) on a money / patient-data / tenancy bead the Astra
-verdict ran at `xhigh` and is complete (no Astra-unavailable fallback exists for these; on the
+`claude-seat1-round-N.md` is complete; (3) `review-effort-round-N.txt` exists and the Astra
+verdict ran at the effort it names (`xhigh` unless its first word is `high`) and is complete (no Astra-unavailable fallback exists for these; on the
 claude route, `claude-seat1-round-N.md` is the one complete seat); (4) `mutants-round-N.txt`
 exists; (5) `lead-round-N.json` exists and `review_lead_check.py` exited 0 on it.
 A model-returned PASS without those

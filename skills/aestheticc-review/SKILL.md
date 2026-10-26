@@ -80,11 +80,15 @@ Run after every push. You need the bead ID, the branch and the tip SHA. The diff
 alone may go to Astra), skip codex: the seat is ONE fresh-context Opus Agent on the same brief,
 not two (LUCY-b3hf5, LUCY-nd3qz). `~/.claude/bin/codex` refuses the call anyway (exit 3),
 including from a detached scratch at the branch tip. Otherwise the seat is Astra, run in the
-foreground, read-only, with stdin closed. Effort is `high`; use `xhigh` only when the bead touches
-money, tenancy or patient data (a H-M*, H-T* or H-P* hazard applies):
+foreground, read-only, with stdin closed. The effort is computed, never chosen:
+`python3 ~/.claude/scripts/review-effort.py <bead> <tip>` (run in the scratch at the tip) prints `high`
+for an ordinary bead and `xhigh` on a sensitive path or a money / tenancy / patient-data label; any
+error, or any first word but `high`, is `xhigh`. Put its output line in the review file's VERIFIED OK:
 
 ```bash
-cd <scratch worktree at tip> && codex exec -c model_reasoning_effort=<high|xhigh> -s read-only \
+cd <scratch worktree at tip> && EFFORT=$(python3 ~/.claude/scripts/review-effort.py <bead> <tip> | tee "$SCRATCH/effort-<bead>.txt" | cut -d' ' -f1)
+[ "$EFFORT" = high ] || EFFORT=xhigh
+codex exec -c model_reasoning_effort="$EFFORT" -s read-only \
   "$(cat /path/to/review-brief.md)" </dev/null > "$SCRATCH/astra-<bead>.txt" 2>&1
 ```
 
@@ -112,12 +116,12 @@ Take the session ID from the output. Never start a fresh session. Never backgrou
 
 **Tests reviewers run: targeted only (LUCY-z3ykz.3).** To check a claim, run `python3 ~/.claude/scripts/targeted-tests.py` (related suites, by exact path) or a single named test file. Never run the full pg lane (the whole `pg-tests` project) or the Cloud Build simulation (`scripts/ci/simulate-cloudbuild-test.sh`): the heavy set runs once per landing batch, chosen by risk tier, on the combined tree. A scratch pg test of one SQL path (Step 2) is a single file, not the lane.
 
-**Step 2: depth on money, patient data or tenancy (the same seat; no second reviewer).** On those beads the seat traces code paths from each entry point to the write, and runs a scratch pg test against the real schema where SQL decides the outcome.
+**Step 2: depth on money, patient data or tenancy (no second reviewer).** On those beads the seat traces code paths from each entry point to the write. Astra is read-only, so the Manager running the review (or the builder, in /goal) runs the scratch pg test against the real schema where SQL decides the outcome, in a detached scratch worktree, and hands the command, output and exit code to the seat as evidence. The seat checks that evidence; it never claims to have run it.
 
-**Step 3: non-vacuous check (the seat).** For each new guard, revert it in a scratch worktree and confirm a test goes red. Also confirm that a control case goes green both ways.
+**Step 3: non-vacuous check (Manager or builder runs it; the seat checks it).** For each new guard, revert it in a scratch worktree and confirm a test goes red. Also confirm that a control case goes green both ways.
 - A test whose mock always throws proves nothing (0mwa0 round 3).
 - A test that feeds a helper its inputs, and never drives the loop that produces them, proves nothing (c96ck round 4).
-- Record which mutants survived.
+- Record which mutants survived, and pass the record to the seat as evidence.
 
 **Step 4: landing check.** Run `git merge-tree $(git merge-base origin/main <tip>) origin/main <tip>` and also check the other pushed-not-landed branches. List the conflicts. VERSION, CHANGELOG, file-length-baseline and migration-number collisions are expected but must be named.
 
