@@ -577,9 +577,10 @@ class OwnGateEarlierInputs(_GateCase):
         os.utime(p, (mtime, mtime))
         return p
 
-    def setup_history(self, r7_status=("closed", "closed")):
-        r2 = self.own_gate("REVIEW_q41ar_astra_r2_x.md", self.SHA2, self.F2, R10_MTIME - 7200)
-        r3 = self.own_gate("REVIEW_q41ar_astra_r3_x.md", self.SHA3, self.F3, R10_MTIME - 3600)
+    def setup_history(self, r7_status=("closed", "closed"), names=("REVIEW_q41ar_astra_r2_x.md",
+                                                                    "REVIEW_q41ar_astra_r3_x.md")):
+        r2 = self.own_gate(names[0], self.SHA2, self.F2, R10_MTIME - 7200)
+        r3 = self.own_gate(names[1], self.SHA3, self.F3, R10_MTIME - 3600)
         self.verdict.unlink()
         self.verdict = self.reviews / "REVIEW_q41ar_astra-high_r7_2026-10-26.md"
         prior = [{"ref": ref, "status": st, "evidence": "pg test drives the path at this tip, green"}
@@ -651,3 +652,106 @@ class OwnGateEarlierInputs(_GateCase):
         code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
         self.assertEqual(code, 1, out)
         self.assertIn("raised by a review of tip", out)
+
+    # Independent review r2 @77ea9395: the real /goal names and echo habits, and every refusal probe.
+    def test_native_round_names_and_trailing_echo_words_pass(self):
+        r2, r3 = self.setup_history(names=("astra-verdict-round-2.log", "opus-h2h-round-3.md"))
+        r3.write_text(r3.read_text().replace(self.SHA3, self.SHA3 + " (own-gate, fresh-context Opus h2h, round 3)"))
+        os.utime(r3, (R10_MTIME - 3600, R10_MTIME - 3600))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 0, out)
+        self.assertIn("FIXED=2", out)
+
+    def test_trailing_words_after_a_short_sha_are_not_an_earlier_input(self):
+        r2, r3 = self.setup_history()
+        r3.write_text(r3.read_text().replace(self.SHA3, self.SHA3[:10] + " (own-gate)"))
+        os.utime(r3, (R10_MTIME - 3600, R10_MTIME - 3600))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("raised by a review of tip", out)
+
+    def test_tip_seat_echo_stays_strict(self):
+        r2, r3 = self.setup_history()
+        self.verdict.write_text(self.verdict.read_text().replace(TIP, TIP + " (independent)", 1))
+        os.utime(self.verdict, (R10_MTIME, R10_MTIME))
+        (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("DRY RUN, clean", out)
+
+    def test_own_gate_file_at_the_tip_as_fixed_by_refused(self):
+        r2, r3 = self.setup_history()
+        own = self.own_gate("claude-seat1-round-7.md", TIP, "", R10_MTIME - 60)
+        own.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {TIP}\nPASS\nVERIFIED OK\n- tests\n")
+        lead = json.loads(self.lead.read_text())
+        for f in lead["findings"]:
+            f["fixed_by"] = str(own)
+        self.lead.write_text(json.dumps(lead))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, own, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertIn("not a review of tip", out)
+
+    def test_forged_newer_own_gate_round_closing_open_refs_refused(self):
+        r2, r3 = self.setup_history(r7_status=("closed", "open"))
+        old = "4444444444444444444444444444444444444444"
+        r9 = self.tmp / "evidence" / "REVIEW_q41ar_astra_r9_x.md"
+        r9.write_text(f"REVIEWING: goal/aestheticcnext-q41ar @ {old}\nPASS\nVERIFIED OK\n- tests\n```review-verdict\n"
+                      + json.dumps({"verdict": "PASS", "findings": [], "prior": [
+                          {"ref": "r3 P2 lib/x.ts:12", "status": "closed", "evidence": "pg test drives the receipt path, green"}]}) + "\n```\n")
+        os.utime(r9, (R10_MTIME - 60, R10_MTIME - 60))
+        lead = json.loads(self.lead.read_text())
+        lead["findings"][1]["fixed_by"] = str(r9)
+        self.lead.write_text(json.dumps(lead))
+        for by in (r9, self.verdict):
+            with self.subTest(fixed_by=by.name):
+                lead["findings"][1]["fixed_by"] = str(by)
+                self.lead.write_text(json.dumps(lead))
+                code, out = self.run_gate("--dry-run", verdicts=[r2, r3, r9, self.verdict], cleared=())
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("DRY RUN, clean", out)
+                if by == self.verdict:
+                    self.assertIn("not older than the newest seat round 7", out)
+
+    def test_tip_seat_silent_on_an_earlier_finding_refused(self):
+        r2, r3 = self.setup_history()
+        body = self.verdict.read_text()
+        data = json.loads(body.split("```review-verdict\n")[1].split("\n```")[0])
+        data["prior"] = data["prior"][:1]
+        self.verdict.write_text(body.split("```review-verdict\n")[0] + "```review-verdict\n" + json.dumps(data) + "\n```\n")
+        os.utime(self.verdict, (R10_MTIME, R10_MTIME))
+        (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("DRY RUN, clean", out)
+
+    def test_tip_seat_re_raising_an_earlier_finding_refused(self):
+        r2, r3 = self.setup_history()
+        body = self.verdict.read_text().replace("\nPASS\n", "\nFAIL\n" + self.F3 + "\n", 1)
+        data = json.loads(body.split("```review-verdict\n")[1].split("\n```")[0])
+        data["verdict"] = "FAIL"
+        data["findings"] = [{"severity": "P2", "file_line": "lib/x.ts:12", "text": self.F3[3:]}]
+        self.verdict.write_text(body.split("```review-verdict\n")[0] + "```review-verdict\n" + json.dumps(data) + "\n```\n")
+        os.utime(self.verdict, (R10_MTIME, R10_MTIME))
+        (self.out / "review-file.md5").write_text(hashlib.md5(self.verdict.read_bytes()).hexdigest() + "\n")
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("DRY RUN, clean", out)
+
+    def test_lead_omitting_an_own_gate_finding_refused(self):
+        r2, r3 = self.setup_history()
+        lead = json.loads(self.lead.read_text())
+        lead["findings"] = lead["findings"][:1]
+        self.lead.write_text(json.dumps(lead))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("DRY RUN, clean", out)
+
+    def test_lead_downgrading_an_open_own_gate_finding_refused(self):
+        r2, r3 = self.setup_history(r7_status=("closed", "open"))
+        lead = json.loads(self.lead.read_text())
+        lead["findings"][1] = {"id": "F2", "source_line": self.F3, "verdict": "noted", "category": "other",
+                               "reason": "cosmetic", "ordinary_use": "none: rare"}
+        self.lead.write_text(json.dumps(lead))
+        code, out = self.run_gate("--dry-run", verdicts=[r2, r3, self.verdict], cleared=())
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("DRY RUN, clean", out)

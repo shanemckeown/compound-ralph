@@ -370,18 +370,21 @@ def main(argv=None):
             earlier.append(v)
     # LUCY-shb7s: an own-gate seat (a --verdict outside Ops/reviews, e.g. the /goal evidence dir) rides along
     # ONLY as an earlier-finding input, so a review of the tip can grade its findings fixed. It never joins
-    # `independent` or `at_tip`, so it can never approve the tip or be fixed_by (LUCY-zyybo). It counts only with
-    # exactly one REVIEWING echo naming another commit, naming this bead; anything else stays out, so a finding
+    # `independent` or `at_tip`, so it can never approve the tip or be fixed_by (LUCY-zyybo), and the checker gets
+    # it as --earlier-input (never a seat, never the tip, round older than every seat's). It counts only with
+    # exactly one REVIEWING line naming an exact 40-hex sha of another commit (words after the sha allowed, a /goal
+    # habit; never for a review of the tip) and naming this bead; anything else stays a plain input, so a finding
     # it raised can't be graded fixed. Builder evidence (echo-free) never counts.
+    own_earlier = []
     for v in verdicts:
         if v in independent or chk.is_builder_evidence(v.name):
             continue
         body = v.read_text(errors="ignore")
-        echo_lines = re.findall(r"(?m)^\s*REVIEWING:.*$", body)
-        echoed = [m.group(1).lower() for m in REVIEWING.finditer(body)]
-        if (len(echo_lines) == 1 and len(echoed) == 1 and not tip.startswith(echoed[0])
-                and lbs.mentions_bead(body, a.bead)):
-            earlier.append(v)
+        echo_lines = re.findall(r"(?m)^[ \t]*REVIEWING:.*$", body)
+        m = chk.LENIENT_ECHO.fullmatch(echo_lines[0]) if len(echo_lines) == 1 else None
+        if m and not tip.startswith(m.group(2).lower()) and lbs.mentions_bead(body, a.bead):
+            own_earlier.append(v)
+    earlier += own_earlier
     # A review of an earlier round's commit may ride along only to have its findings graded (a
     # carried escalation, or "fixed" by a review of the tip); approval needs a review of the tip
     # itself, and an earlier review must predate every review of the tip.
@@ -445,7 +448,7 @@ def main(argv=None):
 
     argv_chk = ["--lead", a.lead, "--out-dir", a.out_dir, "--round", str(a.round), "--bead", a.bead]
     for v in verdicts:
-        argv_chk += ["--verdict", str(v)]
+        argv_chk += ["--earlier-input" if v in own_earlier else "--verdict", str(v)]
     if a.scope_lock:
         argv_chk.append("--scope-lock")
     for c in a.cleared_escalation:
