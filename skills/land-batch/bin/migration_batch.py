@@ -899,12 +899,12 @@ def reconcile_migration_tree(
 PG_MAX_IDENTIFIER_BYTES = 63  # NAMEDATALEN - 1
 
 
-def _pg_ident(name: str) -> str:
+def _pg_ident(name: str, limit: int = PG_MAX_IDENTIFIER_BYTES) -> str:
     """The name Postgres stores: clipped to 63 bytes on a character boundary (LUCY-6djvj).
 
     Drizzle snapshots keep the full name (FKs routinely reach 65+ bytes), pg_catalog the clipped one.
     """
-    return name.encode("utf-8")[:PG_MAX_IDENTIFIER_BYTES].decode("utf-8", errors="ignore")
+    return name.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def _schema_objects(
@@ -929,7 +929,8 @@ def _schema_objects(
             raise MigrationBatchError(
                 f"snapshot {kind} {'.'.join(full_names[(kind, key)])} and {'.'.join(full)} "
                 f"collide after {PG_MAX_IDENTIFIER_BYTES}-byte truncation")
-        objects[kind][key] = value
+        if value is not MISSING:
+            objects[kind][key] = value
         return key
 
     for table_value in snapshot.get("tables", {}).values():
@@ -942,6 +943,13 @@ def _schema_objects(
             column = column_value.get("name")
             if column:
                 put("columns", (schema, table, column), column_value)
+        if any(column.get("primaryKey") for column in table_value.get("columns", {}).values()):
+            # A column-level primary key is named by Postgres (makeObjectName), not the snapshot.
+            # Reserve its name so a long snapshot name clipping onto it cannot stand in for
+            # missing DDL (own-gate r3, LUCY-6djvj). Reserved only: no expectation is added.
+            pkey = _pg_ident(table, PG_MAX_IDENTIFIER_BYTES - len("_pkey")) + "_pkey"
+            put("constraints", (schema, table, pkey), MISSING)
+            put("indexes", (schema, table, pkey), MISSING)
         for group in ("foreignKeys", "uniqueConstraints", "checkConstraints", "compositePrimaryKeys"):
             for constraint_value in table_value.get(group, {}).values():
                 name = constraint_value.get("name")

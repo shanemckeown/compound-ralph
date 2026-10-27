@@ -743,3 +743,26 @@ def test_replacement_sharing_truncated_name_with_base_fails_closed():
         migration_batch._expected_delta(base, _fk_snapshot("t", prefix + "_new"))
     # The same long name carried unchanged from base to final is not a collision.
     assert migration_batch._expected_delta(base, _fk_snapshot("t", prefix + "_old"))["constraints"] == {}
+
+
+def test_long_name_clipping_onto_implicit_primary_key_fails_closed():
+    """Own-gate r3: a 58-byte table's column primary key is T_pkey (63 bytes, named by Postgres).
+
+    An omitted CHECK named T_pkey_check would otherwise match that primary key.
+    """
+    table = "t" * 58
+    base = {"tables": {f"public.{table}": {"schema": "", "name": table, "indexes": {},
+                                            "columns": {"id": {"name": "id", "primaryKey": True}}}}}
+    final = json.loads(json.dumps(base))
+    final["tables"][f"public.{table}"]["checkConstraints"] = {"c": {"name": table + "_pkey_check"}}
+    with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
+        migration_batch._expected_delta(base, final)
+    # The reservation adds no expectation: an unchanged primary-key table has an empty delta.
+    assert all(not objects for objects in migration_batch._expected_delta(base, base).values())
+    # A longer table: Postgres clips the table part to 58 bytes before "_pkey".
+    long_table = "u" * 70
+    final = {"tables": {"x": {"schema": "", "name": long_table, "indexes": {},
+                              "columns": {"id": {"name": "id", "primaryKey": True}},
+                              "checkConstraints": {"c": {"name": "u" * 58 + "_pkey_and_more"}}}}}
+    with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
+        migration_batch._expected_delta({"tables": {}}, final)
