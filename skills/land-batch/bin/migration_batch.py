@@ -897,6 +897,9 @@ def reconcile_migration_tree(
 
 
 PG_MAX_IDENTIFIER_BYTES = 63  # NAMEDATALEN - 1
+# Drizzle snapshot constraint group -> pg_constraint.contype.
+CONSTRAINT_TYPES = {"foreignKeys": "f", "uniqueConstraints": "u", "checkConstraints": "c",
+                    "compositePrimaryKeys": "p"}
 
 
 def _pg_ident(name: str, limit: int = PG_MAX_IDENTIFIER_BYTES) -> str:
@@ -905,6 +908,11 @@ def _pg_ident(name: str, limit: int = PG_MAX_IDENTIFIER_BYTES) -> str:
     Drizzle snapshots keep the full name (FKs routinely reach 65+ bytes), pg_catalog the clipped one.
     """
     return name.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+
+
+def _is_clipped(definition: Any) -> bool:
+    name = definition.get("name") if isinstance(definition, dict) else None
+    return isinstance(name, str) and _pg_ident(name) != name
 
 
 def _schema_objects(
@@ -924,13 +932,11 @@ def _schema_objects(
         # for the other's missing DDL, so refuse rather than overwrite (Astra r1, LUCY-6djvj).
         # Shared across base and final by _expected_delta, so a replacement whose DDL is
         # missing cannot match the old object left in pg_catalog (independent review 1).
-        # Constraints and indexes share one provenance namespace: a UNIQUE or primary-key
-        # constraint's backing index carries its name (own-gate r4).
+        # Names Postgres generates itself are caught at verify time by type and definition.
         key = tuple(_pg_ident(part) for part in full)
-        namespace = "constraints/indexes" if kind in ("constraints", "indexes") else kind
-        if full_names.setdefault((namespace, key), full) != full:
+        if full_names.setdefault((kind, key), full) != full:
             raise MigrationBatchError(
-                f"snapshot {namespace} {'.'.join(full_names[(namespace, key)])} and {'.'.join(full)} "
+                f"snapshot {kind} {'.'.join(full_names[(kind, key)])} and {'.'.join(full)} "
                 f"collide after {PG_MAX_IDENTIFIER_BYTES}-byte truncation")
         if value is not MISSING:
             objects[kind][key] = value
@@ -952,11 +958,14 @@ def _schema_objects(
             # missing DDL (own-gate r3, LUCY-6djvj). Reserved only: no expectation is added.
             pkey = _pg_ident(table, PG_MAX_IDENTIFIER_BYTES - len("_pkey")) + "_pkey"
             put("constraints", (schema, table, pkey), MISSING)
-        for group in ("foreignKeys", "uniqueConstraints", "checkConstraints", "compositePrimaryKeys"):
+            put("indexes", (schema, table, pkey), MISSING)
+        for group, contype in CONSTRAINT_TYPES.items():
             for constraint_value in table_value.get(group, {}).values():
                 name = constraint_value.get("name")
                 if name:
-                    put("constraints", (schema, table, name), constraint_value)
+                    put("constraints", (schema, table, name), {**constraint_value, "_contype": contype})
+                    if contype in ("u", "p"):  # its backing index carries the same name (own-gate r4)
+                        put("indexes", (schema, table, name), MISSING)
         for index_value in table_value.get("indexes", {}).values():
             name = index_value.get("name")
             if name:
@@ -1141,7 +1150,7 @@ def _database_objects(server: dict[str, Any], database: str) -> dict[str, Any]:
     queries = {
         "tables": "SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2",
         "columns": "SELECT table_schema, table_name, column_name, is_nullable FROM information_schema.columns WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,ordinal_position",
-        "constraints": "SELECT n.nspname, c.relname, con.conname FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
+        "constraints": "SELECT n.nspname, c.relname, con.conname, con.contype FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
         "indexes": "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
         # Uniqueness and definition, so an index is checked for what it enforces, not just its name.
         "index_definitions": "SELECT n.nspname, t.relname, i.relname, CASE WHEN x.indisunique THEN 't' ELSE 'f' END, regexp_replace(pg_get_indexdef(x.indexrelid), E'[\\n\\r\\t\\x1e]+', ' ', 'g') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3",
@@ -1166,7 +1175,8 @@ def _verify_expected_objects(
     errors = []
     actual_tables = {tuple(row) for row in actual["tables"]}
     actual_columns = {tuple(row[:3]): row[3] for row in actual["columns"]}
-    actual_constraints = {tuple(row) for row in actual["constraints"]}
+    actual_constraints = {tuple(row[:3]): (row[3] if len(row) > 3 else None)
+                          for row in actual["constraints"]}
     actual_indexes = {tuple(row) for row in actual["indexes"]}
     for key in expected["tables"]:
         if key not in actual_tables:
@@ -1180,16 +1190,24 @@ def _verify_expected_objects(
             errors.append(
                 f"column {'.'.join(key)} nullable={actual_columns[key]}, expected {expected_nullable}"
             )
-    for key in expected["constraints"]:
+    for key, definition in expected["constraints"].items():
         if key not in actual_constraints:
             errors.append(f"missing constraint {'.'.join(key)}")
+            continue
+        # A name clipped to 63 bytes can belong to another object, including one Postgres
+        # named itself (T_pkey, T_col_key), so prove its type too (own-gate r3/r5, LUCY-6djvj).
+        want, have = definition.get("_contype"), actual_constraints[key]
+        if want and have and have != want:
+            errors.append(f"constraint {'.'.join(key)} is type {have!r}, expected {want!r}")
+        elif want and not have and _is_clipped(definition):
+            errors.append(f"constraint {'.'.join(key)}: type unreadable, cannot prove a truncated name")
     definitions = {tuple(row[:3]): (row[3] == "t", row[4])
                    for row in actual.get("index_definitions", []) if len(row) >= 5}
     for key, definition in expected["indexes"].items():
         if key not in actual_indexes:
             errors.append(f"missing index {'.'.join(key)}")
             continue
-        if not strict:
+        if not strict and not _is_clipped(definition):
             continue  # from-empty: name-only, as before; strict is the baseline proof for inheritance
         if key not in definitions:
             errors.append(f"index {'.'.join(key)}: definition unreadable, cannot prove it")

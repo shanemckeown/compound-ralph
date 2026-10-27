@@ -68,11 +68,16 @@ async function main() {
     ),
     constraints: await rows(
       integration.db,
-      "SELECT n.nspname, c.relname, con.conname FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3"
+      "SELECT n.nspname, c.relname, con.conname, con.contype FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3"
     ),
     indexes: await rows(
       integration.db,
       "SELECT schemaname, tablename, indexname FROM pg_indexes WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3"
+    ),
+    // As the native backend: a truncated index name is proven by its definition (LUCY-6djvj).
+    index_definitions: await rows(
+      integration.db,
+      "SELECT n.nspname, t.relname, i.relname, CASE WHEN x.indisunique THEN 't' ELSE 'f' END, regexp_replace(pg_get_indexdef(x.indexrelid), E'[\\n\\r\\t]+', ' ', 'g') FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2,3"
     ),
   };
   await base.db.close();

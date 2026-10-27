@@ -698,11 +698,11 @@ def test_long_constraint_name_matches_postgres_truncated_name():
     expected = migration_batch._expected_delta({"tables": {}}, _fk_snapshot(table, fk))
     stored = fk[:63]
     actual = {"tables": [("public", table)], "columns": [], "indexes": [],
-              "constraints": [("public", table, stored)]}
+              "constraints": [("public", table, stored, "f")]}
     assert migration_batch._verify_expected_objects(expected, actual) == []
     assert migration_batch._verify_expected_objects(expected, actual, strict=True) == []
     # A genuinely missing constraint still fails, under its stored name.
-    actual["constraints"] = [("public", table, "client_record_change_requests_client_id_clients_id_fk")]
+    actual["constraints"] = [("public", table, "client_record_change_requests_client_id_clients_id_fk", "f")]
     assert migration_batch._verify_expected_objects(expected, actual) == [
         f"missing constraint public.{table}.{stored}"]
 
@@ -779,3 +779,53 @@ def test_index_clipping_onto_unique_constraint_backing_index_fails_closed():
                                 "indexes": {"i": {"name": prefix + "_active_unique"}}}}}
     with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
         migration_batch._expected_delta(base, final)
+
+
+def test_check_and_index_sharing_truncated_name_are_not_refused():
+    """Own-gate r5 P2: a CHECK has no backing index, so it may share a clipped name with an index."""
+    table = "client_record_change_requests"
+    prefix = "client_record_change_requests_business_id_client_id_request_type"
+    final = {"tables": {table: {"schema": "", "name": table, "columns": {},
+                                "checkConstraints": {"c": {"name": prefix + "_check"}},
+                                "indexes": {"i": {"name": prefix + "_idx"}}}}}
+    expected = migration_batch._expected_delta({"tables": {}}, final)
+    assert len(expected["constraints"]) == len(expected["indexes"]) == 1
+
+
+def test_truncated_constraint_name_matching_another_type_fails():
+    """Own-gate r5 P1: an FK whose clipped name equals a UNIQUE constraint Postgres named
+    itself (T_col_key) must not pass when the FK DDL is missing."""
+    table = "client_record_change_requests"
+    fk = "client_record_change_requests_external_submission_reference_key_fk"
+    stored = migration_batch._pg_ident(fk)
+    expected = migration_batch._expected_delta({"tables": {}}, _fk_snapshot(table, fk))
+    actual = {"tables": [("public", table)], "columns": [], "indexes": [],
+              "constraints": [("public", table, stored, "u")]}
+    for strict in (False, True):
+        assert migration_batch._verify_expected_objects(expected, actual, strict=strict) == [
+            f"constraint public.{table}.{stored} is type 'u', expected 'f'"]
+    # No type in the catalog row: a truncated name cannot be proven.
+    actual["constraints"] = [("public", table, stored)]
+    assert "type unreadable" in migration_batch._verify_expected_objects(expected, actual)[0]
+
+
+def test_truncated_index_name_is_proven_by_definition_from_empty():
+    """Own-gate r4: from-empty is name-only, except where the name was truncated."""
+    table = "client_record_change_requests"
+    name = "client_record_change_requests_business_id_client_id_request_type_active_unique"
+    stored = migration_batch._pg_ident(name)
+    final = {"tables": {table: {"schema": "", "name": table, "columns": {}, "indexes": {"i": {
+        "name": name, "isUnique": True, "where": "deleted_at IS NULL",
+        "columns": [{"expression": "business_id", "isExpression": False}]}}}}}
+    expected = migration_batch._expected_delta({"tables": {}}, final)
+
+    def actual(indexdef, unique="t"):
+        return {"tables": [("public", table)], "columns": [], "constraints": [],
+                "indexes": [("public", table, stored)],
+                "index_definitions": [("public", table, stored, unique, indexdef)]}
+
+    good = f"CREATE UNIQUE INDEX {stored} ON public.{table} USING btree (business_id) WHERE (deleted_at IS NULL)"
+    assert migration_batch._verify_expected_objects(expected, actual(good)) == []
+    old = f"CREATE UNIQUE INDEX {stored} ON public.{table} USING btree (business_id)"
+    assert "predicate" in migration_batch._verify_expected_objects(expected, actual(old))[0]
+    assert "unique=False" in migration_batch._verify_expected_objects(expected, actual(good, "f"))[0]
