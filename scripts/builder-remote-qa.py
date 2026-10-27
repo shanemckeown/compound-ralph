@@ -16,39 +16,36 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    differ from sha (<reason>)`), and the local lane's scratch is an exact checkout-index copy.
 2. Admission (Cloud Build quota cloudbuild.googleapis.com/ongoing_builds, quota id
    OngoingBuildsPerProject, project aestheticc, region global; shared with prod builds and
-   landing gates). The project limit is read once per run:
-   `gcloud beta quotas preferences describe ongoing-builds-20 --project=aestheticc
-   --format=value(quotaConfig.grantedValue)`; a failed, empty or non-integer read means 10.
-   Admission is a slot semaphore: N = (limit - BUILDER_QA_RESERVE) // 2 runs (each run is 2
-   builds), so 10 -> 3 and 20 -> 8. The reserve (for prod + landing) is never below
-   MIN_RESERVE = 4: a lower BUILDER_QA_RESERVE is clamped, and BUILDER_QA_MAX_INFLIGHT /
-   --max-inflight (in builds) can only LOWER N (a higher one is clamped, with a note).
+   landing gates). Capacity is FIXED in this file: GRANTED_BUILDS = 10 (the granted limit),
+   RESERVE = 4 (always kept free for prod + landing), so N = (10 - 4) // 2 = 3 runs (each run
+   is 2 builds). A human edits GRANTED_BUILDS when the quota changes; nothing reads it at run
+   time. BUILDER_QA_MAX_INFLIGHT / --max-inflight (in builds) can only LOWER N (a higher one
+   is clamped, with a note).
    A run takes a free slot by flock(LOCK_EX | LOCK_NB) on SLOT_DIR/slot-<i> (i < N), polling
    every --poll seconds up to --admit-wait, then falls back local. The locked fd stays open for
    the whole run and is passed to the runner (pass_fds), so the kernel holds the slot until the
    last process with the fd exits: SIGKILL, pid reuse and a runner that outlives this wrapper
    are all covered with no bookkeeping. (uv passes the fd on to the runner; the runner's own
    short gcloud calls do not inherit it, so the slot lives exactly as long as the runner.) The
-   holder note in the file is for humans only. No ledger is kept (only the .limit value below).
-   One capacity value for everyone: under a short gate lock (SLOT_DIR/.admit) a caller reads
-   SLOT_DIR/.limit (the granted limit the previous caller read), uses min(its own read, .limit)
-   for its slot count and its deny-only guard, then writes its own read to .limit, so a lowered
-   quota binds every caller at once. Holders of ANY slot-* file at or above that count (from a
-   higher limit) count as occupied, so at most N runs are ever held. SLOT_DIR is always
-   <account home from the password database>/.claude/state/builder-qa-slots: no env var or
-   HOME value can select another one (tests pass main(slots_dir=...)).
+   holder note in the file is for humans only. No ledger or state file is kept.
+   Under a short gate lock (SLOT_DIR/.admit), holders of ANY slot-* file at or above N (e.g.
+   left from before GRANTED_BUILDS was lowered) count as occupied, so at most N runs are ever
+   held. SLOT_DIR is always <account home from the password database>/.claude/state/
+   builder-qa-slots: no env var or HOME value can select another one (tests pass
+   main(slots_dir=...)).
    The slot outlives every run whose runner was launched but gave no green/red verdict (exit
    130, infra, a lost response, ids never printed, one id only). It is held until a FIXED
-   bound, measured on our own clock: wall time just before the runner was launched + the gate
-   config's timeout (2100 s) + a 20 min queue allowance, raised to startTime + timeout + 10 min
-   whenever `gcloud builds describe` gives a later startTime (Cloud Build times a build from
-   its execution start). The only early release: both lanes' build ids are known and describe
-   shows each one TERMINAL (polled every 30 s). Describe errors and unknown statuses keep
-   holding. A fallback local lane runs while the slot is still held; the rest of the bound is
-   held at exit. A second SIGTERM/SIGINT during the exit wait ends the process (default
-   action) and the kernel frees the slot: accepted.
+   bound, measured on our own clock: wall time just before the runner was launched + the
+   Cloud Build queue TTL (3600 s) + the gate config's timeout (2100 s) + 10 min, raised to
+   startTime + timeout + 10 min whenever `gcloud builds describe` gives a later startTime
+   (Cloud Build times a build from its execution start). The only early release: both lanes'
+   build ids are known and describe shows each one TERMINAL (polled every 30 s). Describe
+   errors and unknown statuses keep holding. Then the slot is released, and only then does
+   the local fallback run, outside the semaphore. A runner that never started (it could not
+   be executed) is not held. A second SIGTERM/SIGINT during the wait ends the process
+   (default action) and the kernel frees the slot: accepted.
    Deny-only guard, while holding the slot: one `gcloud builds list --ongoing`; if ongoing + 2 >
-   the granted limit, or the list fails, the slot is dropped and the run falls back local. That
+   GRANTED_BUILDS, or the list fails, the slot is dropped and the run falls back local. That
    read can only deny, never admit beyond the slots, so a lagging list is harmless.
    Builders on other machines are not covered by the lock; this one laptop runs the fleet.
 3. Remote verdict: runner exit 0 WITH its `RESULT unit=SUCCESS pg=SUCCESS exit 0` line ->
@@ -61,7 +58,9 @@ existing runner ~/.claude/scripts/cloudbuild-gate-remote.py (unchanged).
    test pins them): tsc-heavy, lint, node + dom jest, mobile jest, the full pg lane under
    pg-lane-lock.py, then `npm run build`, stopping at the first failure. Its exit is the
    verdict: `LOCAL GREEN @<sha>` (0), `LOCAL RED @<sha>` (that step's exit), or `LOCAL INFRA
-   @<sha>` (no node_modules, lock unavailable, command missing: still non-zero).
+   @<sha>` (no node_modules, lock unavailable, command missing: still non-zero). A fallback
+   lane has a hard overall FALLBACK_TIMEOUT (45 min): past it the step's process group is
+   killed and the run is LOCAL INFRA, never green.
    SIGTERM/SIGINT pass to the runner's process group (it cancels its builds) and exit 130 with
    no fallback. If the runner has not exited after KILL_GRACE (longer than its own signal
    join bound plus its cancels), its group is SIGKILLed and every build id it printed gets a
@@ -87,6 +86,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -97,18 +97,22 @@ GATED = [sys.executable, str(SCRIPTS / "gated-test-run.py")]
 PG_LOCK = [sys.executable, str(SCRIPTS / "pg-lane-lock.py"), "--"]
 TIER_GATES = SCRIPTS.parent / "skills" / "land-batch" / "bin" / "tier_gates.py"
 PROJECT, REGION = "aestheticc", "global"
-QUOTA_PREFERENCE = "ongoing-builds-20"
-FALLBACK_LIMIT = 10  # the project's granted ongoing-builds limit when it cannot be read
-MIN_RESERVE = 4  # builds always kept free for prod builds and landing gates; never lower
+# Fixed capacity. A human edits GRANTED_BUILDS when the project's Cloud Build ongoing-builds
+# quota changes (gcloud beta quotas preferences describe ongoing-builds-20 --project=aestheticc).
+GRANTED_BUILDS = 10
+RESERVE = 4  # builds always kept free for prod builds and landing gates
 BUILDS_PER_RUN = 2  # the runner submits two lanes (unit + pg)
+SLOTS = (GRANTED_BUILDS - RESERVE) // BUILDS_PER_RUN  # 3
 GCLOUD_TIMEOUT = 90
 EXPECTED_LANES = ("unit", "pg")  # the runner submits exactly these two builds
-QUEUE_ALLOWANCE = 1200  # s a submitted build may sit queued before it starts executing
+QUEUE_TTL = 3600  # s Cloud Build may keep a submitted build queued before it starts executing
+FALLBACK_TIMEOUT = 45 * 60  # hard bound on the whole local fallback lane; then LOCAL INFRA
+EXIT_LOCAL_TIMEOUT = 124
 # The runner's SIGTERM path: SIGNAL_JOIN_BOUND (20 s) for hung submits, then a cancel per lane
 # (each a quick gcloud call, normally seconds). Wait well past both before SIGKILL.
 KILL_GRACE = 180
 # A local step exit that means "could not run", not "the code is red".
-LOCAL_INFRA_CODES = {3, 126, 127}  # pg-lane-lock unavailable, cannot execute, not found
+LOCAL_INFRA_CODES = {3, 124, 126, 127}  # pg-lane-lock unavailable, timed out, cannot execute, not found
 # BUILDER_QA_REMOTE=1 / =0 picks remote / local; unset uses this.
 REMOTE_DEFAULT = True
 LOG = Path.home() / ".claude" / "state" / "builder-remote-qa.jsonl"
@@ -140,44 +144,21 @@ def qa_remote(env=None):
     return REMOTE_DEFAULT
 
 
-def parse_limit(result):
-    """(limit, note) from the quota read's (code, stdout, stderr); FALLBACK_LIMIT unless clean."""
-    code, out, err = result
-    value = (out or "").strip().strip("'\"")
-    if code != 0:
-        return FALLBACK_LIMIT, f"quota read failed (exit {code}: {(err or '').strip()[-200:]}); limit {FALLBACK_LIMIT}"
-    if not value.isdigit() or int(value) <= 0:
-        return FALLBACK_LIMIT, f"quota read returned {value!r}; limit {FALLBACK_LIMIT}"
-    return int(value), f"granted limit {int(value)}"
-
-
-def builder_slots(limit, env=None, override=None):
-    """(slots, note): N = (limit - reserve) // 2 concurrent builder runs (2 builds each).
-
-    The reserve never drops below MIN_RESERVE; an override (BUILDER_QA_MAX_INFLIGHT or
-    --max-inflight, in builds) can only lower N.
-    """
+def builder_slots(env=None, override=None):
+    """(slots, note): SLOTS concurrent builder runs; an override (BUILDER_QA_MAX_INFLIGHT or
+    --max-inflight, in builds) can only lower it."""
     env = os.environ if env is None else env
-    notes = []
-    reserve = MIN_RESERVE
-    raw_reserve = env.get("BUILDER_QA_RESERVE", "").strip()
-    if raw_reserve.isdigit():
-        reserve = int(raw_reserve)
-        if reserve < MIN_RESERVE:
-            notes.append(f"BUILDER_QA_RESERVE={reserve} clamped to {MIN_RESERVE}")
-            reserve = MIN_RESERVE
-    ceiling = max(0, limit - reserve) // BUILDS_PER_RUN
-    slots, how = ceiling, f"(limit {limit} - reserve {reserve}) // {BUILDS_PER_RUN}"
+    slots, how, notes = SLOTS, f"({GRANTED_BUILDS} - reserve {RESERVE}) // {BUILDS_PER_RUN}", []
     raw = override if override is not None else env.get("BUILDER_QA_MAX_INFLIGHT", "").strip()
     if str(raw).strip():
         try:
             wanted = int(raw) // BUILDS_PER_RUN
         except ValueError:
             wanted = None
-        if wanted is not None and 0 <= wanted <= ceiling:
-            slots, how = wanted, f"override {raw} builds (ceiling {ceiling})"
-        elif wanted is not None and wanted > ceiling:
-            notes.append(f"override {raw} builds clamped to {ceiling} slots")
+        if wanted is not None and 0 <= wanted <= SLOTS:
+            slots, how = wanted, f"override {raw} builds (ceiling {SLOTS})"
+        elif wanted is not None and wanted > SLOTS:
+            notes.append(f"override {raw} builds clamped to {SLOTS} slots")
     note = f"{slots} slots = {how}" + (f" ({'; '.join(notes)})" if notes else "")
     return slots, note
 
@@ -245,15 +226,6 @@ def run_gcloud(args):
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def read_limit(gcloud):
-    try:
-        result = gcloud(["beta", "quotas", "preferences", "describe", QUOTA_PREFERENCE,
-                         f"--project={PROJECT}", "--format=value(quotaConfig.grantedValue)", "--quiet"])
-    except Exception as exc:  # noqa: BLE001 (unreadable = the fallback limit; Interrupted is not an Exception)
-        result = (127, "", str(exc))
-    return parse_limit(result)
-
-
 def ongoing_ids(gcloud):
     """The set of ongoing build ids, or None when the list cannot be read (infra)."""
     try:
@@ -274,9 +246,8 @@ class Slot:
     wrapper whose runner is still uploading keeps the slot until the runner dies too.
     """
 
-    def __init__(self, fd, index, path, limit=None, slots=None):
+    def __init__(self, fd, index, path):
         self.fd, self.index, self.path = fd, index, path
-        self.limit, self.slots = limit, slots  # the effective capacity it was admitted under
 
     def release(self):
         if self.fd is not None:
@@ -300,22 +271,6 @@ def slot_index(path):
     return int(suffix) if suffix.isdigit() else None
 
 
-def read_shared_limit(directory):
-    """The granted limit the last admitted caller read (slots/.limit), or None."""
-    try:
-        text = (Path(directory) / ".limit").read_text().strip()
-    except OSError:
-        return None
-    return int(text) if text.isdigit() else None
-
-
-def write_shared_limit(directory, limit):
-    try:
-        (Path(directory) / ".limit").write_text(f"{int(limit)}\n")
-    except OSError:
-        pass  # the next caller then trusts only its own read: still capped by it
-
-
 def slot_held(path):
     """True if another open file description holds slot `path` (a probe lock is dropped at once)."""
     try:
@@ -333,31 +288,18 @@ def slot_held(path):
     return False
 
 
-def try_acquire(directory, slots, note="", limit=None, slots_for=None):
-    """A Slot below the effective slot count whose flock is free, or None.
+def try_acquire(directory, slots, note=""):
+    """A Slot below index `slots` whose flock is free, or None.
 
-    Everything happens under a short directory gate lock (.admit), so there is one capacity
-    value for everyone. With `limit` (this caller's granted-limit read) and `slots_for`
-    (limit -> slots): the effective limit is min(limit, slots/.limit), the effective slot count
-    min(slots, slots_for(that)), and slots/.limit is then set to this caller's read, so a
-    lowered quota binds every caller at once. Holders of ANY slot-* file at or above the
-    effective count (left from a higher limit) count as occupied, so at most that many runs
-    are ever held. Files are never deleted. The note (pid, sha, time) is for humans only.
-    The returned Slot carries the effective limit for the deny-only guard.
+    Under a short directory gate lock (.admit): holders of ANY slot-* file at or above `slots`
+    (left from a higher capacity) count as occupied, so at most `slots` runs are ever held.
+    Files are never deleted. The note (pid, sha, time) is for humans; admission never reads it.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     gate = os.open(directory / ".admit", os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(gate, fcntl.LOCK_EX)
-        effective = limit
-        if limit is not None:
-            shared = read_shared_limit(directory)
-            if shared is not None and shared < limit:
-                effective = shared
-                if slots_for is not None:
-                    slots = min(slots, slots_for(shared))
-            write_shared_limit(directory, limit)
         if slots <= 0:
             return None
         held_high = sum(slot_held(path) for path in directory.glob("slot-*")
@@ -384,7 +326,7 @@ def try_acquire(directory, slots, note="", limit=None, slots_for=None):
                 os.pwrite(fd, note.encode(), 0)
             except OSError:
                 pass  # the note is cosmetic
-            return Slot(fd, index, path, effective, slots)
+            return Slot(fd, index, path)
         return None
     finally:
         os.close(gate)
@@ -438,7 +380,7 @@ def hold_until_terminal(gcloud, build_ids, timeout, submit_start, sleep, wall, s
     release, False at the bound.
 
     The bound is FIXED from our own clock: submit_start (wall time just before the runner was
-    launched) + the gate timeout + QUEUE_ALLOWANCE. Cloud Build measures its timeout from
+    launched) + QUEUE_TTL + the gate timeout + TERMINAL_MARGIN. Cloud Build measures its timeout from
     startTime, so whenever describe gives a startTime, the bound is raised to the latest
     startTime + timeout + TERMINAL_MARGIN: a build whose execution started late is never
     released while it can still run. The only early release: BOTH expected lanes have a known
@@ -448,7 +390,7 @@ def hold_until_terminal(gcloud, build_ids, timeout, submit_start, sleep, wall, s
     """
     ids = {lane: build_ids.get(lane) for lane in EXPECTED_LANES}
     known = {lane: b for lane, b in ids.items() if b}
-    bound = submit_start + timeout + QUEUE_ALLOWANCE
+    bound = submit_start + QUEUE_TTL + timeout + TERMINAL_MARGIN
     terminal = set()
     announced = False
     while True:
@@ -474,7 +416,7 @@ def hold_until_terminal(gcloud, build_ids, timeout, submit_start, sleep, wall, s
             announced = True
         sleep(TERMINAL_POLL)
 
-def admit(gcloud, slots, limit, wait, poll, sleep, clock, say, directory, note, slots_for=None):
+def admit(gcloud, slots, wait, poll, sleep, clock, say, directory, note):
     """(slot or None, waited seconds, reason).
 
     1. Take a free slot (poll every `poll` s up to `wait` s). The slots are the admission.
@@ -488,12 +430,12 @@ def admit(gcloud, slots, limit, wait, poll, sleep, clock, say, directory, note, 
     announced = False
     slot = None
     while slot is None:
-        slot = try_acquire(directory, slots, note, limit, slots_for) if slots > 0 else None
+        slot = try_acquire(directory, slots, note) if slots > 0 else None
         waited = clock() - started
         if slot is not None:
             break
         if slots <= 0:
-            return None, waited, "no builder slots (limit - reserve < 2 builds)"
+            return None, waited, "no builder slots (override 0)"
         if waited >= wait:
             return None, waited, f"admission: all {slots} builder slots busy after {waited:.0f}s wait"
         if not announced:
@@ -508,13 +450,12 @@ def admit(gcloud, slots, limit, wait, poll, sleep, clock, say, directory, note, 
     if listed is None:
         slot.release()
         return None, waited, "gcloud builds list failed (deny-only guard cannot read; not submitting blind)"
-    if slot.limit is not None:
-        limit = min(limit, slot.limit)  # the shared (lowest current) limit, read under .admit
-    if len(listed) + BUILDS_PER_RUN > limit:
+    if len(listed) + BUILDS_PER_RUN > GRANTED_BUILDS:
         slot.release()
         return None, waited, (f"deny-only guard: {len(listed)} ongoing + {BUILDS_PER_RUN} > granted "
-                              f"limit {limit}")
-    return slot, waited, f"slot {slot.index} of {slots}; {len(listed)} ongoing + {BUILDS_PER_RUN} <= {limit}"
+                              f"limit {GRANTED_BUILDS}")
+    return slot, waited, (f"slot {slot.index} of {slots}; {len(listed)} ongoing + {BUILDS_PER_RUN} <= "
+                          f"{GRANTED_BUILDS}")
 
 
 def git(*args, cwd=None):
@@ -608,20 +549,33 @@ class Child:
         self.grace = KILL_GRACE
         self.build_ids = {}
         self.pass_fds = ()  # the held slot's fd, for the runner only
+        self.deadline = None  # time.monotonic() bound on the local fallback lane, or None
 
 
-def stream(command, cwd, env, say, child, grace=KILL_GRACE, pass_fds=()):
-    """Run command in its own process group, echoing output line by line. Returns (code, output)."""
+def stream(command, cwd, env, say, child, grace=KILL_GRACE, pass_fds=(), timeout=None):
+    """Run command in its own process group, echoing output line by line. Returns (code, output).
+    Past `timeout` seconds the whole group is SIGKILLed and the code is EXIT_LOCAL_TIMEOUT."""
     proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
                             pass_fds=tuple(pass_fds))
     child.proc, child.grace = proc, grace  # stays set on an exception, so main() can stop it
+    timer = None
+    if timeout is not None:
+        timer = threading.Timer(max(0.0, timeout), _signal_group, (proc, signal.SIGKILL))
+        timer.daemon = True
+        timer.start()
     lines = []
-    for line in proc.stdout:
-        lines.append(line)
-        say(line.rstrip("\n"))
-    code = proc.wait()
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            say(line.rstrip("\n"))
+        code = proc.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
     child.proc = None
+    if timer is not None and timer.finished.is_set() and code < 0:
+        code = EXIT_LOCAL_TIMEOUT  # killed by the deadline, not a test result
     return code, "".join(lines)
 
 
@@ -676,10 +630,15 @@ def run_local(scratch, worktree, say, child):
         say(f"LOCAL UNAVAILABLE: no node_modules in {worktree}")
         return EXIT_LOCAL_UNAVAILABLE, "node_modules"
     for label, command, overrides, removals in local_steps():
+        left = None if child.deadline is None else child.deadline - time.monotonic()
+        if left is not None and left <= 0:
+            return EXIT_LOCAL_TIMEOUT, f"{label} (fallback timeout {FALLBACK_TIMEOUT}s)"
         say(f"==> local {label}: {' '.join(command)}")
         code, _ = stream(command, str(scratch), step_env(os.environ, overrides, removals), say, child,
-                         grace=30)
+                         grace=30, timeout=left)
         say(f"<== local {label}: exit {code}")
+        if code == EXIT_LOCAL_TIMEOUT and left is not None:
+            return code, f"{label} (fallback timeout {FALLBACK_TIMEOUT}s)"
         if code != 0:
             return code, label
     return EXIT_GREEN, None
@@ -699,11 +658,6 @@ def _interrupt(signum, _frame):
     raise Interrupted(signal.Signals(signum).name)
 
 
-def unresolved_submit(holder):
-    """True once the runner was launched and gave no green/red verdict: builds may be running."""
-    return holder.get("submit_start") is not None and not holder.get("terminal_ok")
-
-
 def release_slot(holder, child, gcloud, sleep, wall, say):
     """Close the held slot. After any launch of the runner that ended without its own green/red
     verdict (exit 130, infra, a lost response, ids never printed, one id only), first hold it
@@ -711,7 +665,7 @@ def release_slot(holder, child, gcloud, sleep, wall, say):
     slot = holder.get("slot")
     if slot is None or slot.fd is None:
         return
-    if unresolved_submit(holder):
+    if holder.get("submit_start") is not None and not holder.get("terminal_ok"):
         timeout = gate_timeout(holder.get("scratch") or ".")
         holder["terminal_ok"] = hold_until_terminal(gcloud, child.build_ids, timeout,
                                                     holder["submit_start"], sleep, wall, say)
@@ -733,7 +687,7 @@ def main(argv=None, gcloud=run_gcloud, remote=run_remote, local=run_local, scrat
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sha", default="HEAD")
     ap.add_argument("--max-inflight", default=None, help="builds; can only lower the slot count (else "
-                                                          "BUILDER_QA_MAX_INFLIGHT; never above limit - 4)")
+                                                          "BUILDER_QA_MAX_INFLIGHT; never above SLOTS)")
     ap.add_argument("--admit-wait", type=float, default=600)
     ap.add_argument("--poll", type=float, default=30)
     ap.add_argument("--keep-scratch", action="store_true")
@@ -811,10 +765,10 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     scratch = holder["scratch"] = scratch_maker(sha, worktree, exact=bool(differs))
 
     def fall_back(reason):
-        # Nothing submitted: drop the slot before the local lane. Submitted without a verdict:
-        # keep holding it through the local lane; main() holds the rest of the bound at exit.
-        if not unresolved_submit(holder):
-            release_slot(holder, child, gcloud, sleep, wall, say)
+        # Hold until any submitted build is terminal (or the bound), release the slot, and only
+        # then run the local lane, outside the semaphore and under FALLBACK_TIMEOUT.
+        release_slot(holder, child, gcloud, sleep, wall, say)
+        child.deadline = time.monotonic() + FALLBACK_TIMEOUT
         say(f"FALLBACK local: {reason}")
         record["reason"] = reason
         return _local(scratch, worktree, sha, local, say, record, child, mode="fallback")
@@ -826,13 +780,12 @@ def _run(args, worktree, env, gcloud, remote, local, scratch_maker, sleep, clock
     if differs:
         return fall_back(f"archive would differ from sha ({'; '.join(differs)})")
 
-    limit, limit_note = read_limit(gcloud)  # once per run, never cached across runs
-    slots, slots_note = builder_slots(limit, env, args.max_inflight)
-    record.update(limit=limit, slots=slots)
-    say(f"admission: {limit_note}; {slots_note}")
+    slots, slots_note = builder_slots(env, args.max_inflight)
+    record.update(limit=GRANTED_BUILDS, slots=slots)
+    say(f"admission: granted limit {GRANTED_BUILDS} (fixed); {slots_note}")
     note = f"pid {os.getpid()} sha {sha} since {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
-    slot, waited, why = admit(gcloud, slots, limit, args.admit_wait, args.poll, sleep, clock, say,
-                              slots_dir, note, lambda lim: builder_slots(lim, env, args.max_inflight)[0])
+    slot, waited, why = admit(gcloud, slots, args.admit_wait, args.poll, sleep, clock, say,
+                              slots_dir, note)
     record["queue_wait_s"] = round(waited, 1)
     if slot is None:
         return fall_back(why)

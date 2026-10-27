@@ -45,17 +45,15 @@ def repo(tmp_path):
 
 
 class Gcloud:
-    """Scripted gcloud: a quota read and a sequence of `builds list --ongoing` counts."""
+    """Scripted gcloud: a sequence of `builds list --ongoing` counts and build statuses."""
 
-    def __init__(self, ongoing=(0,), limit=(0, "10\n", ""), list_code=0, statuses=None):
-        self.ongoing, self.limit, self.list_code = list(ongoing), limit, list_code
+    def __init__(self, ongoing=(0,), list_code=0, statuses=None):
+        self.ongoing, self.list_code = list(ongoing), list_code
         self.statuses = statuses or {}
         self.calls = []
 
     def __call__(self, args):
         self.calls.append(args)
-        if args[:3] == ["beta", "quotas", "preferences"]:
-            return self.limit
         if args[:2] == ["builds", "list"]:
             if self.list_code:
                 return self.list_code, "", "ERROR: (gcloud.builds.list) reauth needed"
@@ -206,19 +204,6 @@ def test_qa_remote_env_pattern(value, expected):
     assert bq.qa_remote({"BUILDER_QA_REMOTE": value}) is expected
 
 
-@pytest.mark.parametrize("result,limit", [
-    ((1, "", "ERROR: not found"), 10),
-    ((127, "", "no gcloud"), 10),
-    ((0, "", ""), 10),
-    ((0, "ten\n", ""), 10),
-    ((0, "0\n", ""), 10),
-    ((0, "20\n", ""), 20),
-    ((0, "'20'\n", ""), 20),
-])
-def test_parse_limit(result, limit):
-    assert bq.parse_limit(result)[0] == limit
-
-
 @pytest.mark.parametrize("local", [(0, "npm run build"), (0, "node_modules")])
 def test_local_zero_with_a_failed_step_is_never_green(repo, tmp_path, local):
     code, out, _, _, _, _ = run(repo, tmp_path, remote=(137, ""), local=local)
@@ -282,7 +267,7 @@ def test_local_steps_pg_lane_is_locked_and_node_lane_drops_pg_env():
 def test_run_local_stops_at_first_red(tmp_path, monkeypatch):
     ran = []
     monkeypatch.setattr(bq, "link_node_modules", lambda s, w: tmp_path)
-    monkeypatch.setattr(bq, "stream", lambda cmd, cwd, env, say, child, grace=0: (ran.append(cmd) or (1, "")))
+    monkeypatch.setattr(bq, "stream", lambda cmd, cwd, env, say, child, grace=0, timeout=None: (ran.append(cmd) or (1, "")))
     code, failed = bq.run_local(tmp_path, tmp_path, lambda _: None, bq.Child())
     assert (code, failed) == (1, "tsc-heavy") and len(ran) == 1
 
@@ -337,8 +322,8 @@ class SignalAt(Gcloud):
         return super().__call__(args)
 
 
-@pytest.mark.parametrize("at", ["beta", "builds"])
-def test_signal_during_quota_read_or_admission_poll_exits_130(repo, tmp_path, at):
+@pytest.mark.parametrize("at", ["builds"])
+def test_signal_during_admission_guard_exits_130(repo, tmp_path, at):
     code, out, calls, _, records, _ = run(repo, tmp_path, gcloud=SignalAt(at), remote=(0, GREEN_OUT),
                                           local=(0, None))
     assert code == 130
@@ -477,44 +462,31 @@ def test_exact_scratch_keeps_what_archive_drops(repo):
 
 # ---------------------------------------------------------------- slot semaphore (r3 redesign)
 
-@pytest.mark.parametrize("limit,slots", [(10, 3), (20, 8), (11, 3), (6, 1), (5, 0), (3, 0)])
-def test_slots_are_limit_minus_4_over_2(limit, slots):
-    assert bq.builder_slots(limit, {})[0] == slots
+def test_n_is_the_fixed_constant():
+    assert (bq.GRANTED_BUILDS, bq.RESERVE, bq.SLOTS) == (10, 4, 3)
+    assert bq.builder_slots({})[0] == 3
 
 
 @pytest.mark.parametrize("env,override,slots", [
-    ({"BUILDER_QA_RESERVE": "0"}, None, 3),        # reserve clamped up to 4
-    ({"BUILDER_QA_RESERVE": "2"}, None, 3),
-    ({"BUILDER_QA_RESERVE": "6"}, None, 2),        # a bigger reserve is honoured
     ({"BUILDER_QA_MAX_INFLIGHT": "10"}, None, 3),  # an override above the ceiling is clamped
     ({}, "99", 3),
     ({"BUILDER_QA_MAX_INFLIGHT": "4"}, None, 2),   # lowering works (4 builds = 2 runs)
     ({}, "2", 1),
     ({}, "0", 0),
+    ({"BUILDER_QA_RESERVE": "0"}, None, 3),        # the old reserve env var changes nothing
 ])
-def test_override_only_lowers_and_reserve_never_below_4(env, override, slots):
-    got, note = bq.builder_slots(10, env, override)
+def test_override_only_lowers(env, override, slots):
+    got, note = bq.builder_slots(env, override)
     assert got == slots
-    if env.get("BUILDER_QA_RESERVE") in ("0", "2") or override == "99" or env.get("BUILDER_QA_MAX_INFLIGHT") == "10":
+    if override == "99" or env.get("BUILDER_QA_MAX_INFLIGHT") == "10":
         assert "clamped" in note
 
 
-def test_granted_20_gives_8_slots_end_to_end(repo, tmp_path):
-    gcloud = Gcloud(limit=(0, "20\n", ""))
-    code, out, calls, _, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT), local=(1, "x"))
-    assert records[-1]["slots"] == 8 and calls["remote"] == 1 and code == 0
-
-
-def test_quota_read_failure_means_limit_10_and_3_slots(repo, tmp_path):
-    gcloud = Gcloud(limit=(1, "", "ERROR: quota api"))
+def test_no_quota_read_at_run_time(repo, tmp_path):
+    gcloud = Gcloud()
     _, _, calls, _, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT), local=(1, "x"))
     assert records[-1]["limit"] == 10 and records[-1]["slots"] == 3 and calls["remote"] == 1
-
-
-def test_quota_read_once_per_run(repo, tmp_path):
-    gcloud = Gcloud()
-    run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT), local=(0, None))
-    assert sum(1 for c in gcloud.calls if c[0] == "beta") == 1
+    assert all(c[0] == "builds" for c in gcloud.calls)
 
 
 SLOT_CHILD = r"""
@@ -705,13 +677,13 @@ def test_no_ledger_file_is_written_anywhere(repo, tmp_path, monkeypatch):
     run(repo, tmp_path, remote=(137, ""), local=(1, "x"))
     written = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
     written = {p for p in written if not p.startswith("wt/")}
-    assert written <= {"log.jsonl", "slots/slot-0", "slots/.admit", "slots/.limit"}, written
+    assert written <= {"log.jsonl", "slots/slot-0", "slots/.admit"}, written
     assert not hasattr(bq, "Reservations") and not hasattr(bq, "RESERVATIONS")
 
 
 # ---------------------------------------------------------------- rounds 4-6: hold, capacity, namespace
 
-BOUND = bq.DEFAULT_GATE_TIMEOUT + bq.QUEUE_ALLOWANCE  # submit start 0 + 2100 + 1200 = 3300
+BOUND = bq.QUEUE_TTL + bq.DEFAULT_GATE_TIMEOUT + bq.TERMINAL_MARGIN  # 0 + 3600 + 2100 + 600 = 6300
 
 
 def busy(directory):
@@ -746,12 +718,18 @@ def watched_clock(tmp_path):
 def test_runner_ceiling_with_builds_still_working_holds_the_slot_until_terminal(repo, tmp_path):
     clock = watched_clock(tmp_path)
     gcloud = Gcloud(statuses=lambda b: "WORKING" if clock.now < 90 else "SUCCESS")
+    during_local = []
+
+    def local(scratch, worktree, say, child):
+        during_local.append(busy(tmp_path / "slots"))
+        return 1, "lint"
     code, out, calls, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=lanes_then(137),
-                                    local=(1, "lint"), clock=clock)
+                                    local=local, clock=clock)
+    assert during_local == [False]  # released before the fallback ran
     assert clock.sleeps == [30, 30, 30] and all(h for _, h in clock.held)
     assert "HOLD: keeping the builder slot (known builds: u-7, p-7" in out
     assert calls == {"remote": 1, "local": 1} and code == 1
-    assert out.index("FALLBACK local") < out.index("HOLD:")  # the local lane does not wait
+    assert out.index("HOLD:") < out.index("FALLBACK local")
     assert not busy(tmp_path / "slots")
 
 
@@ -801,16 +779,16 @@ def test_b_only_one_id_known_holds_the_full_bound_even_if_it_is_terminal(repo, t
 
 
 def test_c_late_execution_start_is_never_released_while_working(repo, tmp_path):
-    """(c) a 1200 s queue delay: startTime 1200 > createTime 0; Cloud Build times from start."""
+    """(c) upload 120 s then a full 3600 s queue: startTime 3720; Cloud Build times from start."""
     clock = watched_clock(tmp_path)
     seen = []
 
     def describe(build_id):
         seen.append((clock.now, busy(tmp_path / "slots")))
-        return {"status": "WORKING", "startTime": "1970-01-01T00:20:00Z", "timeout": "2100s"}
+        return {"status": "WORKING", "startTime": "1970-01-01T01:02:00Z", "timeout": "2100s"}
     code, _, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=describe), remote=lanes_then(137),
                               local=(0, None), clock=clock)
-    assert clock.now == 1200 + 2100 + bq.TERMINAL_MARGIN > BOUND  # 3900, past the fixed bound
+    assert clock.now == 3720 + 2100 + bq.TERMINAL_MARGIN > BOUND  # 6420, past the fixed bound
     assert all(h for _, h in seen) and all(h for _, h in clock.held) and code == 0
     assert not busy(tmp_path / "slots")
 
@@ -890,39 +868,6 @@ def test_unheld_high_slot_files_do_not_count(tmp_path):
         s.release()
 
 
-def slots_for(limit):
-    return bq.builder_slots(limit, {})[0]
-
-
-def test_stale_limit_20_caller_after_three_limit_10_holders_is_refused(tmp_path):
-    directory = tmp_path / "slots"
-    held = [bq.try_acquire(directory, slots_for(10), "", 10, slots_for) for _ in range(3)]
-    assert all(held) and (directory / ".limit").read_text().strip() == "10"
-    try:
-        assert bq.try_acquire(directory, slots_for(20), "", 20, slots_for) is None
-    finally:
-        for s in held:
-            s.release()
-
-
-def test_a_lowered_limit_binds_the_next_higher_caller(tmp_path):
-    directory = tmp_path / "slots"
-    (directory).mkdir()
-    (directory / ".limit").write_text("10\n")
-    slot = bq.try_acquire(directory, slots_for(20), "", 20, slots_for)
-    assert slot.limit == 10 and slot.slots == 3
-    slot.release()
-
-
-def test_deny_guard_uses_the_shared_lower_limit(repo, tmp_path):
-    (tmp_path / "slots").mkdir()
-    (tmp_path / "slots" / ".limit").write_text("10\n")
-    gcloud = Gcloud(limit=(0, "20\n", ""), ongoing=(9,))
-    code, out, calls, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT), local=(1, "x"))
-    assert calls == {"remote": 0, "local": 1}
-    assert "deny-only guard: 9 ongoing + 2 > granted limit 10" in out
-
-
 def test_slot_fd_reaches_the_real_runner_through_stream(tmp_path, monkeypatch):
     """Fails if stream()/run_remote stop passing pass_fds: the child must hold the lock alone."""
     directory = tmp_path / "slots"
@@ -966,3 +911,34 @@ def test_launcher_env_vars_cannot_select_another_slot_dir(repo, tmp_path, monkey
     assert code == 0
     assert (account / ".claude" / "state" / "builder-qa-slots" / "slot-0").exists()
     assert not (tmp_path / "other").exists() and not (tmp_path / "elsewhere").exists()
+
+
+def test_queued_at_3300s_is_still_held(repo, tmp_path):
+    """A build still QUEUED (no startTime) at 3300 s: inside the queue TTL, so still held."""
+    clock = watched_clock(tmp_path)
+    code, _, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=lambda b: "QUEUED"),
+                              remote=lanes_then(137), local=(0, None), clock=clock)
+    held_at = dict(clock.held)
+    assert held_at[3300] is True and clock.now == BOUND and all(held_at.values()) and code == 0
+    assert not busy(tmp_path / "slots")
+
+
+def test_fallback_hang_releases_the_slot_first_and_times_out_as_local_infra(repo, tmp_path, monkeypatch):
+    (repo / "node_modules").mkdir()
+    monkeypatch.setattr(bq, "FALLBACK_TIMEOUT", 1.0)
+    monkeypatch.setattr(bq, "local_steps", lambda: [
+        ("hang", [sys.executable, "-c", "import time; print('hanging', flush=True); time.sleep(60)"], {}, ()),
+        ("never", [sys.executable, "-c", "raise SystemExit(0)"], {}, ())])
+    seen = []
+
+    def local(scratch, worktree, say, child):
+        seen.append(busy(tmp_path / "slots"))
+        return bq.run_local(scratch, worktree, say, child)
+    gcloud = Gcloud(statuses={"u-7": "SUCCESS", "p-7": "SUCCESS"})
+    started = time.monotonic()
+    code, out, _, _, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=lanes_then(137), local=local)
+    assert time.monotonic() - started < 30
+    assert seen == [False]  # the slot was released before the fallback started
+    assert code == bq.EXIT_LOCAL_TIMEOUT and "LOCAL INFRA @" in out and "LOCAL GREEN" not in out
+    assert records[-1]["verdict"] == "local-infra" and "fallback timeout" in records[-1]["failed_step"]
+    assert "==> local never" not in out
