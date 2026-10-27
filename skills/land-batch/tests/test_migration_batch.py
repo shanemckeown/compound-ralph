@@ -729,3 +729,17 @@ def test_names_colliding_after_truncation_fail_closed(order):
     final["tables"][f"public.{table}"]["foreignKeys"][names[1]] = {"name": names[1]}
     with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
         migration_batch._expected_delta(base, final)
+
+
+def test_replacement_sharing_truncated_name_with_base_fails_closed():
+    """Independent review 1: base P+'_old', final P+'_new' (P = 63 bytes), migration omits the DDL.
+
+    The old constraint stays in pg_constraint under the clipped key, so a name-only check
+    would pass the missing replacement.
+    """
+    prefix = "p" * 63
+    base = _fk_snapshot("t", prefix + "_old")
+    with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
+        migration_batch._expected_delta(base, _fk_snapshot("t", prefix + "_new"))
+    # The same long name carried unchanged from base to final is not a collision.
+    assert migration_batch._expected_delta(base, _fk_snapshot("t", prefix + "_old"))["constraints"] == {}

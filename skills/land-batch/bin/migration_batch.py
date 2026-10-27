@@ -907,18 +907,23 @@ def _pg_ident(name: str) -> str:
     return name.encode("utf-8")[:PG_MAX_IDENTIFIER_BYTES].decode("utf-8", errors="ignore")
 
 
-def _schema_objects(snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
+def _schema_objects(
+    snapshot: dict[str, Any], full_names: dict[tuple, tuple] | None = None,
+) -> dict[str, dict[Any, Any]]:
     objects: dict[str, dict[Any, Any]] = {
         "tables": {},
         "columns": {},
         "constraints": {},
         "indexes": {},
     }
-    full_names: dict[tuple, tuple] = {}
+    if full_names is None:
+        full_names = {}
 
     def put(kind: str, full: tuple, value: Any) -> tuple:
         # Two names clipping to one key: Postgres cannot hold both, and one would stand in
         # for the other's missing DDL, so refuse rather than overwrite (Astra r1, LUCY-6djvj).
+        # Shared across base and final by _expected_delta, so a replacement whose DDL is
+        # missing cannot match the old object left in pg_catalog (independent review 1).
         key = tuple(_pg_ident(part) for part in full)
         if full_names.setdefault((kind, key), full) != full:
             raise MigrationBatchError(
@@ -950,8 +955,9 @@ def _schema_objects(snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
 
 
 def _expected_delta(base_snapshot: dict[str, Any], final_snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
-    base_objects = _schema_objects(base_snapshot)
-    final_objects = _schema_objects(final_snapshot)
+    full_names: dict[tuple, tuple] = {}
+    base_objects = _schema_objects(base_snapshot, full_names)
+    final_objects = _schema_objects(final_snapshot, full_names)
     return {
         kind: {
             key: value
