@@ -66,7 +66,9 @@ class Gcloud:
             status = self.statuses(args[2]) if callable(self.statuses) else self.statuses.get(args[2], "SUCCESS")
             if status is None:
                 return 1, "", "ERROR: describe failed"
-            return 0, json.dumps({"id": args[2], "status": status, "createTime": "1970-01-01T00:00:00Z"}), ""
+            build = {"id": args[2], "createTime": "1970-01-01T00:00:00Z"}
+            build.update(status if isinstance(status, dict) else {"status": status})
+            return 0, json.dumps(build), ""
         if args[:2] == ["builds", "cancel"]:
             return 1, "", "ERROR: cancel failed"
         raise AssertionError(f"unexpected gcloud call {args}")
@@ -85,7 +87,11 @@ class Clock:
         self.now += seconds
 
 
-def run(repo, tmp_path, *, gcloud=None, remote=None, local=None, env=None, argv=(), clock=None):
+UNSET = object()
+
+
+def run(repo, tmp_path, *, gcloud=None, remote=None, local=None, env=None, argv=(), clock=None,
+        slots_dir=UNSET):
     gcloud = gcloud or Gcloud()
     clock = clock or Clock()
     calls = {"remote": 0, "local": 0}
@@ -110,12 +116,13 @@ def run(repo, tmp_path, *, gcloud=None, remote=None, local=None, env=None, argv=
         return local
 
     log = tmp_path / "log.jsonl"
-    env = {"BUILDER_QA_LOG": str(log), "BUILDER_QA_SLOT_DIR": str(tmp_path / "slots"),
-           "BUILDER_QA_TESTING": "1", **(env or {})}
+    env = {"BUILDER_QA_LOG": str(log), **(env or {})}
+    slots_dir = tmp_path / "slots" if slots_dir is UNSET else slots_dir
     out = io.StringIO()
     code = bq.main(list(argv), gcloud=gcloud, remote=fake_remote, local=fake_local,
                    scratch_maker=scratch_maker, sleep=clock.sleep, clock=clock.clock, out=out,
-                   env=env, cwd=repo, wall=clock.clock)
+                   env=env, cwd=repo, wall=clock.clock,
+                   slots_dir=slots_dir)
     records = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return code, out.getvalue(), calls, gcloud, records, clock
 
@@ -698,11 +705,14 @@ def test_no_ledger_file_is_written_anywhere(repo, tmp_path, monkeypatch):
     run(repo, tmp_path, remote=(137, ""), local=(1, "x"))
     written = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
     written = {p for p in written if not p.startswith("wt/")}
-    assert written <= {"log.jsonl", "slots/slot-0", "slots/.admit"}, written
+    assert written <= {"log.jsonl", "slots/slot-0", "slots/.admit", "slots/.limit"}, written
     assert not hasattr(bq, "Reservations") and not hasattr(bq, "RESERVATIONS")
 
 
-# ---------------------------------------------------------------- round 4: hold to terminal, high slots
+# ---------------------------------------------------------------- rounds 4-6: hold, capacity, namespace
+
+BOUND = bq.DEFAULT_GATE_TIMEOUT + bq.QUEUE_ALLOWANCE  # submit start 0 + 2100 + 1200 = 3300
+
 
 def busy(directory):
     probe = bq.try_acquire(directory, 1)
@@ -712,43 +722,46 @@ def busy(directory):
     return False
 
 
-def lanes_then(code):
+def lanes_then(code, lanes=(("unit", "u-7"), ("pg", "p-7"))):
     def remote(scratch, say, child):
-        say("LANE unit build u-7 https://x")
-        say("LANE pg build p-7 https://x")
+        for lane, build_id in lanes:
+            say(f"LANE {lane} build {build_id} https://x")
         return code, ""
     return remote
 
 
-def test_runner_ceiling_with_builds_still_working_holds_the_slot_until_terminal(repo, tmp_path):
+def watched_clock(tmp_path):
+    """A fake clock that records, at every sleep, whether the slot is still held."""
     clock = Clock()
-    seen = []
+    clock.held = []
+    original = clock.sleep
 
-    def status(build_id):
-        seen.append((clock.now, busy(tmp_path / "slots")))
-        return "WORKING" if clock.now < 90 else "SUCCESS"
-    code, out, calls, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=status), remote=lanes_then(137),
+    def sleep(seconds):
+        clock.held.append((clock.now, busy(tmp_path / "slots")))
+        original(seconds)
+    clock.sleep = sleep
+    return clock
+
+
+def test_runner_ceiling_with_builds_still_working_holds_the_slot_until_terminal(repo, tmp_path):
+    clock = watched_clock(tmp_path)
+    gcloud = Gcloud(statuses=lambda b: "WORKING" if clock.now < 90 else "SUCCESS")
+    code, out, calls, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=lanes_then(137),
                                     local=(1, "lint"), clock=clock)
-    assert seen and all(held for _, held in seen)  # every describe saw the slot still held
-    assert clock.sleeps == [30, 30, 30] and "HOLD: keeping the builder slot until u-7, p-7" in out
+    assert clock.sleeps == [30, 30, 30] and all(h for _, h in clock.held)
+    assert "HOLD: keeping the builder slot (known builds: u-7, p-7" in out
     assert calls == {"remote": 1, "local": 1} and code == 1
-    assert out.index("HOLD:") < out.index("FALLBACK local")
+    assert out.index("FALLBACK local") < out.index("HOLD:")  # the local lane does not wait
     assert not busy(tmp_path / "slots")
 
 
 @pytest.mark.parametrize("status", ["WORKING", None, "SOMETHING_NEW"])
-def test_never_terminal_frees_only_at_the_hard_bound(repo, tmp_path, status):
-    clock = Clock()
-    seen = []
-
-    def describe(build_id):
-        seen.append((clock.now, busy(tmp_path / "slots")))
-        return status
-    code, out, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=describe), remote=lanes_then(137),
-                                local=(0, None), clock=clock)
-    bound = bq.DEFAULT_GATE_TIMEOUT + bq.TERMINAL_MARGIN  # createTime 0 (or start 0) + 2100 + 600
-    assert clock.now == bound and all(held for _, held in seen) and seen[-1][0] == bound
-    assert "not confirmed terminal by the hard bound" in out and code == 0
+def test_never_terminal_frees_only_at_the_fixed_bound(repo, tmp_path, status):
+    clock = watched_clock(tmp_path)
+    code, out, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=lambda b: status),
+                                remote=lanes_then(137), local=(0, None), clock=clock)
+    assert clock.now == BOUND and all(h for _, h in clock.held) and clock.held[-1][0] == BOUND - 30
+    assert "hard bound reached" in out and code == 0
     assert not busy(tmp_path / "slots")
 
 
@@ -758,13 +771,62 @@ def test_bound_uses_the_yaml_timeout(tmp_path):
     assert bq.gate_timeout(tmp_path / "missing") == bq.DEFAULT_GATE_TIMEOUT
 
 
-def test_interrupt_with_cancel_failing_holds_until_terminal(repo, tmp_path):
-    clock = Clock()
+def test_a_sigterm_after_two_accepts_with_no_ids_holds_to_the_bound(repo, tmp_path):
+    """(a) the server accepted both builds but no id was printed before the SIGTERM."""
+    clock = watched_clock(tmp_path)
+    accepted = []
+
+    def remote(scratch, say, child):
+        accepted.extend(["unit", "pg"])  # two fake server acceptances, ids never printed
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(1)
+        return 0, GREEN_OUT
+    gcloud = Gcloud()
+    code, out, calls, _, records, _ = run(repo, tmp_path, gcloud=gcloud, remote=remote, local=(0, None),
+                                          clock=clock)
+    assert code == 130 and accepted == ["unit", "pg"] and records[-1]["build_ids"] == {}
+    assert clock.now == BOUND and clock.held and all(h for _, h in clock.held)
+    assert not any(c[:2] == ["builds", "describe"] for c in gcloud.calls)
+    assert not busy(tmp_path / "slots")
+
+
+def test_b_only_one_id_known_holds_the_full_bound_even_if_it_is_terminal(repo, tmp_path):
+    clock = watched_clock(tmp_path)
+    gcloud = Gcloud(statuses={"u-1": "SUCCESS"})
+    code, _, _, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=lanes_then(137, (("unit", "u-1"),)),
+                              local=(0, None), clock=clock)
+    assert code == 0 and clock.now == BOUND and all(h for _, h in clock.held)
+    assert {c[2] for c in gcloud.calls if c[:2] == ["builds", "describe"]} == {"u-1"}
+    assert not busy(tmp_path / "slots")
+
+
+def test_c_late_execution_start_is_never_released_while_working(repo, tmp_path):
+    """(c) a 1200 s queue delay: startTime 1200 > createTime 0; Cloud Build times from start."""
+    clock = watched_clock(tmp_path)
     seen = []
 
-    def status(build_id):
-        seen.append(busy(tmp_path / "slots"))
-        return "WORKING" if clock.now < 60 else "CANCELLED"
+    def describe(build_id):
+        seen.append((clock.now, busy(tmp_path / "slots")))
+        return {"status": "WORKING", "startTime": "1970-01-01T00:20:00Z", "timeout": "2100s"}
+    code, _, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=describe), remote=lanes_then(137),
+                              local=(0, None), clock=clock)
+    assert clock.now == 1200 + 2100 + bq.TERMINAL_MARGIN > BOUND  # 3900, past the fixed bound
+    assert all(h for _, h in seen) and all(h for _, h in clock.held) and code == 0
+    assert not busy(tmp_path / "slots")
+
+
+def test_d_both_ids_terminal_release_early(repo, tmp_path):
+    clock = watched_clock(tmp_path)
+    gcloud = Gcloud(statuses={"u-7": "FAILURE", "p-7": "CANCELLED"})
+    code, out, _, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=lanes_then(137), local=(0, None),
+                                clock=clock)
+    assert code == 0 and clock.sleeps == [] and "HOLD:" not in out
+    assert len([c for c in gcloud.calls if c[:2] == ["builds", "describe"]]) == 2
+    assert not busy(tmp_path / "slots")
+
+
+def test_interrupt_with_cancel_failing_holds_until_terminal(repo, tmp_path):
+    clock = watched_clock(tmp_path)
 
     def remote(scratch, say, child):
         say("LANE unit build u-9 https://x")
@@ -772,10 +834,17 @@ def test_interrupt_with_cancel_failing_holds_until_terminal(repo, tmp_path):
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(1)
         return 0, GREEN_OUT
-    code, _, _, _, _, _ = run(repo, tmp_path, gcloud=Gcloud(statuses=status), remote=remote,
-                              local=(0, None), clock=clock)
-    assert code == 130 and seen and all(seen) and clock.sleeps == [30, 30]
+    gcloud = Gcloud(statuses=lambda b: "WORKING" if clock.now < 60 else "CANCELLED")
+    code, _, _, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=remote, local=(0, None), clock=clock)
+    assert code == 130 and clock.sleeps == [30, 30] and all(h for _, h in clock.held)
     assert not busy(tmp_path / "slots")
+
+
+def test_runner_that_never_started_is_not_held(repo, tmp_path):
+    def remote(scratch, say, child):
+        raise FileNotFoundError("uv")
+    code, out, calls, _, _, clock = run(repo, tmp_path, remote=remote, local=(0, None))
+    assert code == 0 and calls["local"] == 1 and clock.sleeps == [] and "HOLD:" not in out
 
 
 def test_green_and_red_runner_verdicts_need_no_hold(repo, tmp_path):
@@ -793,9 +862,10 @@ def hold_raw(directory, index):
     return fd
 
 
-def test_holder_on_slot_5_with_n_3_leaves_only_2_usable(tmp_path):
+@pytest.mark.parametrize("index", [5, 33])
+def test_a_held_high_slot_leaves_only_2_usable_at_n_3(tmp_path, index):
     directory = tmp_path / "slots"
-    fd = hold_raw(directory, 5)
+    fd = hold_raw(directory, index)
     try:
         got = [bq.try_acquire(directory, 3) for _ in range(3)]
         assert [s.index for s in got[:2]] == [0, 1] and got[2] is None
@@ -812,12 +882,45 @@ def test_holder_on_slot_5_with_n_3_leaves_only_2_usable(tmp_path):
 def test_unheld_high_slot_files_do_not_count(tmp_path):
     directory = tmp_path / "slots"
     directory.mkdir()
-    for i in range(3, 32):
+    for i in range(3, 40):
         (directory / f"slot-{i}").write_text("stale")
     got = [bq.try_acquire(directory, 3) for _ in range(3)]
     assert all(got)
     for s in got:
         s.release()
+
+
+def slots_for(limit):
+    return bq.builder_slots(limit, {})[0]
+
+
+def test_stale_limit_20_caller_after_three_limit_10_holders_is_refused(tmp_path):
+    directory = tmp_path / "slots"
+    held = [bq.try_acquire(directory, slots_for(10), "", 10, slots_for) for _ in range(3)]
+    assert all(held) and (directory / ".limit").read_text().strip() == "10"
+    try:
+        assert bq.try_acquire(directory, slots_for(20), "", 20, slots_for) is None
+    finally:
+        for s in held:
+            s.release()
+
+
+def test_a_lowered_limit_binds_the_next_higher_caller(tmp_path):
+    directory = tmp_path / "slots"
+    (directory).mkdir()
+    (directory / ".limit").write_text("10\n")
+    slot = bq.try_acquire(directory, slots_for(20), "", 20, slots_for)
+    assert slot.limit == 10 and slot.slots == 3
+    slot.release()
+
+
+def test_deny_guard_uses_the_shared_lower_limit(repo, tmp_path):
+    (tmp_path / "slots").mkdir()
+    (tmp_path / "slots" / ".limit").write_text("10\n")
+    gcloud = Gcloud(limit=(0, "20\n", ""), ongoing=(9,))
+    code, out, calls, _, _, _ = run(repo, tmp_path, gcloud=gcloud, remote=(0, GREEN_OUT), local=(1, "x"))
+    assert calls == {"remote": 0, "local": 1}
+    assert "deny-only guard: 9 ongoing + 2 > granted limit 10" in out
 
 
 def test_slot_fd_reaches_the_real_runner_through_stream(tmp_path, monkeypatch):
@@ -844,19 +947,22 @@ def test_slot_fd_reaches_the_real_runner_through_stream(tmp_path, monkeypatch):
     assert not busy(directory)
 
 
-def test_slot_dir_override_needs_testing_flag(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    fixed = tmp_path / "home" / ".claude" / "state" / "builder-qa-slots"
-    assert bq.slot_dir({"BUILDER_QA_SLOT_DIR": "/x", "BUILDER_QA_TESTING": "1"}) == (Path("/x"), None)
-    directory, note = bq.slot_dir({"BUILDER_QA_SLOT_DIR": "/x"})
-    assert directory == fixed and "BUILDER_QA_SLOT_DIR ignored" in note
-    assert bq.slot_dir({}) == (fixed, None)
+class Pw:
+    def __init__(self, home):
+        self.pw_dir = str(home)
 
 
-def test_main_prints_the_ignored_override_note_and_uses_the_fixed_dir(repo, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    code, out, _, _, _, _ = run(repo, tmp_path, remote=(0, GREEN_OUT), local=(1, "x"),
-                                env={"BUILDER_QA_TESTING": "0"})
-    assert code == 0 and "NOTE: BUILDER_QA_SLOT_DIR ignored" in out
-    assert (tmp_path / "home" / ".claude" / "state" / "builder-qa-slots" / "slot-0").exists()
-    assert not (tmp_path / "slots").exists()
+def test_launcher_env_vars_cannot_select_another_slot_dir(repo, tmp_path, monkeypatch):
+    """Both old env vars set, no PYTEST_CURRENT_TEST, a different HOME: the real dir is used."""
+    account = tmp_path / "account"
+    monkeypatch.setattr(bq.pwd, "getpwuid", lambda uid: Pw(account))
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    env = {"BUILDER_QA_SLOT_DIR": str(tmp_path / "other"), "BUILDER_QA_TESTING": "1"}
+    monkeypatch.setenv("BUILDER_QA_SLOT_DIR", env["BUILDER_QA_SLOT_DIR"])
+    monkeypatch.setenv("BUILDER_QA_TESTING", "1")
+    assert bq.slot_dir() == account / ".claude" / "state" / "builder-qa-slots"
+    code, _, _, _, _, _ = run(repo, tmp_path, remote=(0, GREEN_OUT), local=(1, "x"), env=env, slots_dir=None)
+    assert code == 0
+    assert (account / ".claude" / "state" / "builder-qa-slots" / "slot-0").exists()
+    assert not (tmp_path / "other").exists() and not (tmp_path / "elsewhere").exists()
