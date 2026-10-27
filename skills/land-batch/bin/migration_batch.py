@@ -924,10 +924,13 @@ def _schema_objects(
         # for the other's missing DDL, so refuse rather than overwrite (Astra r1, LUCY-6djvj).
         # Shared across base and final by _expected_delta, so a replacement whose DDL is
         # missing cannot match the old object left in pg_catalog (independent review 1).
+        # Constraints and indexes share one provenance namespace: a UNIQUE or primary-key
+        # constraint's backing index carries its name (own-gate r4).
         key = tuple(_pg_ident(part) for part in full)
-        if full_names.setdefault((kind, key), full) != full:
+        namespace = "constraints/indexes" if kind in ("constraints", "indexes") else kind
+        if full_names.setdefault((namespace, key), full) != full:
             raise MigrationBatchError(
-                f"snapshot {kind} {'.'.join(full_names[(kind, key)])} and {'.'.join(full)} "
+                f"snapshot {namespace} {'.'.join(full_names[(namespace, key)])} and {'.'.join(full)} "
                 f"collide after {PG_MAX_IDENTIFIER_BYTES}-byte truncation")
         if value is not MISSING:
             objects[kind][key] = value
@@ -949,7 +952,6 @@ def _schema_objects(
             # missing DDL (own-gate r3, LUCY-6djvj). Reserved only: no expectation is added.
             pkey = _pg_ident(table, PG_MAX_IDENTIFIER_BYTES - len("_pkey")) + "_pkey"
             put("constraints", (schema, table, pkey), MISSING)
-            put("indexes", (schema, table, pkey), MISSING)
         for group in ("foreignKeys", "uniqueConstraints", "checkConstraints", "compositePrimaryKeys"):
             for constraint_value in table_value.get(group, {}).values():
                 name = constraint_value.get("name")

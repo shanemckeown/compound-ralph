@@ -766,3 +766,16 @@ def test_long_name_clipping_onto_implicit_primary_key_fails_closed():
                               "checkConstraints": {"c": {"name": "u" * 58 + "_pkey_and_more"}}}}}
     with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
         migration_batch._expected_delta({"tables": {}}, final)
+
+
+def test_index_clipping_onto_unique_constraint_backing_index_fails_closed():
+    """Own-gate r4: a UNIQUE constraint's backing index shares its name; an omitted
+    replacement partial unique index would otherwise match the old backing index."""
+    table = "client_record_change_requests"
+    prefix = "client_record_change_requests_business_id_client_id_request_type"
+    base = {"tables": {table: {"schema": "", "name": table, "columns": {}, "indexes": {},
+                               "uniqueConstraints": {"u": {"name": prefix + "_deleted_at_unique"}}}}}
+    final = {"tables": {table: {"schema": "", "name": table, "columns": {},
+                                "indexes": {"i": {"name": prefix + "_active_unique"}}}}}
+    with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
+        migration_batch._expected_delta(base, final)
