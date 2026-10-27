@@ -896,6 +896,17 @@ def reconcile_migration_tree(
     return result
 
 
+PG_MAX_IDENTIFIER_BYTES = 63  # NAMEDATALEN - 1
+
+
+def _pg_ident(name: str) -> str:
+    """The name Postgres stores: clipped to 63 bytes on a character boundary (LUCY-6djvj).
+
+    Drizzle snapshots keep the full name (FKs routinely reach 65+ bytes), pg_catalog the clipped one.
+    """
+    return name.encode("utf-8")[:PG_MAX_IDENTIFIER_BYTES].decode("utf-8", errors="ignore")
+
+
 def _schema_objects(snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
     objects: dict[str, dict[Any, Any]] = {
         "tables": {},
@@ -904,25 +915,26 @@ def _schema_objects(snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
         "indexes": {},
     }
     for table_value in snapshot.get("tables", {}).values():
-        schema = table_value.get("schema") or "public"
+        schema = _pg_ident(table_value.get("schema") or "public")
         table = table_value.get("name")
         if not table:
             continue
+        table = _pg_ident(table)
         table_key = (schema, table)
         objects["tables"][table_key] = table_value
         for column_value in table_value.get("columns", {}).values():
             column = column_value.get("name")
             if column:
-                objects["columns"][(schema, table, column)] = column_value
+                objects["columns"][(schema, table, _pg_ident(column))] = column_value
         for group in ("foreignKeys", "uniqueConstraints", "checkConstraints", "compositePrimaryKeys"):
             for constraint_value in table_value.get(group, {}).values():
                 name = constraint_value.get("name")
                 if name:
-                    objects["constraints"][(schema, table, name)] = constraint_value
+                    objects["constraints"][(schema, table, _pg_ident(name))] = constraint_value
         for index_value in table_value.get("indexes", {}).values():
             name = index_value.get("name")
             if name:
-                objects["indexes"][(schema, table, name)] = index_value
+                objects["indexes"][(schema, table, _pg_ident(name))] = index_value
     return objects
 
 

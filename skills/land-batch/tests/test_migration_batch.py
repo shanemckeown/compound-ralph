@@ -683,3 +683,34 @@ def test_multiline_index_definition_row_does_not_crash():
     assert "unreadable" in migration_batch._verify_expected_objects(expected, actual, strict=True)[0]
     assert migration_batch._normal_predicate("((platform = 'whatsapp'::text) AND (disconnected_at IS NULL))") == \
         migration_batch._normal_predicate('"social_accounts"."platform" = \'whatsapp\' AND "social_accounts"."disconnected_at" IS NULL')
+
+
+def _fk_snapshot(table, fk_name):
+    return {"tables": {f"public.{table}": {"schema": "", "name": table, "columns": {},
+                                            "foreignKeys": {fk_name: {"name": fk_name}}, "indexes": {}}}}
+
+
+def test_long_constraint_name_matches_postgres_truncated_name():
+    """LUCY-6djvj: b0tb6 / 23n35 held on a 65-byte drizzle FK name; pg_constraint stores 63 bytes."""
+    table = "client_record_change_requests"
+    fk = "client_record_change_requests_business_id_business_profiles_id_fk"
+    assert len(fk.encode()) == 65
+    expected = migration_batch._expected_delta({"tables": {}}, _fk_snapshot(table, fk))
+    stored = fk[:63]
+    actual = {"tables": [("public", table)], "columns": [], "indexes": [],
+              "constraints": [("public", table, stored)]}
+    assert migration_batch._verify_expected_objects(expected, actual) == []
+    assert migration_batch._verify_expected_objects(expected, actual, strict=True) == []
+    # A genuinely missing constraint still fails, under its stored name.
+    actual["constraints"] = [("public", table, "client_record_change_requests_client_id_clients_id_fk")]
+    assert migration_batch._verify_expected_objects(expected, actual) == [
+        f"missing constraint public.{table}.{stored}"]
+
+
+def test_long_identifier_truncates_on_utf8_boundary():
+    name = "a" * 62 + "é" + "tail"  # é is 2 bytes and straddles byte 63
+    clipped = migration_batch._pg_ident(name)
+    assert clipped == "a" * 62
+    assert len(clipped.encode()) <= 63
+    assert migration_batch._pg_ident("short_name") == "short_name"
+    assert migration_batch._pg_ident("b" * 63) == "b" * 63
