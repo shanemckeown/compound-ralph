@@ -914,27 +914,38 @@ def _schema_objects(snapshot: dict[str, Any]) -> dict[str, dict[Any, Any]]:
         "constraints": {},
         "indexes": {},
     }
+    full_names: dict[tuple, tuple] = {}
+
+    def put(kind: str, full: tuple, value: Any) -> tuple:
+        # Two names clipping to one key: Postgres cannot hold both, and one would stand in
+        # for the other's missing DDL, so refuse rather than overwrite (Astra r1, LUCY-6djvj).
+        key = tuple(_pg_ident(part) for part in full)
+        if full_names.setdefault((kind, key), full) != full:
+            raise MigrationBatchError(
+                f"snapshot {kind} {'.'.join(full_names[(kind, key)])} and {'.'.join(full)} "
+                f"collide after {PG_MAX_IDENTIFIER_BYTES}-byte truncation")
+        objects[kind][key] = value
+        return key
+
     for table_value in snapshot.get("tables", {}).values():
-        schema = _pg_ident(table_value.get("schema") or "public")
+        schema = table_value.get("schema") or "public"
         table = table_value.get("name")
         if not table:
             continue
-        table = _pg_ident(table)
-        table_key = (schema, table)
-        objects["tables"][table_key] = table_value
+        put("tables", (schema, table), table_value)
         for column_value in table_value.get("columns", {}).values():
             column = column_value.get("name")
             if column:
-                objects["columns"][(schema, table, _pg_ident(column))] = column_value
+                put("columns", (schema, table, column), column_value)
         for group in ("foreignKeys", "uniqueConstraints", "checkConstraints", "compositePrimaryKeys"):
             for constraint_value in table_value.get(group, {}).values():
                 name = constraint_value.get("name")
                 if name:
-                    objects["constraints"][(schema, table, _pg_ident(name))] = constraint_value
+                    put("constraints", (schema, table, name), constraint_value)
         for index_value in table_value.get("indexes", {}).values():
             name = index_value.get("name")
             if name:
-                objects["indexes"][(schema, table, _pg_ident(name))] = index_value
+                put("indexes", (schema, table, name), index_value)
     return objects
 
 

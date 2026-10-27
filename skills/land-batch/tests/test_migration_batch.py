@@ -714,3 +714,18 @@ def test_long_identifier_truncates_on_utf8_boundary():
     assert len(clipped.encode()) <= 63
     assert migration_batch._pg_ident("short_name") == "short_name"
     assert migration_batch._pg_ident("b" * 63) == "b" * 63
+
+
+@pytest.mark.parametrize("order", [0, 1])
+def test_names_colliding_after_truncation_fail_closed(order):
+    """Astra r1: two names sharing 63 bytes must not let one stand in for the other's DDL."""
+    table = "client_record_change_requests"
+    names = ["client_record_change_requests_business_id_business_profiles_id_fk",
+             "client_record_change_requests_business_id_business_profiles_id_fk2"]
+    if order:
+        names.reverse()
+    base = _fk_snapshot(table, names[0])
+    final = _fk_snapshot(table, names[0])
+    final["tables"][f"public.{table}"]["foreignKeys"][names[1]] = {"name": names[1]}
+    with pytest.raises(migration_batch.MigrationBatchError, match="collide after 63-byte truncation"):
+        migration_batch._expected_delta(base, final)
